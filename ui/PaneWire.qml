@@ -322,6 +322,9 @@ Item {
         function onFailed(where, input, message, mode) {
             // A listing that failed cannot seat the row a peeked right click asked for, so its menu intent dies here.
             pane.pendingMenu = false
+            // A refused transfer leaves its classification behind, and the next
+            // one is then labelled with the kind of the one that never ran.
+            Ops.clearPendingKind(pane, where)
             var text = Errors.sentence(where, message)
             // A refused sort changes nothing in the backend, so it changes nothing here: a notice in the
             // plain role, never the error role, which is for a listing that stopped being true.
