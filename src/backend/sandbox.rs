@@ -107,8 +107,14 @@ mod tests {
     #[test]
     fn a_path_without_the_two_tools_reads_unavailable() {
         assert!(!available_on(""), "an empty PATH cannot hold either tool");
-        assert!(!available_on("::"), "empty components are skipped rather than treated as the root");
-        assert!(!available_on("/nonexistent-dir-for-this-test"), "a directory holding neither is not enough");
+        assert!(
+            !available_on("::"),
+            "empty components are skipped rather than treated as the root"
+        );
+        assert!(
+            !available_on("/nonexistent-dir-for-this-test"),
+            "a directory holding neither is not enough"
+        );
     }
 
     fn inner() -> Vec<String> {

@@ -16,27 +16,70 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(150);
 
 // What an operation thread sends back, joined onto the same receiver every other event already arrives on.
 pub enum OpMsg {
-    Progress { id: usize, index: usize, name: String, bytes: u64, total: u64 },
-    Item { id: usize, index: usize, name: String, ok: bool, err: String },
-    TransferDone { id: usize, ok: usize, failed: usize, skipped: usize, cancelled: bool, entry: Entry },
-    Trashed { ok: usize, failed: usize, entry: Entry },
-    Duplicated { ok: bool, path: String, err: String, entry: Entry },
+    Progress {
+        id: usize,
+        index: usize,
+        name: String,
+        bytes: u64,
+        total: u64,
+    },
+    Item {
+        id: usize,
+        index: usize,
+        name: String,
+        ok: bool,
+        err: String,
+    },
+    TransferDone {
+        id: usize,
+        ok: usize,
+        failed: usize,
+        skipped: usize,
+        cancelled: bool,
+        entry: Entry,
+    },
+    Trashed {
+        ok: usize,
+        failed: usize,
+        entry: Entry,
+    },
+    Duplicated {
+        ok: bool,
+        path: String,
+        err: String,
+        entry: Entry,
+    },
     // Not an operation: meta rides this channel because a media probe is a subprocess and the loop
     // must not wait on one. Nothing about it claims the one-at-a-time slot.
-    Meta { line: String },
+    Meta {
+        line: String,
+    },
 }
 
 // moving is the verb the request actually resolved to, so the client names the operation from the
 // wire rather than from a clipboard it may have already spent or never owned.
 pub fn transferstarted_line(id: usize, n: usize, moving: bool) -> String {
-    format!(r#"{{"t":"transferstarted","id":{},"n":{},"moving":{}}}"#, id, n, moving)
+    format!(
+        r#"{{"t":"transferstarted","id":{},"n":{},"moving":{}}}"#,
+        id, n, moving
+    )
 }
 
 // total is 0 for a directory, whose size is not known in advance without the sweep this codebase never does.
-pub fn transferprogress_line(id: usize, index: usize, name: &str, bytes: u64, total: u64) -> String {
+pub fn transferprogress_line(
+    id: usize,
+    index: usize,
+    name: &str,
+    bytes: u64,
+    total: u64,
+) -> String {
     format!(
         r#"{{"t":"transferprogress","id":{},"index":{},"name":"{}","bytes":{},"total":{}}}"#,
-        id, index, escape(name), bytes, total
+        id,
+        index,
+        escape(name),
+        bytes,
+        total
     )
 }
 
@@ -45,16 +88,27 @@ pub fn transferitem_line(id: usize, index: usize, name: &str, ok: bool, err: &st
     if ok {
         return format!(
             r#"{{"t":"transferitem","id":{},"index":{},"name":"{}","ok":true}}"#,
-            id, index, escape(name)
+            id,
+            index,
+            escape(name)
         );
     }
     format!(
         r#"{{"t":"transferitem","id":{},"index":{},"name":"{}","ok":false,"err":"{}"}}"#,
-        id, index, escape(name), escape(err)
+        id,
+        index,
+        escape(name),
+        escape(err)
     )
 }
 
-pub fn transferdone_line(id: usize, ok: usize, failed: usize, skipped: usize, cancelled: bool) -> String {
+pub fn transferdone_line(
+    id: usize,
+    ok: usize,
+    failed: usize,
+    skipped: usize,
+    cancelled: bool,
+) -> String {
     format!(
         r#"{{"t":"transferdone","id":{},"ok":{},"failed":{},"skipped":{},"cancelled":{}}}"#,
         id, ok, failed, skipped, cancelled
@@ -70,7 +124,11 @@ pub fn renamed_line(ok: bool, path: &str) -> String {
 }
 
 pub fn duplicated_line(ok: bool, path: &str) -> String {
-    format!(r#"{{"t":"duplicated","ok":{},"path":"{}"}}"#, ok, escape(path))
+    format!(
+        r#"{{"t":"duplicated","ok":{},"path":"{}"}}"#,
+        ok,
+        escape(path)
+    )
 }
 
 pub fn made_line(ok: bool, path: &str) -> String {
@@ -85,21 +143,35 @@ pub fn undone_line(op: &str, ok: bool) -> String {
 pub fn usable_dest(dest: &str) -> Result<PathBuf, FleaError> {
     let p = PathBuf::from(dest);
     if !p.is_absolute() {
-        return Err(op_err("transfer", dest, "a destination must be an absolute path"));
+        return Err(op_err(
+            "transfer",
+            dest,
+            "a destination must be an absolute path",
+        ));
     }
     match p.metadata() {
         Ok(m) if m.is_dir() => Ok(p),
-        Ok(_) => Err(op_err("transfer", dest, "the destination is not a directory")),
+        Ok(_) => Err(op_err(
+            "transfer",
+            dest,
+            "the destination is not a directory",
+        )),
         Err(e) => Err(op_err("transfer", dest, &e.to_string())),
     }
 }
 
 pub fn op_err(where_: &str, path: &str, msg: &str) -> FleaError {
-    FleaError { where_: where_.to_string(), path: path.to_string(), msg: msg.to_string() }
+    FleaError {
+        where_: where_.to_string(),
+        path: path.to_string(),
+        msg: msg.to_string(),
+    }
 }
 
 fn base_name(p: &Path) -> String {
-    p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+    p.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 // Copy or move, one top-level item at a time, reporting each item's own terminal line as it lands.
@@ -123,22 +195,50 @@ pub fn run_transfer(
         let src = PathBuf::from(raw);
         let name = base_name(&src);
         let dst = dest.join(&name);
-        match one_item(id, index, &name, moving, &src, &dst, &cancel, &tx, &mut steps) {
+        match one_item(
+            id, index, &name, moving, &src, &dst, &cancel, &tx, &mut steps,
+        ) {
             Ok(()) => {
                 ok += 1;
-                let _ = tx.send(OpMsg::Item { id, index, name, ok: true, err: String::new() });
+                let _ = tx.send(OpMsg::Item {
+                    id,
+                    index,
+                    name,
+                    ok: true,
+                    err: String::new(),
+                });
             }
             Err(e) => {
                 if e.msg == "cancelled" {
                     was_cancelled = true;
                 }
                 failed += 1;
-                let _ = tx.send(OpMsg::Item { id, index, name, ok: false, err: e.msg });
+                let _ = tx.send(OpMsg::Item {
+                    id,
+                    index,
+                    name,
+                    ok: false,
+                    err: e.msg,
+                });
             }
         }
     }
-    let entry = Entry { op: if moving { "move".to_string() } else { "copy".to_string() }, steps };
-    let _ = tx.send(OpMsg::TransferDone { id, ok, failed, skipped, cancelled: was_cancelled, entry });
+    let entry = Entry {
+        op: if moving {
+            "move".to_string()
+        } else {
+            "copy".to_string()
+        },
+        steps,
+    };
+    let _ = tx.send(OpMsg::TransferDone {
+        id,
+        ok,
+        failed,
+        skipped,
+        cancelled: was_cancelled,
+        entry,
+    });
 }
 
 // A directory has no total without a sweep, so only a file item reports bytes at all. Its journal
@@ -169,11 +269,24 @@ fn one_item(
             total,
         });
     };
-    let mut p = Progress { cancel, on_bytes: &mut sink, partial: None };
-    let outcome = if moving { move_any(src, dst, &mut p) } else { copy_any(src, dst, &mut p) };
+    let mut p = Progress {
+        cancel,
+        on_bytes: &mut sink,
+        partial: None,
+    };
+    let outcome = if moving {
+        move_any(src, dst, &mut p)
+    } else {
+        copy_any(src, dst, &mut p)
+    };
     match &outcome {
-        Ok(()) if moving => steps.push(Step::Moved { from: src.to_path_buf(), to: dst.to_path_buf() }),
-        Ok(()) => steps.push(Step::Created { path: dst.to_path_buf() }),
+        Ok(()) if moving => steps.push(Step::Moved {
+            from: src.to_path_buf(),
+            to: dst.to_path_buf(),
+        }),
+        Ok(()) => steps.push(Step::Created {
+            path: dst.to_path_buf(),
+        }),
         // The partial is this operation's, so it is journaled and undo removes it like any created path.
         Err(_) => {
             if let Some(path) = p.partial.take() {
@@ -189,17 +302,33 @@ pub fn run_trash(paths: Vec<String>, tx: Sender<OpMsg>) {
     let (entries, failed) = trash::trash(&owned);
     let ok = entries.len();
     let steps = entries.into_iter().map(Step::Trashed).collect();
-    let entry = Entry { op: "trash".to_string(), steps };
+    let entry = Entry {
+        op: "trash".to_string(),
+        steps,
+    };
     let _ = tx.send(OpMsg::Trashed { ok, failed, entry });
 }
 
 pub fn run_duplicate(path: String, tx: Sender<OpMsg>) {
     let (outcome, steps) = ops::duplicate(Path::new(&path));
     // Carried on a failure too: the steps then name the partial copy the failure left behind.
-    let entry = Entry { op: "duplicate".to_string(), steps };
+    let entry = Entry {
+        op: "duplicate".to_string(),
+        steps,
+    };
     let msg = match outcome {
-        Ok(dst) => OpMsg::Duplicated { ok: true, path: dst.to_string_lossy().to_string(), err: String::new(), entry },
-        Err(e) => OpMsg::Duplicated { ok: false, path: String::new(), err: e.msg, entry },
+        Ok(dst) => OpMsg::Duplicated {
+            ok: true,
+            path: dst.to_string_lossy().to_string(),
+            err: String::new(),
+            entry,
+        },
+        Err(e) => OpMsg::Duplicated {
+            ok: false,
+            path: String::new(),
+            err: e.msg,
+            entry,
+        },
     };
     let _ = tx.send(msg);
 }
@@ -215,7 +344,15 @@ mod tests {
     fn done_line(rx: Receiver<OpMsg>) -> (usize, usize, usize, bool, Entry) {
         let mut done = None;
         for msg in rx.iter() {
-            if let OpMsg::TransferDone { ok, failed, skipped, cancelled, entry, .. } = msg {
+            if let OpMsg::TransferDone {
+                ok,
+                failed,
+                skipped,
+                cancelled,
+                entry,
+                ..
+            } = msg
+            {
                 done = Some((ok, failed, skipped, cancelled, entry));
             }
         }
@@ -225,7 +362,10 @@ mod tests {
     #[test]
     fn a_successful_item_line_carries_no_err_field_at_all() {
         let line = transferitem_line(12, 0, "a.txt", true, "");
-        assert_eq!(line, r#"{"t":"transferitem","id":12,"index":0,"name":"a.txt","ok":true}"#);
+        assert_eq!(
+            line,
+            r#"{"t":"transferitem","id":12,"index":0,"name":"a.txt","ok":true}"#
+        );
         assert!(!line.contains("err"));
     }
 
@@ -234,13 +374,22 @@ mod tests {
         let line = transferitem_line(12, 1, "say \"hi\".txt", false, "permission denied");
         assert!(line.contains(r#""ok":false"#));
         assert!(line.contains(r#""err":"permission denied""#));
-        assert!(line.contains(r#"say \"hi\".txt"#), "a name is escaped like every other string on this wire");
+        assert!(
+            line.contains(r#"say \"hi\".txt"#),
+            "a name is escaped like every other string on this wire"
+        );
     }
 
     #[test]
     fn every_operation_line_matches_the_shape_the_operations_design_names() {
-        assert_eq!(transferstarted_line(12, 2, false), r#"{"t":"transferstarted","id":12,"n":2,"moving":false}"#);
-        assert_eq!(transferstarted_line(12, 2, true), r#"{"t":"transferstarted","id":12,"n":2,"moving":true}"#);
+        assert_eq!(
+            transferstarted_line(12, 2, false),
+            r#"{"t":"transferstarted","id":12,"n":2,"moving":false}"#
+        );
+        assert_eq!(
+            transferstarted_line(12, 2, true),
+            r#"{"t":"transferstarted","id":12,"n":2,"moving":true}"#
+        );
         assert_eq!(
             transferprogress_line(12, 0, "a.txt", 40000000, 120000000),
             r#"{"t":"transferprogress","id":12,"index":0,"name":"a.txt","bytes":40000000,"total":120000000}"#
@@ -250,13 +399,22 @@ mod tests {
             r#"{"t":"transferdone","id":12,"ok":1,"failed":1,"skipped":0,"cancelled":false}"#
         );
         assert_eq!(trashed_line(1, 0), r#"{"t":"trashed","ok":1,"failed":0}"#);
-        assert_eq!(renamed_line(true, "/home/gm/new.txt"), r#"{"t":"renamed","ok":true,"path":"/home/gm/new.txt"}"#);
+        assert_eq!(
+            renamed_line(true, "/home/gm/new.txt"),
+            r#"{"t":"renamed","ok":true,"path":"/home/gm/new.txt"}"#
+        );
         assert_eq!(
             duplicated_line(true, "/home/gm/photo copy.jpg"),
             r#"{"t":"duplicated","ok":true,"path":"/home/gm/photo copy.jpg"}"#
         );
-        assert_eq!(made_line(true, "/home/gm/New Folder"), r#"{"t":"made","ok":true,"path":"/home/gm/New Folder"}"#);
-        assert_eq!(undone_line("move", true), r#"{"t":"undone","op":"move","ok":true}"#);
+        assert_eq!(
+            made_line(true, "/home/gm/New Folder"),
+            r#"{"t":"made","ok":true,"path":"/home/gm/New Folder"}"#
+        );
+        assert_eq!(
+            undone_line("move", true),
+            r#"{"t":"undone","op":"move","ok":true}"#
+        );
     }
 
     #[test]
@@ -268,8 +426,14 @@ mod tests {
             usable_dest(&file.to_string_lossy()).unwrap_err().msg,
             "the destination is not a directory"
         );
-        assert!(usable_dest("relative/path").is_err(), "a relative destination is never resolved here");
-        assert!(usable_dest(&d.join("missing").to_string_lossy()).is_err(), "Flea does not create the destination");
+        assert!(
+            usable_dest("relative/path").is_err(),
+            "a relative destination is never resolved here"
+        );
+        assert!(
+            usable_dest(&d.join("missing").to_string_lossy()).is_err(),
+            "Flea does not create the destination"
+        );
     }
 
     #[test]
@@ -278,13 +442,25 @@ mod tests {
         let src = d.file("a.txt", "body");
         let dest = d.dir("out");
         let (tx, rx) = channel();
-        run_transfer(1, false, vec![src.to_string_lossy().to_string()], dest.clone(), Arc::new(AtomicBool::new(false)), tx);
+        run_transfer(
+            1,
+            false,
+            vec![src.to_string_lossy().to_string()],
+            dest.clone(),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
         assert!(src.exists(), "a copy leaves its source");
         assert_eq!(std::fs::read_to_string(dest.join("a.txt")).unwrap(), "body");
         let (ok, failed, _, _, entry) = done_line(rx);
         assert_eq!((ok, failed), (1, 0));
         assert_eq!(entry.op, "copy");
-        assert_eq!(entry.steps, vec![Step::Created { path: dest.join("a.txt") }]);
+        assert_eq!(
+            entry.steps,
+            vec![Step::Created {
+                path: dest.join("a.txt")
+            }]
+        );
     }
 
     #[test]
@@ -293,11 +469,24 @@ mod tests {
         let src = d.file("b.txt", "body");
         let dest = d.dir("out");
         let (tx, rx) = channel();
-        run_transfer(2, true, vec![src.to_string_lossy().to_string()], dest.clone(), Arc::new(AtomicBool::new(false)), tx);
+        run_transfer(
+            2,
+            true,
+            vec![src.to_string_lossy().to_string()],
+            dest.clone(),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
         assert!(!src.exists(), "a move leaves nothing at the source");
         let (_, _, _, _, entry) = done_line(rx);
         assert_eq!(entry.op, "move");
-        assert_eq!(entry.steps, vec![Step::Moved { from: src, to: dest.join("b.txt") }]);
+        assert_eq!(
+            entry.steps,
+            vec![Step::Moved {
+                from: src,
+                to: dest.join("b.txt")
+            }]
+        );
     }
 
     #[test]
@@ -310,12 +499,18 @@ mod tests {
         run_transfer(
             3,
             false,
-            vec![missing.to_string_lossy().to_string(), good.to_string_lossy().to_string()],
+            vec![
+                missing.to_string_lossy().to_string(),
+                good.to_string_lossy().to_string(),
+            ],
             dest.clone(),
             Arc::new(AtomicBool::new(false)),
             tx,
         );
-        assert!(dest.join("good.txt").exists(), "the item after the failure still ran");
+        assert!(
+            dest.join("good.txt").exists(),
+            "the item after the failure still ran"
+        );
         let mut counts = None;
         let mut errs = Vec::new();
         for msg in rx.iter() {
@@ -326,7 +521,11 @@ mod tests {
             }
         }
         assert_eq!(counts, Some((1, 1)));
-        assert_eq!(errs.len(), 1, "the failure is one item's data, not the operation's");
+        assert_eq!(
+            errs.len(),
+            1,
+            "the failure is one item's data, not the operation's"
+        );
     }
 
     // A socket answers ENXIO to open(2) for any uid, so it forces the failure a permission error
@@ -336,15 +535,32 @@ mod tests {
         let d = TestDir::new("transferpartialtree");
         let src = d.dir("tree");
         std::fs::write(src.join("good.txt"), "body").unwrap();
-        let _sock = std::os::unix::net::UnixListener::bind(src.join("sock")).expect("a socket in the source tree");
+        let _sock = std::os::unix::net::UnixListener::bind(src.join("sock"))
+            .expect("a socket in the source tree");
         let dest = d.dir("out");
         let (tx, rx) = channel();
-        run_transfer(5, false, vec![src.to_string_lossy().to_string()], dest.clone(), Arc::new(AtomicBool::new(false)), tx);
+        run_transfer(
+            5,
+            false,
+            vec![src.to_string_lossy().to_string()],
+            dest.clone(),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
         let (ok, failed, _, cancelled, entry) = done_line(rx);
         assert_eq!((ok, failed, cancelled), (0, 1, false));
         let partial = dest.join("tree");
-        assert!(partial.is_dir(), "a failure that is not a cancel leaves what it copied");
-        assert_eq!(entry.steps, vec![Step::Created { path: partial.clone() }], "the partial tree is journaled");
+        assert!(
+            partial.is_dir(),
+            "a failure that is not a cancel leaves what it copied"
+        );
+        assert_eq!(
+            entry.steps,
+            vec![Step::Created {
+                path: partial.clone()
+            }],
+            "the partial tree is journaled"
+        );
         let mut j = Journal::new();
         j.push(entry);
         assert_eq!(j.undo().expect("undo"), "copy");
@@ -359,11 +575,24 @@ mod tests {
         let dest = d.dir("out");
         std::fs::write(dest.join("a.txt"), "already here").unwrap();
         let (tx, rx) = channel();
-        run_transfer(6, false, vec![src.to_string_lossy().to_string()], dest.clone(), Arc::new(AtomicBool::new(false)), tx);
+        run_transfer(
+            6,
+            false,
+            vec![src.to_string_lossy().to_string()],
+            dest.clone(),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
         let (_, failed, _, _, entry) = done_line(rx);
         assert_eq!(failed, 1);
-        assert!(entry.steps.is_empty(), "undo must never remove what the user already had");
-        assert_eq!(std::fs::read_to_string(dest.join("a.txt")).unwrap(), "already here");
+        assert!(
+            entry.steps.is_empty(),
+            "undo must never remove what the user already had"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("a.txt")).unwrap(),
+            "already here"
+        );
     }
 
     #[test]
@@ -376,13 +605,19 @@ mod tests {
         run_transfer(
             4,
             false,
-            vec![a.to_string_lossy().to_string(), b.to_string_lossy().to_string()],
+            vec![
+                a.to_string_lossy().to_string(),
+                b.to_string_lossy().to_string(),
+            ],
             dest.clone(),
             Arc::new(AtomicBool::new(true)),
             tx,
         );
         let (ok, _, skipped, cancelled, _) = done_line(rx);
         assert_eq!((ok, skipped, cancelled), (0, 2, true));
-        assert!(!dest.join("a.txt").exists(), "a cancel before the first item copies nothing");
+        assert!(
+            !dest.join("a.txt").exists(),
+            "a cancel before the first item copies nothing"
+        );
     }
 }

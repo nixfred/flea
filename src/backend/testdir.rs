@@ -26,7 +26,9 @@ impl TestDir {
         let path = std::env::temp_dir().join(name);
         std::fs::create_dir(&path).expect("test sandbox could not be created");
         let mut marker = std::fs::File::create(path.join(MARKER)).expect("test sandbox marker");
-        marker.write_all(b"flea test sandbox\n").expect("test sandbox marker");
+        marker
+            .write_all(b"flea test sandbox\n")
+            .expect("test sandbox marker");
         TestDir { path }
     }
 

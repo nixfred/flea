@@ -103,7 +103,15 @@ mod tests {
     #[test]
     fn a_video_stream_reports_pixels_and_the_format_reports_duration() {
         let m = parse("codec_type=video\nwidth=1920\nheight=1080\nduration=10.000000\n");
-        assert_eq!(m, Media { duration_ms: 10000, width: 1920, height: 1080, sample_rate: 0 });
+        assert_eq!(
+            m,
+            Media {
+                duration_ms: 10000,
+                width: 1920,
+                height: 1080,
+                sample_rate: 0
+            }
+        );
     }
 
     #[test]
@@ -112,7 +120,10 @@ mod tests {
                     codec_type=audio\nwidth=N/A\nheight=N/A\nsample_rate=48000\n\
                     duration=125.400000\n";
         let m = parse(text);
-        assert_eq!(m.width, 1920, "the audio stream's N/A must not clear the video's own answer");
+        assert_eq!(
+            m.width, 1920,
+            "the audio stream's N/A must not clear the video's own answer"
+        );
         assert_eq!(m.height, 1080);
         assert_eq!(m.sample_rate, 48000);
         assert_eq!(m.duration_ms, 125400);
@@ -121,7 +132,15 @@ mod tests {
     #[test]
     fn an_audio_only_file_reports_a_rate_and_no_pixels() {
         let m = parse("codec_type=audio\nsample_rate=44100\nduration=245.000000\n");
-        assert_eq!(m, Media { duration_ms: 245000, width: 0, height: 0, sample_rate: 44100 });
+        assert_eq!(
+            m,
+            Media {
+                duration_ms: 245000,
+                width: 0,
+                height: 0,
+                sample_rate: 44100
+            }
+        );
     }
 
     #[test]
@@ -129,7 +148,11 @@ mod tests {
         assert!(parse("").is_empty());
         assert!(parse("no equals sign at all\n").is_empty());
         assert!(parse("duration=N/A\ncodec_type=video\nwidth=N/A\n").is_empty());
-        assert_eq!(parse("duration=-3.0\n").duration_ms, 0, "a negative duration is not a duration");
+        assert_eq!(
+            parse("duration=-3.0\n").duration_ms,
+            0,
+            "a negative duration is not a duration"
+        );
         assert_eq!(parse("duration=0.000000\n").duration_ms, 0);
     }
 

@@ -17,7 +17,13 @@ const NEW_FOLDER: &str = "New Folder";
 
 // std has no wrapper for the flag that makes rename refuse to clobber, so the syscall is declared here rather than taking a crate.
 extern "C" {
-    fn renameat2(olddirfd: i32, oldpath: *const i8, newdirfd: i32, newpath: *const i8, flags: u32) -> i32;
+    fn renameat2(
+        olddirfd: i32,
+        oldpath: *const i8,
+        newdirfd: i32,
+        newpath: *const i8,
+        flags: u32,
+    ) -> i32;
 }
 
 // A name from the client is a trust boundary: anything with a separator would move the file out of its own directory.
@@ -32,11 +38,23 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> Result<(), FleaError> {
         // corner: a path with an interior NUL cannot reach a syscall, and no listing can produce one.
         _ => return Err(named("rename", to, "path contains an interior NUL")),
     };
-    let rc = unsafe { renameat2(AT_FDCWD, c_from.as_ptr(), AT_FDCWD, c_to.as_ptr(), RENAME_NOREPLACE) };
+    let rc = unsafe {
+        renameat2(
+            AT_FDCWD,
+            c_from.as_ptr(),
+            AT_FDCWD,
+            c_to.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
     if rc == 0 {
         return Ok(());
     }
-    Err(from_io("rename", &to.to_string_lossy(), &std::io::Error::last_os_error()))
+    Err(from_io(
+        "rename",
+        &to.to_string_lossy(),
+        &std::io::Error::last_os_error(),
+    ))
 }
 
 fn path_c(p: &Path) -> Option<CString> {
@@ -54,7 +72,11 @@ fn named(where_: &str, path: &Path, msg: &str) -> FleaError {
 // Answers with the new path and the step that puts the old name back.
 pub fn rename(path: &Path, to_name: &str) -> Result<(PathBuf, Vec<Step>), FleaError> {
     if !valid_name(to_name) {
-        return Err(named("rename", path, "a name cannot be empty, . or .. , or contain a separator"));
+        return Err(named(
+            "rename",
+            path,
+            "a name cannot be empty, . or .. , or contain a separator",
+        ));
     }
     let parent = path.parent().unwrap_or(Path::new("/"));
     let to = parent.join(to_name);
@@ -63,14 +85,24 @@ pub fn rename(path: &Path, to_name: &str) -> Result<(PathBuf, Vec<Step>), FleaEr
         return Ok((to, Vec::new()));
     }
     rename_noreplace(path, &to)?;
-    Ok((to.clone(), vec![Step::Moved { from: path.to_path_buf(), to }]))
+    Ok((
+        to.clone(),
+        vec![Step::Moved {
+            from: path.to_path_buf(),
+            to,
+        }],
+    ))
 }
 
 // "backup.tar.zst" becomes "backup.tar copy.zst": Path's own stem and extension split the last dot only, and a dotfile keeps its whole name as the stem.
 // Convert passes "(converted)" as the word for the parenthesised form the canvas draws; duplicate passes "copy".
 pub fn copy_name(original: &Path, word: &str, n: usize) -> Option<String> {
     let name = original.file_name()?.to_str()?;
-    let suffix = if n <= 1 { format!(" {}", word) } else { format!(" {} {}", word, n) };
+    let suffix = if n <= 1 {
+        format!(" {}", word)
+    } else {
+        format!(" {} {}", word, n)
+    };
     let stem = Path::new(name).file_stem()?.to_str()?;
     match Path::new(name).extension().and_then(|e| e.to_str()) {
         Some(ext) => Some(format!("{}{}.{}", stem, suffix, ext)),
@@ -95,14 +127,34 @@ pub fn free_copy_path(original: &Path, word: &str) -> Option<PathBuf> {
 pub fn duplicate(path: &Path) -> (Result<PathBuf, FleaError>, Vec<Step>) {
     let dst = match free_copy_path(path, "copy") {
         Some(d) => d,
-        None => return (Err(named("duplicate", path, "every copy name for this file is already taken")), Vec::new()),
+        None => {
+            return (
+                Err(named(
+                    "duplicate",
+                    path,
+                    "every copy name for this file is already taken",
+                )),
+                Vec::new(),
+            )
+        }
     };
     let flag = AtomicBool::new(false);
     let mut sink = |_: u64, _: u64| {};
-    let mut p = Progress { cancel: &flag, on_bytes: &mut sink, partial: None };
+    let mut p = Progress {
+        cancel: &flag,
+        on_bytes: &mut sink,
+        partial: None,
+    };
     match copy_any(path, &dst, &mut p) {
         Ok(()) => (Ok(dst.clone()), vec![Step::Created { path: dst }]),
-        Err(e) => (Err(e), p.partial.take().into_iter().map(|path| Step::Created { path }).collect()),
+        Err(e) => (
+            Err(e),
+            p.partial
+                .take()
+                .into_iter()
+                .map(|path| Step::Created { path })
+                .collect(),
+        ),
     }
 }
 
@@ -116,19 +168,31 @@ pub fn mkdir(parent: &Path, name: &str) -> Result<(PathBuf, Vec<Step>), FleaErro
     let dir = if name.is_empty() {
         match free_new_folder(parent) {
             Some(d) => d,
-            None => return Err(named("mkdir", parent, "every default folder name here is already taken")),
+            None => {
+                return Err(named(
+                    "mkdir",
+                    parent,
+                    "every default folder name here is already taken",
+                ))
+            }
         }
     } else if valid_name(name) {
         parent.join(name)
     } else {
-        return Err(named("mkdir", parent, "a name cannot be . or .., or contain a separator"));
+        return Err(named(
+            "mkdir",
+            parent,
+            "a name cannot be . or .., or contain a separator",
+        ));
     };
     match std::fs::create_dir(&dir) {
         Ok(()) => Ok((dir.clone(), vec![Step::MadeDir { path: dir }])),
         // create_dir, never create_dir_all: a name already taken is a collision and must never merge.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(named("mkdir", &dir, "a folder or file with that name already exists"))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(named(
+            "mkdir",
+            &dir,
+            "a folder or file with that name already exists",
+        )),
         Err(e) => Err(from_io("mkdir", &dir.to_string_lossy(), &e)),
     }
 }
@@ -137,7 +201,11 @@ pub fn mkdir(parent: &Path, name: &str) -> Result<(PathBuf, Vec<Step>), FleaErro
 // directory is still created exclusively, so like free_copy_path this is a start and not a promise.
 fn free_new_folder(parent: &Path) -> Option<PathBuf> {
     for n in 1..=NAME_TRIES {
-        let name = if n <= 1 { NEW_FOLDER.to_string() } else { format!("{} {}", NEW_FOLDER, n) };
+        let name = if n <= 1 {
+            NEW_FOLDER.to_string()
+        } else {
+            format!("{} {}", NEW_FOLDER, n)
+        };
         let candidate = parent.join(name);
         if candidate.symlink_metadata().is_err() {
             return Some(candidate);
@@ -157,12 +225,27 @@ mod tests {
         assert!(valid_name("ordinary.txt"));
         assert!(valid_name(".bashrc"));
         assert!(valid_name("a name with spaces"));
-        assert!(!valid_name(""), "an empty name would rename onto the parent");
+        assert!(
+            !valid_name(""),
+            "an empty name would rename onto the parent"
+        );
         assert!(!valid_name("."), "renaming to . is the directory itself");
-        assert!(!valid_name(".."), "renaming to .. would climb out of the directory");
-        assert!(!valid_name("../escape"), "a separator moves the file out of its own directory");
-        assert!(!valid_name("sub/child"), "a separator moves the file out of its own directory");
-        assert!(!valid_name("nul\0byte"), "an interior NUL truncates the path at the syscall");
+        assert!(
+            !valid_name(".."),
+            "renaming to .. would climb out of the directory"
+        );
+        assert!(
+            !valid_name("../escape"),
+            "a separator moves the file out of its own directory"
+        );
+        assert!(
+            !valid_name("sub/child"),
+            "a separator moves the file out of its own directory"
+        );
+        assert!(
+            !valid_name("nul\0byte"),
+            "an interior NUL truncates the path at the syscall"
+        );
     }
 
     #[test]
@@ -173,7 +256,13 @@ mod tests {
         assert_eq!(to, d.join("after.txt"));
         assert!(!from.exists());
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "body");
-        assert_eq!(steps, vec![Step::Moved { from: from.clone(), to }]);
+        assert_eq!(
+            steps,
+            vec![Step::Moved {
+                from: from.clone(),
+                to
+            }]
+        );
     }
 
     #[test]
@@ -196,7 +285,10 @@ mod tests {
         let d = TestDir::new("samename");
         let from = d.file("same.txt", "body");
         let (_, steps) = rename(&from, "same.txt").expect("a no-op rename is not an error");
-        assert!(steps.is_empty(), "nothing changed, so undo must have nothing to reverse");
+        assert!(
+            steps.is_empty(),
+            "nothing changed, so undo must have nothing to reverse"
+        );
         assert!(from.exists());
     }
 
@@ -205,8 +297,14 @@ mod tests {
         let p = Path::new("/x/backup.tar.zst");
         assert_eq!(copy_name(p, "copy", 1).unwrap(), "backup.tar copy.zst");
         assert_eq!(copy_name(p, "copy", 2).unwrap(), "backup.tar copy 2.zst");
-        assert_eq!(copy_name(Path::new("/x/notes"), "copy", 1).unwrap(), "notes copy");
-        assert_eq!(copy_name(Path::new("/x/.bashrc"), "copy", 1).unwrap(), ".bashrc copy");
+        assert_eq!(
+            copy_name(Path::new("/x/notes"), "copy", 1).unwrap(),
+            "notes copy"
+        );
+        assert_eq!(
+            copy_name(Path::new("/x/.bashrc"), "copy", 1).unwrap(),
+            ".bashrc copy"
+        );
         assert_eq!(
             copy_name(Path::new("/x/photo.jpg"), "copy", 1).unwrap(),
             "photo copy.jpg",
@@ -223,9 +321,15 @@ mod tests {
     fn a_free_copy_path_steps_past_names_that_are_taken() {
         let d = TestDir::new("freename");
         let original = d.file("doc.txt", "body");
-        assert_eq!(free_copy_path(&original, "copy").unwrap(), d.join("doc copy.txt"));
+        assert_eq!(
+            free_copy_path(&original, "copy").unwrap(),
+            d.join("doc copy.txt")
+        );
         d.file("doc copy.txt", "taken");
-        assert_eq!(free_copy_path(&original, "copy").unwrap(), d.join("doc copy 2.txt"));
+        assert_eq!(
+            free_copy_path(&original, "copy").unwrap(),
+            d.join("doc copy 2.txt")
+        );
     }
 
     #[test]
@@ -248,7 +352,10 @@ mod tests {
         let (outcome, _) = duplicate(&src);
         let dst = outcome.expect("duplicate");
         assert_eq!(dst, d.join("tree copy"));
-        assert_eq!(std::fs::read_to_string(dst.join("inside.txt")).unwrap(), "body");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("inside.txt")).unwrap(),
+            "body"
+        );
     }
 
     // A socket answers ENXIO to open(2) for any uid, so it forces the failure a permission error would.
@@ -257,12 +364,20 @@ mod tests {
         let d = TestDir::new("duppartial");
         let src = d.dir("tree");
         std::fs::write(src.join("inside.txt"), "body").unwrap();
-        let _sock = std::os::unix::net::UnixListener::bind(src.join("sock")).expect("a socket in the source tree");
+        let _sock = std::os::unix::net::UnixListener::bind(src.join("sock"))
+            .expect("a socket in the source tree");
         let (outcome, steps) = duplicate(&src);
-        assert!(outcome.is_err(), "the socket cannot be opened, so the tree copy fails");
+        assert!(
+            outcome.is_err(),
+            "the socket cannot be opened, so the tree copy fails"
+        );
         let partial = d.join("tree copy");
         assert!(partial.is_dir(), "the failure left what it had copied");
-        assert_eq!(steps, vec![Step::Created { path: partial }], "and the journal gets the partial, so undo can remove it");
+        assert_eq!(
+            steps,
+            vec![Step::Created { path: partial }],
+            "and the journal gets the partial, so undo can remove it"
+        );
     }
 
     #[test]
@@ -281,10 +396,17 @@ mod tests {
         let err = mkdir(d.path(), "notes").expect_err("a file holds the name");
         assert_eq!(err.where_, "mkdir");
         assert_eq!(err.msg, "a folder or file with that name already exists");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "body", "the file that owns the name is untouched");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "body",
+            "the file that owns the name is untouched"
+        );
         d.dir("sub");
         let err = mkdir(d.path(), "sub").expect_err("a directory holds the name");
-        assert_eq!(err.msg, "a folder or file with that name already exists", "an existing directory is a collision too, never a merge");
+        assert_eq!(
+            err.msg, "a folder or file with that name already exists",
+            "an existing directory is a collision too, never a merge"
+        );
     }
 
     #[test]
@@ -292,22 +414,40 @@ mod tests {
         let d = TestDir::new("mkdirbadname");
         for bad in [".", "..", "a/b", "../up", "nul\0byte"] {
             let err = mkdir(d.path(), bad).expect_err(bad);
-            assert_eq!(err.msg, "a name cannot be . or .., or contain a separator", "{:?}", bad);
+            assert_eq!(
+                err.msg, "a name cannot be . or .., or contain a separator",
+                "{:?}",
+                bad
+            );
         }
-        assert_eq!(mkdir(Path::new("relative"), "x").unwrap_err().msg, "a parent must be an absolute path");
+        assert_eq!(
+            mkdir(Path::new("relative"), "x").unwrap_err().msg,
+            "a parent must be an absolute path"
+        );
         // A name of only spaces is a legal name, as it is for rename; trimming is the field's job.
         assert!(mkdir(d.path(), "   ").expect("spaces").0.is_dir());
         // Read with dotfiles, like ls -A: only the sandbox marker and the spaces folder are here.
-        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 2, "no refusal made anything");
+        assert_eq!(
+            std::fs::read_dir(d.path()).unwrap().count(),
+            2,
+            "no refusal made anything"
+        );
     }
 
     #[test]
     fn an_empty_name_takes_the_first_free_new_folder() {
         let d = TestDir::new("mkdirdefault");
         assert_eq!(mkdir(d.path(), "").expect("first").0, d.join("New Folder"));
-        assert_eq!(mkdir(d.path(), "").expect("second").0, d.join("New Folder 2"));
+        assert_eq!(
+            mkdir(d.path(), "").expect("second").0,
+            d.join("New Folder 2")
+        );
         d.file("New Folder 3", "a file holds the name");
-        assert_eq!(mkdir(d.path(), "").expect("third").0, d.join("New Folder 4"), "a taken name of any kind is stepped past");
+        assert_eq!(
+            mkdir(d.path(), "").expect("third").0,
+            d.join("New Folder 4"),
+            "a taken name of any kind is stepped past"
+        );
     }
 
     // corner: runs as a plain user, where a directory without its write bit refuses a new entry.
@@ -316,7 +456,11 @@ mod tests {
         let d = TestDir::new("mkdirparent");
         let err = mkdir(&d.join("gone"), "x").expect_err("no parent");
         assert_eq!(err.where_, "mkdir");
-        assert!(err.msg.starts_with("No such file or directory"), "{}", err.msg);
+        assert!(
+            err.msg.starts_with("No such file or directory"),
+            "{}",
+            err.msg
+        );
         let locked = d.dir("locked");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
         let err = mkdir(&locked, "x").expect_err("denied");

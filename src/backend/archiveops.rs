@@ -19,13 +19,23 @@ pub fn compress(
     dest: &Path,
 ) -> Result<(), FleaError> {
     if dest.symlink_metadata().is_ok() {
-        return Err(op_err("archive", &dest.to_string_lossy(), "that destination already exists"));
+        return Err(op_err(
+            "archive",
+            &dest.to_string_lossy(),
+            "that destination already exists",
+        ));
     }
     let work = Work::new(parent, "arc")?;
     let staged = work.dir.join(format!("archive.{}", format));
     let inner = match formats.compress_argv(format, &staged, parent, names) {
         Some(a) => a,
-        None => return Err(op_err("archive", format, "this box offers no tool for that format")),
+        None => {
+            return Err(op_err(
+                "archive",
+                format,
+                "this box offers no tool for that format",
+            ))
+        }
     };
     run_boxed(inner, parent, &work.dir)?;
     if staged.symlink_metadata().is_err() {
@@ -41,7 +51,11 @@ pub fn compress(
 // and publishing an unverified one as an ordinary success is a quieter version of the same thing.
 pub fn extract(formats: &Formats, archive: &Path, dest: &Path) -> Result<bool, FleaError> {
     if dest.symlink_metadata().is_ok() {
-        return Err(op_err("archive", &dest.to_string_lossy(), "that destination already exists"));
+        return Err(op_err(
+            "archive",
+            &dest.to_string_lossy(),
+            "that destination already exists",
+        ));
     }
     let parent = dest.parent().unwrap_or(Path::new("/"));
     let work = Work::new(parent, "ext")?;
@@ -49,7 +63,13 @@ pub fn extract(formats: &Formats, archive: &Path, dest: &Path) -> Result<bool, F
     std::fs::create_dir(&staged).map_err(|e| from_io("archive", &staged.to_string_lossy(), &e))?;
     let inner = match formats.extract_argv(archive, &staged) {
         Some(a) => a,
-        None => return Err(op_err("archive", &archive.to_string_lossy(), "this box offers no tool for that archive")),
+        None => {
+            return Err(op_err(
+                "archive",
+                &archive.to_string_lossy(),
+                "this box offers no tool for that archive",
+            ))
+        }
     };
     // Measured on this box: bsdtar exits 1 on a .. member and de-fangs an absolute one, printing
     // "Removing leading '/'" and extracting it relative. Neither escapes the staging directory.
@@ -69,7 +89,11 @@ pub fn extract(formats: &Formats, archive: &Path, dest: &Path) -> Result<bool, F
         match archive_produced_count(formats, archive) {
             // The index named something and nothing arrived: the tool exited 0 having written nothing.
             Some(n) if n > 0 => {
-                return Err(op_err("archive", &archive.to_string_lossy(), "the archive tool wrote nothing"));
+                return Err(op_err(
+                    "archive",
+                    &archive.to_string_lossy(),
+                    "the archive tool wrote nothing",
+                ));
             }
             // Nothing to extract, so an empty destination is the correct result.
             Some(_) => {}
@@ -87,15 +111,23 @@ pub fn extract(formats: &Formats, archive: &Path, dest: &Path) -> Result<bool, F
 
 pub fn convert_one(input: &Path, dest: &Path, strip: bool) -> Result<(), FleaError> {
     if dest.symlink_metadata().is_ok() {
-        return Err(op_err("convert", &dest.to_string_lossy(), "that destination already exists"));
+        return Err(op_err(
+            "convert",
+            &dest.to_string_lossy(),
+            "that destination already exists",
+        ));
     }
     // Absolute, so ImageMagick can never read the input as an option (a file named "-write ...").
     // The staged destination is already absolute under the work directory beside dest.
-    let input = std::fs::canonicalize(input).map_err(|e| from_io("convert", &input.to_string_lossy(), &e))?;
+    let input = std::fs::canonicalize(input)
+        .map_err(|e| from_io("convert", &input.to_string_lossy(), &e))?;
     let input = input.as_path();
     let parent = dest.parent().unwrap_or(Path::new("/"));
     let work = Work::new(parent, "cvt")?;
-    let name = dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     let staged = work.dir.join(&name);
     run_boxed(convert::argv(input, &staged, strip), input, &work.dir)?;
     if staged.symlink_metadata().is_err() {
@@ -121,7 +153,6 @@ pub fn split_paths(paths: &[String]) -> Option<(PathBuf, Vec<String>)> {
     Some((parent, names))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,28 +177,51 @@ mod tests {
         d.dir("emptysrc");
         let archive = d.join("dotonly.tar");
         let built = std::process::Command::new("bsdtar")
-            .args(["-a", "-c", "-f", &archive.to_string_lossy(),
-                   "-C", &d.join("emptysrc").to_string_lossy(), "."])
+            .args([
+                "-a",
+                "-c",
+                "-f",
+                &archive.to_string_lossy(),
+                "-C",
+                &d.join("emptysrc").to_string_lossy(),
+                ".",
+            ])
             .status();
         if !built.map(|s| s.success()).unwrap_or(false) {
             return;
         }
-        assert_eq!(archive_produced_count(&formats, &archive), Some(0),
-                   "the root is the only member, so nothing should appear in the destination");
+        assert_eq!(
+            archive_produced_count(&formats, &archive),
+            Some(0),
+            "the root is the only member, so nothing should appear in the destination"
+        );
         let dest = d.join("out");
         extract(&formats, &archive, &dest).expect("a root-only archive extracts legally");
-        assert!(dest.is_dir(), "and its destination is published rather than refused");
+        assert!(
+            dest.is_dir(),
+            "and its destination is published rather than refused"
+        );
 
         // The root's other spelling, which bsdtar writes for `-C dir ./.`. This exact archive
         // extracted correctly and was refused, because the predicate knew only "." and "./".
         let edot = d.join("edot.tar");
         let made_edot = std::process::Command::new("bsdtar")
-            .args(["-a", "-c", "-f", &edot.to_string_lossy(),
-                   "-C", &d.join("emptysrc").to_string_lossy(), "./."])
+            .args([
+                "-a",
+                "-c",
+                "-f",
+                &edot.to_string_lossy(),
+                "-C",
+                &d.join("emptysrc").to_string_lossy(),
+                "./.",
+            ])
             .status();
         if made_edot.map(|s| s.success()).unwrap_or(false) {
-            assert_eq!(archive_produced_count(&formats, &edot), Some(0),
-                       "././ is the root as well, so it produces nothing either");
+            assert_eq!(
+                archive_produced_count(&formats, &edot),
+                Some(0),
+                "././ is the root as well, so it produces nothing either"
+            );
             extract(&formats, &edot, &d.join("edotout")).expect("and it extracts legally too");
         }
 
@@ -177,16 +231,27 @@ mod tests {
         d.dir("nested/b/c");
         let nested = d.join("nested.tar");
         let made = std::process::Command::new("bsdtar")
-            .args(["-a", "-c", "-f", &nested.to_string_lossy(),
-                   "-C", &d.join("nested").to_string_lossy(), "."])
+            .args([
+                "-a",
+                "-c",
+                "-f",
+                &nested.to_string_lossy(),
+                "-C",
+                &d.join("nested").to_string_lossy(),
+                ".",
+            ])
             .status();
         if made.map(|s| s.success()).unwrap_or(false) {
-            assert!(archive_produced_count(&formats, &nested).unwrap_or(0) > 0,
-                    "nested directories are destination entries, so an empty result is a failure");
+            assert!(
+                archive_produced_count(&formats, &nested).unwrap_or(0) > 0,
+                "nested directories are destination entries, so an empty result is a failure"
+            );
             let nest_dest = d.join("nestout");
             extract(&formats, &nested, &nest_dest).expect("it extracts");
-            assert!(std::fs::read_dir(&nest_dest).unwrap().count() > 0,
-                    "and the destination really does receive them");
+            assert!(
+                std::fs::read_dir(&nest_dest).unwrap().count() > 0,
+                "and the destination really does receive them"
+            );
         }
     }
 
@@ -212,8 +277,14 @@ mod tests {
         let d = TestDir::new("archemptyparts");
         let formats = Formats::from_tools(true, true);
         d.dir("nothing");
-        assert!(is_empty_dir(&d.join("nothing")), "a directory with no entries is empty");
-        assert!(is_empty_dir(&d.join("never-existed")), "and so is one that cannot be read");
+        assert!(
+            is_empty_dir(&d.join("nothing")),
+            "a directory with no entries is empty"
+        );
+        assert!(
+            is_empty_dir(&d.join("never-existed")),
+            "and so is one that cannot be read"
+        );
         d.file("nothing/something.txt", "body");
         assert!(!is_empty_dir(&d.join("nothing")));
 
@@ -222,20 +293,38 @@ mod tests {
             .args(["-c", "-f", &empty.to_string_lossy(), "-T", "/dev/null"])
             .status();
         if made.map(|s| s.success()).unwrap_or(false) {
-            assert_eq!(archive_produced_count(&formats, &empty), Some(0), "an archive holding nothing produces nothing");
+            assert_eq!(
+                archive_produced_count(&formats, &empty),
+                Some(0),
+                "an archive holding nothing produces nothing"
+            );
         }
         let real = d.join("real.tar");
         let built = std::process::Command::new("bsdtar")
-            .args(["-c", "-f", &real.to_string_lossy(), "-C", &d.path().to_string_lossy(), "nothing"])
+            .args([
+                "-c",
+                "-f",
+                &real.to_string_lossy(),
+                "-C",
+                &d.path().to_string_lossy(),
+                "nothing",
+            ])
             .status();
         if built.map(|s| s.success()).unwrap_or(false) {
             // The directory member and the file inside it are both destination entries.
-            assert_eq!(archive_produced_count(&formats, &real), Some(2),
-                       "nothing/ and nothing/something.txt each produce one");
+            assert_eq!(
+                archive_produced_count(&formats, &real),
+                Some(2),
+                "nothing/ and nothing/something.txt each produce one"
+            );
         }
         // An unreadable listing answers false, so an archive nothing can read is a failure, not a pass.
         let junk = d.file("junk.tar", "not an archive");
-        assert_eq!(archive_produced_count(&formats, &junk), None, "an index nothing can read is not a count of zero");
+        assert_eq!(
+            archive_produced_count(&formats, &junk),
+            None,
+            "an index nothing can read is not a count of zero"
+        );
     }
 
     // The case run_boxed's own comment names, a tool that writes nothing and exits 0, driven through
@@ -251,13 +340,24 @@ mod tests {
         d.file("src/a.txt", "body");
         let archive = d.join("one.tar");
         let built = std::process::Command::new("bsdtar")
-            .args(["-a", "-c", "-f", &archive.to_string_lossy(),
-                   "-C", &d.join("src").to_string_lossy(), "."])
+            .args([
+                "-a",
+                "-c",
+                "-f",
+                &archive.to_string_lossy(),
+                "-C",
+                &d.join("src").to_string_lossy(),
+                ".",
+            ])
             .status();
         if !built.map(|s| s.success()).unwrap_or(false) {
             return;
         }
-        assert_eq!(archive_produced_count(&formats, &archive), Some(1), "the fixture archive produces one entry");
+        assert_eq!(
+            archive_produced_count(&formats, &archive),
+            Some(1),
+            "the fixture archive produces one entry"
+        );
 
         let work = Work::new(d.path(), "ext").expect("work");
         let staged = work.dir.join("out");
@@ -265,10 +365,15 @@ mod tests {
         // Through prlimit and bwrap, exactly as a real listing tool runs.
         run_boxed(vec!["/usr/bin/true".to_string()], &archive, &work.dir)
             .expect("/usr/bin/true exits 0");
-        assert!(is_empty_dir(&staged), "and it wrote nothing, which is the whole point of it");
+        assert!(
+            is_empty_dir(&staged),
+            "and it wrote nothing, which is the whole point of it"
+        );
         // The predicate extract applies to those two facts.
-        assert!(is_empty_dir(&staged) && archive_produced_count(&formats, &archive) == Some(1),
-                "an index naming an entry against a destination that holds none is a failure");
+        assert!(
+            is_empty_dir(&staged) && archive_produced_count(&formats, &archive) == Some(1),
+            "an index naming an entry against a destination that holds none is a failure"
+        );
 
         // The same, on the archive that beat two previous predicates: all directories, no files, and
         // three members that should each have produced a destination entry. A file count called this
@@ -277,23 +382,36 @@ mod tests {
         d.dir("dirs/b/c");
         let dirs = d.join("dirs.tar");
         let made = std::process::Command::new("bsdtar")
-            .args(["-a", "-c", "-f", &dirs.to_string_lossy(),
-                   "-C", &d.join("dirs").to_string_lossy(), "."])
+            .args([
+                "-a",
+                "-c",
+                "-f",
+                &dirs.to_string_lossy(),
+                "-C",
+                &d.join("dirs").to_string_lossy(),
+                ".",
+            ])
             .status();
         if made.map(|s| s.success()).unwrap_or(false) {
-            assert!(archive_produced_count(&formats, &dirs).unwrap_or(0) > 0,
-                    "an all-directories archive still names members that must appear");
+            assert!(
+                archive_produced_count(&formats, &dirs).unwrap_or(0) > 0,
+                "an all-directories archive still names members that must appear"
+            );
             let work2 = Work::new(d.path(), "ext").expect("work");
             let staged2 = work2.dir.join("out");
             std::fs::create_dir(&staged2).expect("staged");
             run_boxed(vec!["/usr/bin/true".to_string()], &dirs, &work2.dir).expect("exits 0");
-            assert!(is_empty_dir(&staged2) && archive_produced_count(&formats, &dirs).unwrap_or(0) > 0,
-                    "so a tool that wrote nothing for it is a failure, not a verified success");
+            assert!(
+                is_empty_dir(&staged2) && archive_produced_count(&formats, &dirs).unwrap_or(0) > 0,
+                "so a tool that wrote nothing for it is a failure, not a verified success"
+            );
         }
 
         // The other arm, for completeness: a tool that exits non-zero is refused before the check.
-        assert!(run_boxed(vec!["/usr/bin/false".to_string()], &archive, &work.dir).is_err(),
-                "run_boxed reads the status, so the non-zero arm never reaches the predicate");
+        assert!(
+            run_boxed(vec!["/usr/bin/false".to_string()], &archive, &work.dir).is_err(),
+            "run_boxed reads the status, so the non-zero arm never reaches the predicate"
+        );
     }
 
     #[test]
@@ -303,12 +421,16 @@ mod tests {
         let not_an_archive = d.file("notreally.tar", "this is not an archive at all");
         let dest = d.join("out");
         assert!(extract(&formats, &not_an_archive, &dest).is_err());
-        assert!(!dest.exists(), "no destination is published for a job that produced nothing");
+        assert!(
+            !dest.exists(),
+            "no destination is published for a job that produced nothing"
+        );
     }
 
     #[test]
     fn a_compress_derives_its_parent_and_names_from_absolute_paths() {
-        let (parent, names) = split_paths(&["/home/gm/a.txt".to_string(), "/home/gm/sub".to_string()]).unwrap();
+        let (parent, names) =
+            split_paths(&["/home/gm/a.txt".to_string(), "/home/gm/sub".to_string()]).unwrap();
         assert_eq!(parent, PathBuf::from("/home/gm"));
         assert_eq!(names, vec!["a.txt".to_string(), "sub".to_string()]);
         // A path from another directory would be stored under a name that is not its own.

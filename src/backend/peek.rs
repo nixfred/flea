@@ -28,7 +28,9 @@ pub fn peek_line(path: &str, first: usize, hidden: bool, mime: &Db, icons: &Name
     // pane.windowSize, so first cannot differ between them and path plus hidden is the whole key.
     out.push_str(&format!(
         r#"{{"t":"peeked","path":"{}","hidden":{},"n":{},"rows":["#,
-        escape(path), hidden, total
+        escape(path),
+        hidden,
+        total
     ));
     for i in 0..count {
         if i > 0 {
@@ -41,7 +43,9 @@ pub fn peek_line(path: &str, first: usize, hidden: bool, mime: &Db, icons: &Name
         let icon = icons.icon_for(mime.lookup(name), dir, 0);
         out.push_str(&format!(
             r#"{{"n":"{}","d":{},"i":"{}"}}"#,
-            escape(name), dir, escape(icon)
+            escape(name),
+            dir,
+            escape(icon)
         ));
     }
     out.push_str("]}");
@@ -53,10 +57,16 @@ pub fn peek_line(path: &str, first: usize, hidden: bool, mime: &Db, icons: &Name
 // outlived the refused read, and is left out when it did not, the same rule the error line follows.
 fn failed_peek(path: &str, hidden: bool) -> String {
     let mode = mode_of(path);
-    let mode_field = if mode == 0 { String::new() } else { format!(r#","mode":{}"#, mode) };
+    let mode_field = if mode == 0 {
+        String::new()
+    } else {
+        format!(r#","mode":{}"#, mode)
+    };
     format!(
         r#"{{"t":"peeked","path":"{}","hidden":{},"n":0,"failed":true{},"rows":[]}}"#,
-        escape(path), hidden, mode_field
+        escape(path),
+        hidden,
+        mode_field
     )
 }
 
@@ -80,9 +90,17 @@ mod tests {
         let line = peek_line(&d.path().to_string_lossy(), 10, false, &mime, &icons);
         assert!(line.starts_with(r#"{"t":"peeked""#));
         // The flag the request carried, so an asker can tell its own reply from the other's.
-        assert!(line.contains(r#""hidden":false"#), "the reply says what it was asked for: {}", line);
+        assert!(
+            line.contains(r#""hidden":false"#),
+            "the reply says what it was asked for: {}",
+            line
+        );
         // The marker file the sandbox carries is a dotfile, so hidden false drops it.
-        assert!(line.contains(r#""n":4"#) || line.contains(r#""n":3"#), "got {}", line);
+        assert!(
+            line.contains(r#""n":4"#) || line.contains(r#""n":3"#),
+            "got {}",
+            line
+        );
         let sub = line.find(r#""n":"sub""#).expect("the directory row");
         let txt = line.find(r#""n":"a.txt""#).expect("the file row");
         assert!(sub < txt, "directories sort first, the same as a listing");
@@ -101,20 +119,45 @@ mod tests {
         assert!(shown.contains(r#""hidden":false"#));
         let all = peek_line(&d.path().to_string_lossy(), 10, true, &mime, &icons);
         assert!(all.contains(".secret"));
-        assert!(all.contains(r#""hidden":true"#), "the two replies differ in the field that tells them apart");
+        assert!(
+            all.contains(r#""hidden":true"#),
+            "the two replies differ in the field that tells them apart"
+        );
     }
 
     #[test]
     fn a_directory_that_cannot_be_read_is_never_an_error_but_says_it_failed() {
         let d = TestDir::new("peekmissing");
         let (mime, icons) = tables();
-        let line = peek_line(&d.join("never-existed").to_string_lossy(), 10, false, &mime, &icons);
-        assert!(line.starts_with(r#"{"t":"peeked""#), "still an answer and not an error: {}", line);
+        let line = peek_line(
+            &d.join("never-existed").to_string_lossy(),
+            10,
+            false,
+            &mime,
+            &icons,
+        );
+        assert!(
+            line.starts_with(r#"{"t":"peeked""#),
+            "still an answer and not an error: {}",
+            line
+        );
         // A refusal is still a reply to one of the two askers, so it carries the flag too.
-        assert!(line.contains(r#""hidden":false"#), "a refusal is still a reply to a request: {}", line);
+        assert!(
+            line.contains(r#""hidden":false"#),
+            "a refusal is still a reply to a request: {}",
+            line
+        );
         assert!(line.contains(r#""n":0"#));
-        assert!(line.contains(r#""failed":true"#), "a column that could not look says so: {}", line);
-        assert!(!line.contains(r#""mode":"#), "nothing to stat, so no mode is claimed: {}", line);
+        assert!(
+            line.contains(r#""failed":true"#),
+            "a column that could not look says so: {}",
+            line
+        );
+        assert!(
+            !line.contains(r#""mode":"#),
+            "nothing to stat, so no mode is claimed: {}",
+            line
+        );
         assert!(line.ends_with(r#""rows":[]}"#));
     }
 
@@ -133,10 +176,22 @@ mod tests {
 
         assert!(empty_line.contains(r#""n":0"#), "got {}", empty_line);
         assert!(locked_line.contains(r#""n":0"#), "got {}", locked_line);
-        assert!(!empty_line.contains(r#""failed""#), "an empty directory is not a failure: {}", empty_line);
-        assert!(locked_line.contains(r#""failed":true"#), "got {}", locked_line);
+        assert!(
+            !empty_line.contains(r#""failed""#),
+            "an empty directory is not a failure: {}",
+            empty_line
+        );
+        assert!(
+            locked_line.contains(r#""failed":true"#),
+            "got {}",
+            locked_line
+        );
         // 0o40300: the file-type bits plus write and execute, which is what the stat still answers.
-        assert!(locked_line.contains(r#""mode":16576"#), "the mode the pane draws: {}", locked_line);
+        assert!(
+            locked_line.contains(r#""mode":16576"#),
+            "the mode the pane draws: {}",
+            locked_line
+        );
 
         std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -149,8 +204,16 @@ mod tests {
         }
         let (mime, icons) = tables();
         let line = peek_line(&d.path().to_string_lossy(), 5, false, &mime, &icons);
-        assert!(line.contains(r#""n":12"#), "the total is the whole directory: {}", line);
-        assert_eq!(line.matches(r#""d":"#).count(), 5, "only five rows were asked for");
+        assert!(
+            line.contains(r#""n":12"#),
+            "the total is the whole directory: {}",
+            line
+        );
+        assert_eq!(
+            line.matches(r#""d":"#).count(),
+            5,
+            "only five rows were asked for"
+        );
     }
 
     #[test]

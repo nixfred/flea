@@ -117,15 +117,17 @@ fn main() {
 
     // A reveal opens the target's directory; a missing target still opens it, with nothing selected.
     let (open_path, select_path) = match select_raw.as_deref().and_then(select_target) {
-        Some((parent, target)) => (Some(parent.to_string_lossy().into_owned()), Some(target.to_string_lossy().into_owned())),
+        Some((parent, target)) => (
+            Some(parent.to_string_lossy().into_owned()),
+            Some(target.to_string_lossy().into_owned()),
+        ),
         None => (start, None),
     };
 
-    // Both handles must be a tty, so a pipeline never receives the terminal interface.
+    // The window is the default until the terminal interface exists. Keep the tty check on an
+    // explicit --tui so a future implementation cannot write escape codes into a pipeline.
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let tui = if want_tui { true } else if want_gui { false } else { interactive };
-
-    if tui {
+    if want_tui {
         if !interactive {
             eprintln!("flea: the terminal interface needs a terminal on stdin and stdout");
             exit(2);
@@ -139,9 +141,15 @@ fn main() {
         exit(2);
     }
     match paths::ui_dir() {
-        Some(ui) => exit(gui::exec_qs(&ui, open_path.as_deref(), select_path.as_deref())),
+        Some(ui) => exit(gui::exec_qs(
+            &ui,
+            open_path.as_deref(),
+            select_path.as_deref(),
+        )),
         None => {
-            eprintln!("flea: the shell config is missing, set FLEA_UI or install /usr/share/flea/ui");
+            eprintln!(
+                "flea: the shell config is missing, set FLEA_UI or install /usr/share/flea/ui"
+            );
             exit(2);
         }
     }

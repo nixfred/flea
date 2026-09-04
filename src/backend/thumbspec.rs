@@ -60,7 +60,9 @@ impl Thumbnailers {
             for mime in mimes {
                 let key = aliases.canonical(&mime).to_string();
                 // corner: the first file to declare a MIME type keeps it, and load sorts each directory by path so that winner is fixed; see AGENTS.md "Thumbnailer specs".
-                by_mime.entry(key).or_insert_with(|| Spec { exec: exec.clone() });
+                by_mime
+                    .entry(key)
+                    .or_insert_with(|| Spec { exec: exec.clone() });
             }
         }
         Thumbnailers { by_mime }
@@ -89,7 +91,11 @@ fn search_path() -> Vec<PathBuf> {
         dirs.push(h.join(THUMBNAILERS_SUBDIR));
     }
     let data_dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_default();
-    let data_dirs = if data_dirs.is_empty() { DEFAULT_DATA_DIRS.to_string() } else { data_dirs };
+    let data_dirs = if data_dirs.is_empty() {
+        DEFAULT_DATA_DIRS.to_string()
+    } else {
+        data_dirs
+    };
     for d in data_dirs.split(':') {
         if !d.is_empty() {
             dirs.push(PathBuf::from(d).join(THUMBNAILERS_SUBDIR));
@@ -219,7 +225,8 @@ mod tests {
         assert!(t.for_mime("video/x-matroska", &a).is_some());
 
         // And the other direction: the declaration uses the canonical name and the query uses the alias.
-        let t2 = one("[Thumbnailer Entry]\nTryExec=/bin/sh\nExec=/bin/sh %u %o\nMimeType=image/heif;\n");
+        let t2 =
+            one("[Thumbnailer Entry]\nTryExec=/bin/sh\nExec=/bin/sh %u %o\nMimeType=image/heif;\n");
         assert!(t2.for_mime("image/heic", &a).is_some());
         assert!(t2.for_mime("image/heif", &a).is_some());
     }
@@ -287,9 +294,18 @@ mod tests {
         let ffmpeg = "[Thumbnailer Entry]\nTryExec=ffmpegthumbnailer\nExec=ffmpegthumbnailer -i %i -o %o -s %s -f\nMimeType=video/mp4;video/webm;video/matroska\n";
         Thumbnailers::from_entries(
             &[
-                ("/usr/share/thumbnailers/evince.thumbnailer".to_string(), evince.to_string()),
-                ("/usr/share/thumbnailers/ffmpegthumbnailer.thumbnailer".to_string(), ffmpeg.to_string()),
-                ("/usr/share/thumbnailers/glycin-image-rs.thumbnailer".to_string(), glycin.to_string()),
+                (
+                    "/usr/share/thumbnailers/evince.thumbnailer".to_string(),
+                    evince.to_string(),
+                ),
+                (
+                    "/usr/share/thumbnailers/ffmpegthumbnailer.thumbnailer".to_string(),
+                    ffmpeg.to_string(),
+                ),
+                (
+                    "/usr/share/thumbnailers/glycin-image-rs.thumbnailer".to_string(),
+                    glycin.to_string(),
+                ),
             ],
             &al(),
         )
@@ -311,22 +327,36 @@ mod tests {
     #[test]
     fn a_type_two_files_declare_goes_to_the_first_in_path_order() {
         // Both evince.thumbnailer and glycin-image-rs.thumbnailer declare image/tiff, and deleting the sort reddens this only while read_dir happens to return glycin first, which POSIX does not promise.
-        assert_eq!(shipped().for_mime("image/tiff", &al()).unwrap().exec[0], "evince-thumbnailer");
+        assert_eq!(
+            shipped().for_mime("image/tiff", &al()).unwrap().exec[0],
+            "evince-thumbnailer"
+        );
     }
 
     // The only test here that reads this box's own directory, and it asserts the read rather than which thumbnailers are installed, because not one of them is even an optional dependency.
     #[test]
     fn the_live_directory_is_read_without_a_panic() {
         let a = Aliases::load();
-        assert!(Thumbnailers::load(&a).for_mime("nonsense/nothing", &a).is_none());
+        assert!(Thumbnailers::load(&a)
+            .for_mime("nonsense/nothing", &a)
+            .is_none());
     }
 
     #[test]
     fn a_directorys_files_are_ordered_by_path_whatever_read_dir_returned() {
         let unsorted = vec![
-            ("/usr/share/thumbnailers/glycin-image-rs.thumbnailer".to_string(), String::new()),
-            ("/usr/share/thumbnailers/evince.thumbnailer".to_string(), String::new()),
+            (
+                "/usr/share/thumbnailers/glycin-image-rs.thumbnailer".to_string(),
+                String::new(),
+            ),
+            (
+                "/usr/share/thumbnailers/evince.thumbnailer".to_string(),
+                String::new(),
+            ),
         ];
-        assert_eq!(sorted_by_path(unsorted)[0].0, "/usr/share/thumbnailers/evince.thumbnailer");
+        assert_eq!(
+            sorted_by_path(unsorted)[0].0,
+            "/usr/share/thumbnailers/evince.thumbnailer"
+        );
     }
 }

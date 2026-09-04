@@ -62,7 +62,11 @@ pub fn run_with_timeout(full: &[String], limit: Duration) -> Ran {
         let left = deadline.saturating_duration_since(Instant::now());
         // Rounded up, not truncated, so a sub-millisecond remainder is waited out instead of truncating to a zero-timeout poll; left is recomputed against the fixed deadline every round, so nothing accumulates.
         let ms = left.as_nanos().div_ceil(NS_PER_MS).min(i32::MAX as u128) as i32;
-        let mut fds = PollFd { fd: pidfd.as_raw_fd(), events: POLLIN, revents: 0 };
+        let mut fds = PollFd {
+            fd: pidfd.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        };
         let ready = unsafe { poll(&mut fds, ONE_FD, ms) };
         if ready > 0 && fds.revents & POLLIN != 0 {
             break;
@@ -105,7 +109,10 @@ mod tests {
         let full = vec!["/usr/bin/sleep".to_string(), "600".to_string()];
         let started = Instant::now();
         // thumbs.rs ships JOB_TIMEOUT at 20 s, so this pins the kill to whatever deadline it was given.
-        assert!(matches!(run_with_timeout(&full, Duration::from_millis(300)), Ran::Failed));
+        assert!(matches!(
+            run_with_timeout(&full, Duration::from_millis(300)),
+            Ran::Failed
+        ));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
@@ -142,19 +149,34 @@ mod tests {
         // Above the exact wait's low single digits and well under the old step's 20 ms, so it is neither flaky nor vacuous.
         const BOUND: Duration = Duration::from_millis(10);
         // The argv is derived from the constant, so raising one cannot silently leave the other behind.
-        let full = vec!["/usr/bin/sleep".to_string(), format!("{:.3}", CHILD_SLEEP.as_secs_f64())];
+        let full = vec![
+            "/usr/bin/sleep".to_string(),
+            format!("{:.3}", CHILD_SLEEP.as_secs_f64()),
+        ];
         let mut overshoot: Vec<Duration> = Vec::new();
         for _ in 0..RUNS {
             let started = Instant::now();
-            assert!(matches!(run_with_timeout(&full, A_LONG_LIMIT), Ran::Succeeded));
+            assert!(matches!(
+                run_with_timeout(&full, A_LONG_LIMIT),
+                Ran::Succeeded
+            ));
             let took = started.elapsed();
             // The lower bound is what stops a shortened child from making every overshoot zero and the test vacuous.
-            assert!(took >= CHILD_SLEEP, "the child returned before its own sleep, at {:?}", took);
+            assert!(
+                took >= CHILD_SLEEP,
+                "the child returned before its own sleep, at {:?}",
+                took
+            );
             overshoot.push(took - CHILD_SLEEP);
         }
         overshoot.sort();
         let median = overshoot[RUNS / 2];
-        assert!(median < BOUND, "median overshoot was {:?} over {} runs", median, RUNS);
+        assert!(
+            median < BOUND,
+            "median overshoot was {:?} over {} runs",
+            median,
+            RUNS
+        );
     }
 
     #[test]
@@ -165,7 +187,11 @@ mod tests {
         let raw = unsafe { pidfd_open(child.id() as i32, 0) };
         assert!(raw >= 0, "pidfd_open on an unreaped exited child failed");
         let pidfd = unsafe { OwnedFd::from_raw_fd(raw) };
-        let mut fds = PollFd { fd: pidfd.as_raw_fd(), events: POLLIN, revents: 0 };
+        let mut fds = PollFd {
+            fd: pidfd.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        };
         assert_eq!(unsafe { poll(&mut fds, ONE_FD, 0) }, 1);
         assert!(fds.revents & POLLIN != 0);
         assert!(child.wait().unwrap().success());
@@ -204,11 +230,17 @@ mod tests {
         // Long enough that four of the five signals land while the child is still running.
         const CHILD_SLEEP: Duration = Duration::from_millis(200);
         signal_this_thread_five_times();
-        let full = vec!["/usr/bin/sleep".to_string(), format!("{:.3}", CHILD_SLEEP.as_secs_f64())];
+        let full = vec![
+            "/usr/bin/sleep".to_string(),
+            format!("{:.3}", CHILD_SLEEP.as_secs_f64()),
+        ];
         let started = Instant::now();
         let ran = run_with_timeout(&full, A_LONG_LIMIT);
         let took = started.elapsed();
-        assert!(matches!(ran, Ran::Succeeded), "the child was killed rather than waited for again");
+        assert!(
+            matches!(ran, Ran::Succeeded),
+            "the child was killed rather than waited for again"
+        );
         assert!(took >= CHILD_SLEEP, "the child was cut short at {:?}", took);
     }
 
@@ -220,12 +252,22 @@ mod tests {
         // Halfway between the deadline and the child, so neither a slow box nor a fast one can decide the verdict.
         const STILL_DEADLINED: Duration = Duration::from_millis(1000);
         signal_this_thread_five_times();
-        let full = vec!["/usr/bin/sleep".to_string(), format!("{:.3}", CHILD_SLEEP.as_secs_f64())];
+        let full = vec![
+            "/usr/bin/sleep".to_string(),
+            format!("{:.3}", CHILD_SLEEP.as_secs_f64()),
+        ];
         let started = Instant::now();
         let ran = run_with_timeout(&full, LIMIT);
         let took = started.elapsed();
-        assert!(matches!(ran, Ran::Failed), "the deadline was lost to the EINTR retries");
+        assert!(
+            matches!(ran, Ran::Failed),
+            "the deadline was lost to the EINTR retries"
+        );
         assert!(took >= LIMIT, "the deadline fired early at {:?}", took);
-        assert!(took < STILL_DEADLINED, "the deadline was lost to the EINTR retries, at {:?}", took);
+        assert!(
+            took < STILL_DEADLINED,
+            "the deadline was lost to the EINTR retries, at {:?}",
+            took
+        );
     }
 }

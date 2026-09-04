@@ -31,7 +31,10 @@ mod tests {
     // A table of exactly one spec, so a test names the Exec line it is substituting and nothing else.
     fn spec_for(exec: &str) -> Thumbnailers {
         let aliases = Aliases::from_str("image/heic image/heif\n");
-        let body = format!("[Thumbnailer Entry]\nTryExec=/bin/sh\nExec={}\nMimeType=image/jpeg;\n", exec);
+        let body = format!(
+            "[Thumbnailer Entry]\nTryExec=/bin/sh\nExec={}\nMimeType=image/jpeg;\n",
+            exec
+        );
         Thumbnailers::from_entries(&[("t.thumbnailer".to_string(), body)], &aliases)
     }
 
@@ -75,7 +78,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let (abs, got) = got.unwrap();
         // The sandbox binds abs, so a %u naming the link sends the child at a path that does not exist inside the namespace.
-        assert!(got[1].contains("/real/pic.jpg"), "%u kept the path that was asked for: {}", got[1]);
+        assert!(
+            got[1].contains("/real/pic.jpg"),
+            "%u kept the path that was asked for: {}",
+            got[1]
+        );
         assert!(!got[1].contains("/link/"));
         assert_eq!(got[1], uri_for(&abs));
     }

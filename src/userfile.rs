@@ -6,11 +6,14 @@ use std::path::{Path, PathBuf};
 
 // A set but empty XDG variable means unset, the reading xdg-mime and Omarchy's paths.lua both take.
 pub fn env_dir(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 pub fn home() -> Result<PathBuf, String> {
-    env_dir("HOME").ok_or_else(|| "HOME is not set, so no per-user preference file can be found".to_string())
+    env_dir("HOME")
+        .ok_or_else(|| "HOME is not set, so no per-user preference file can be found".to_string())
 }
 
 pub fn config_home() -> Result<PathBuf, String> {
@@ -23,7 +26,8 @@ pub fn config_home() -> Result<PathBuf, String> {
 // The write AGENTS.md "Predictable path writes" describes: exclusive temp file at the original's own mode, then a rename.
 pub fn replace_file(path: &Path, text: &str) -> Result<(), String> {
     // Through the symlink a dotfiles manager may have put here, so the link survives and its target is what changes.
-    let real = fs::canonicalize(path).map_err(|e| format!("{} could not be resolved ({:?})", path.display(), e.kind()))?;
+    let real = fs::canonicalize(path)
+        .map_err(|e| format!("{} could not be resolved ({:?})", path.display(), e.kind()))?;
     let mode = fs::metadata(&real)
         .map_err(|e| format!("{} could not be read ({:?})", real.display(), e.kind()))?
         .permissions()
@@ -32,7 +36,14 @@ pub fn replace_file(path: &Path, text: &str) -> Result<(), String> {
     let tmp = PathBuf::from(format!("{}.{}.tmp", real.display(), std::process::id()));
     let _ = fs::remove_file(&tmp);
     let written = write_new(&tmp, mode, text).and_then(|()| {
-        fs::rename(&tmp, &real).map_err(|e| format!("{} could not replace {} ({:?})", tmp.display(), real.display(), e.kind()))
+        fs::rename(&tmp, &real).map_err(|e| {
+            format!(
+                "{} could not replace {} ({:?})",
+                tmp.display(),
+                real.display(),
+                e.kind()
+            )
+        })
     });
     if written.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -64,9 +75,15 @@ mod tests {
         let link = d.join("link.conf");
         std::os::unix::fs::symlink(&real, &link).expect("symlink");
         replace_file(&link, "new\n").expect("replace");
-        assert!(fs::symlink_metadata(&link).expect("link").file_type().is_symlink());
+        assert!(fs::symlink_metadata(&link)
+            .expect("link")
+            .file_type()
+            .is_symlink());
         assert_eq!(fs::read_to_string(&real).expect("real"), "new\n");
-        assert_eq!(fs::metadata(&real).expect("real").permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&real).expect("real").permissions().mode() & 0o777,
+            0o600
+        );
         // ls -A: the sandbox holds its marker, the file and the link, and no temp file.
         assert_eq!(fs::read_dir(d.path()).expect("dir").count(), 3);
     }
@@ -82,10 +99,16 @@ mod tests {
     #[test]
     fn config_home_reads_a_non_empty_xdg_config_home_and_falls_back_to_home() {
         std::env::set_var("XDG_CONFIG_HOME", "/tmp/flea-test-xdg");
-        assert_eq!(config_home().expect("set"), PathBuf::from("/tmp/flea-test-xdg"));
+        assert_eq!(
+            config_home().expect("set"),
+            PathBuf::from("/tmp/flea-test-xdg")
+        );
         std::env::set_var("XDG_CONFIG_HOME", "");
         let home = std::env::var("HOME").expect("HOME");
-        assert_eq!(config_home().expect("fallback"), PathBuf::from(home).join(".config"));
+        assert_eq!(
+            config_home().expect("fallback"),
+            PathBuf::from(home).join(".config")
+        );
         std::env::remove_var("XDG_CONFIG_HOME");
     }
 }

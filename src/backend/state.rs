@@ -41,4 +41,3 @@ pub struct State {
     // When the running walk last announced its count, so SEARCH_REPORT can throttle the stream.
     pub search_reported: Instant,
 }
-

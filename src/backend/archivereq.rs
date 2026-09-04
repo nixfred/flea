@@ -4,16 +4,15 @@
 use crate::backend::archive::Formats;
 use crate::backend::archiveops::{compress, convert_one, extract, split_paths};
 use crate::backend::convert;
-use crate::backend::opsreq::{op_err, OpMsg};
-use crate::json::escape;
-use std::path::PathBuf;
 use crate::backend::opsdispatch::Ops;
+use crate::backend::opsreq::{op_err, OpMsg};
 use crate::backend::proto::error_line;
+use crate::json::escape;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread;
-
 
 pub fn archivestarted_line(id: usize) -> String {
     format!(r#"{{"t":"archivestarted","id":{}}}"#, id)
@@ -22,7 +21,13 @@ pub fn archivestarted_line(id: usize) -> String {
 // verified is false only when an extract could not read the archive's own index, so it could not
 // confirm the tool produced what the index named. The operator is told which kind of success it was.
 pub fn archivedone_line(id: usize, ok: bool, verified: bool, err: &str) -> String {
-    format!(r#"{{"t":"archivedone","id":{},"ok":{},"verified":{},"err":"{}"}}"#, id, ok, verified, escape(err))
+    format!(
+        r#"{{"t":"archivedone","id":{},"ok":{},"verified":{},"err":"{}"}}"#,
+        id,
+        ok,
+        verified,
+        escape(err)
+    )
 }
 
 pub fn convertstarted_line(id: usize) -> String {
@@ -32,23 +37,48 @@ pub fn convertstarted_line(id: usize) -> String {
 pub fn convertdone_line(id: usize, ok: bool, path: &str, err: &str) -> String {
     format!(
         r#"{{"t":"convertdone","id":{},"ok":{},"path":"{}","err":"{}"}}"#,
-        id, ok, escape(path), escape(err)
+        id,
+        ok,
+        escape(path),
+        escape(err)
     )
 }
 
 // Sample output: {"t":"formats","archive":["zip","tar","tar.zst"],"convert":true}
 pub fn formats_line(formats: &Formats, can_convert: bool) -> String {
-    let names: Vec<String> = formats.names().iter().map(|n| format!(r#""{}""#, escape(n))).collect();
-    format!(r#"{{"t":"formats","archive":[{}],"convert":{}}}"#, names.join(","), can_convert)
+    let names: Vec<String> = formats
+        .names()
+        .iter()
+        .map(|n| format!(r#""{}""#, escape(n)))
+        .collect();
+    format!(
+        r#"{{"t":"formats","archive":[{}],"convert":{}}}"#,
+        names.join(","),
+        can_convert
+    )
 }
 
-pub fn run_archive(id: usize, compressing: bool, paths: Vec<String>, format: String,
-                   archive: PathBuf, dest: PathBuf, formats: &Formats, tx: Sender<OpMsg>) {
+pub fn run_archive(
+    id: usize,
+    compressing: bool,
+    paths: Vec<String>,
+    format: String,
+    archive: PathBuf,
+    dest: PathBuf,
+    formats: &Formats,
+    tx: Sender<OpMsg>,
+) {
     let result = if compressing {
         // A compress has nothing to verify against: it writes the archive rather than reading one.
         match split_paths(&paths) {
-            Some((parent, names)) => compress(formats, &parent, &names, &format, &dest).map(|()| true),
-            None => Err(op_err("archive", "", "a compress takes absolute paths from one directory")),
+            Some((parent, names)) => {
+                compress(formats, &parent, &names, &format, &dest).map(|()| true)
+            }
+            None => Err(op_err(
+                "archive",
+                "",
+                "a compress takes absolute paths from one directory",
+            )),
         }
     } else {
         extract(formats, &archive, &dest)
@@ -81,7 +111,12 @@ pub fn start_archive(
 ) {
     // An op that names neither would otherwise fall through to extract, so it is refused by name.
     if op != "compress" && op != "extract" {
-        writeln!(out, "{}", error_line(&op_err("archive", op, "op must be compress or extract"))).ok();
+        writeln!(
+            out,
+            "{}",
+            error_line(&op_err("archive", op, "op must be compress or extract"))
+        )
+        .ok();
         out.flush().ok();
         return;
     }
@@ -90,12 +125,16 @@ pub fn start_archive(
     writeln!(out, "{}", archivestarted_line(id)).ok();
     out.flush().ok();
     let tx = ops.tx.clone();
-    thread::spawn(move || {
-        run_archive(id, compressing, paths, format, archive, dest, &formats, tx)
-    });
+    thread::spawn(move || run_archive(id, compressing, paths, format, archive, dest, &formats, tx));
 }
 
-pub fn start_convert(out: &mut impl Write, ops: &mut Ops, input: PathBuf, dest: PathBuf, strip: bool) {
+pub fn start_convert(
+    out: &mut impl Write,
+    ops: &mut Ops,
+    input: PathBuf,
+    dest: PathBuf,
+    strip: bool,
+) {
     if !convert::available() {
         let e = op_err("convert", "", "ImageMagick is not installed on this box");
         writeln!(out, "{}", error_line(&e)).ok();
@@ -117,10 +156,14 @@ mod tests {
     #[test]
     fn every_line_matches_the_shape_the_operations_design_names() {
         assert_eq!(archivestarted_line(13), r#"{"t":"archivestarted","id":13}"#);
-        assert_eq!(archivedone_line(13, true, true, ""),
-                   r#"{"t":"archivedone","id":13,"ok":true,"verified":true,"err":""}"#);
-        assert_eq!(archivedone_line(13, true, false, ""),
-                   r#"{"t":"archivedone","id":13,"ok":true,"verified":false,"err":""}"#);
+        assert_eq!(
+            archivedone_line(13, true, true, ""),
+            r#"{"t":"archivedone","id":13,"ok":true,"verified":true,"err":""}"#
+        );
+        assert_eq!(
+            archivedone_line(13, true, false, ""),
+            r#"{"t":"archivedone","id":13,"ok":true,"verified":false,"err":""}"#
+        );
         assert_eq!(convertstarted_line(15), r#"{"t":"convertstarted","id":15}"#);
         assert_eq!(
             convertdone_line(15, true, "/home/gm/photo.jpg", ""),
@@ -137,33 +180,45 @@ mod tests {
         );
     }
 
-
-
-
-
-
-
-
-
     #[test]
     fn a_destination_already_there_is_refused_before_any_tool_runs() {
         let d = TestDir::new("archrefuse");
         let f = Formats::from_tools(true, true);
         d.file("out.zip", "already here");
-        let e = compress(&f, d.path(), &["a.txt".to_string()], "zip", &d.join("out.zip")).unwrap_err();
+        let e = compress(
+            &f,
+            d.path(),
+            &["a.txt".to_string()],
+            "zip",
+            &d.join("out.zip"),
+        )
+        .unwrap_err();
         assert!(e.msg.contains("already exists"));
-        assert_eq!(std::fs::read_to_string(d.join("out.zip")).unwrap(), "already here");
+        assert_eq!(
+            std::fs::read_to_string(d.join("out.zip")).unwrap(),
+            "already here"
+        );
 
         d.dir("out");
         let e = extract(&f, &d.join("x.zip"), &d.join("out")).unwrap_err();
-        assert!(e.msg.contains("already exists"), "merging into a directory in use is the surprise this rules out");
+        assert!(
+            e.msg.contains("already exists"),
+            "merging into a directory in use is the surprise this rules out"
+        );
     }
 
     #[test]
     fn a_format_no_tool_offers_is_a_named_error_rather_than_a_silent_failure() {
         let d = TestDir::new("archnotool");
         let none = Formats::from_tools(false, false);
-        let e = compress(&none, d.path(), &["a.txt".to_string()], "zip", &d.join("out.zip")).unwrap_err();
+        let e = compress(
+            &none,
+            d.path(),
+            &["a.txt".to_string()],
+            "zip",
+            &d.join("out.zip"),
+        )
+        .unwrap_err();
         assert!(e.msg.contains("no tool"), "got {}", e.msg);
     }
 

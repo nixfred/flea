@@ -118,7 +118,9 @@ mod tests {
         let expected = fs::symlink_metadata(&d).unwrap().size()
             + fs::symlink_metadata(format!("{}/a.txt", d)).unwrap().size()
             + fs::symlink_metadata(format!("{}/sub", d)).unwrap().size()
-            + fs::symlink_metadata(format!("{}/sub/b.txt", d)).unwrap().size();
+            + fs::symlink_metadata(format!("{}/sub/b.txt", d))
+                .unwrap()
+                .size();
         assert_eq!(result.bytes, expected);
         assert!(!result.partial);
         fs::remove_dir_all(&d).unwrap();
@@ -135,7 +137,10 @@ mod tests {
         let expected = fs::symlink_metadata(&d).unwrap().size()
             + fs::symlink_metadata(format!("{}/link", d)).unwrap().size();
         assert_eq!(result.bytes, expected);
-        assert!(result.bytes < 100_000, "the symlink's own small size counts, not the target it points at");
+        assert!(
+            result.bytes < 100_000,
+            "the symlink's own small size counts, not the target it points at"
+        );
         fs::remove_dir_all(&d).unwrap();
         fs::remove_dir_all(&target).unwrap();
     }
@@ -158,10 +163,18 @@ mod tests {
         fs::write(format!("{}/locked/hidden.txt", d), "xyz").unwrap();
         fs::set_permissions(format!("{}/locked", d), fs::Permissions::from_mode(0o000)).unwrap();
         let result = walk(Path::new(&d));
-        assert!(result.partial, "a subtree it could not read must mark partial");
+        assert!(
+            result.partial,
+            "a subtree it could not read must mark partial"
+        );
         let expected_min = fs::symlink_metadata(&d).unwrap().size()
-            + fs::symlink_metadata(format!("{}/visible.txt", d)).unwrap().size();
-        assert!(result.bytes >= expected_min, "what the walk could see must still be counted");
+            + fs::symlink_metadata(format!("{}/visible.txt", d))
+                .unwrap()
+                .size();
+        assert!(
+            result.bytes >= expected_min,
+            "what the walk could see must still be counted"
+        );
         fs::set_permissions(format!("{}/locked", d), fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_dir_all(&d).unwrap();
     }

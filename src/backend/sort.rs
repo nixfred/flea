@@ -177,7 +177,12 @@ mod tests {
         // The two header columns that are not orders, the empty key a missing by parses to, and the
         // wrong case, because the key is the wire's own spelling.
         for key in ["kind", "mode", "", "Name"] {
-            assert_eq!(parse_sort_by(key).err(), Some("no such sort key; send name, size or mtime"), "key {:?}", key);
+            assert_eq!(
+                parse_sort_by(key).err(),
+                Some("no such sort key; send name, size or mtime"),
+                "key {:?}",
+                key
+            );
         }
     }
 
@@ -185,7 +190,12 @@ mod tests {
     fn sort_listing_routes_name_to_the_phase_one_order_and_never_stats() {
         let mut l = sample();
         // A base that does not exist: name order never looks at it, so nothing here can fail.
-        let (pass, _) = sort_listing(&mut l, Path::new("/definitely/not/here"), SortBy::Name, true);
+        let (pass, _) = sort_listing(
+            &mut l,
+            Path::new("/definitely/not/here"),
+            SortBy::Name,
+            true,
+        );
         assert_eq!(pass, 0.0, "name pays no metadata pass");
         assert_eq!(l.name(0), "zzz-dir");
         assert_eq!(l.name(3), "alpha.txt");
@@ -204,20 +214,29 @@ mod tests {
 
     #[test]
     fn a_digit_run_compares_by_value_and_not_by_byte() {
-        assert_eq!(ordered(&["file_10", "file_2", "file_11", "file_1"]),
-                   vec!["file_1", "file_2", "file_10", "file_11"]);
+        assert_eq!(
+            ordered(&["file_10", "file_2", "file_11", "file_1"]),
+            vec!["file_1", "file_2", "file_10", "file_11"]
+        );
         // Digits leading the name, and several runs in one name.
-        assert_eq!(ordered(&["10file", "2file", "1file"]), vec!["1file", "2file", "10file"]);
-        assert_eq!(ordered(&["v1.2.10", "v1.2.9", "v1.10.0"]),
-                   vec!["v1.2.9", "v1.2.10", "v1.10.0"]);
+        assert_eq!(
+            ordered(&["10file", "2file", "1file"]),
+            vec!["1file", "2file", "10file"]
+        );
+        assert_eq!(
+            ordered(&["v1.2.10", "v1.2.9", "v1.10.0"]),
+            vec!["v1.2.9", "v1.2.10", "v1.10.0"]
+        );
     }
 
     #[test]
     fn letters_compare_case_insensitively_and_do_not_form_an_upper_case_block() {
         assert_eq!(ordered(&["b", "A", "a", "B"]), vec!["A", "a", "B", "b"]);
         // The byte compare this replaces put every capital first, so README led the listing.
-        assert_eq!(ordered(&["apple.txt", "Banana.txt", "README"]),
-                   vec!["apple.txt", "Banana.txt", "README"]);
+        assert_eq!(
+            ordered(&["apple.txt", "Banana.txt", "README"]),
+            vec!["apple.txt", "Banana.txt", "README"]
+        );
     }
 
     #[test]
@@ -225,7 +244,10 @@ mod tests {
         // Numerically equal, so the raw bytes decide, and they decide the same way every run.
         let once = ordered(&["file_1", "file_01", "file_001"]);
         let again = ordered(&["file_001", "file_1", "file_01"]);
-        assert_eq!(once, again, "the same names must produce the same listing whatever readdir said");
+        assert_eq!(
+            once, again,
+            "the same names must produce the same listing whatever readdir said"
+        );
         assert_eq!(once, vec!["file_001", "file_01", "file_1"]);
         assert_eq!(ordered(&["README", "readme"]), vec!["README", "readme"]);
         assert_eq!(ordered(&["readme", "README"]), vec!["README", "readme"]);
@@ -237,8 +259,11 @@ mod tests {
         let big = format!("f{}", "9".repeat(40));
         let bigger = format!("f{}", "9".repeat(41));
         let padded = format!("f{}{}", "0".repeat(30), "9".repeat(40));
-        assert_eq!(ordered(&[&bigger, &big]), vec![big.clone(), bigger.clone()],
-                   "more significant digits is the larger number");
+        assert_eq!(
+            ordered(&[&bigger, &big]),
+            vec![big.clone(), bigger.clone()],
+            "more significant digits is the larger number"
+        );
         // Thirty leading zeros are worth nothing, so this is the same value as big.
         let pair = ordered(&[&padded, &big]);
         assert_eq!(pair.len(), 2);
@@ -259,8 +284,10 @@ mod tests {
     // exactly what the comparator's corner tag promises.
     #[test]
     fn a_name_above_ascii_orders_by_code_point_and_sorts_after_every_ascii_letter() {
-        assert_eq!(ordered(&["\u{e9}clair.txt", "apple.txt", "Zebra.txt"]),
-                   vec!["apple.txt", "Zebra.txt", "\u{e9}clair.txt"]);
+        assert_eq!(
+            ordered(&["\u{e9}clair.txt", "apple.txt", "Zebra.txt"]),
+            vec!["apple.txt", "Zebra.txt", "\u{e9}clair.txt"]
+        );
         // Same base letter, different case, and no collation joins them: e is ASCII and is folded,
         // the accented one is two bytes starting 0xc3 and is not.
         assert_eq!(ordered(&["\u{e9}", "E", "e"]), vec!["E", "e", "\u{e9}"]);

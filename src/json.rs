@@ -87,9 +87,16 @@ pub fn field_usize(line: &str, key: &str) -> Option<usize> {
 
 // Sample input: "rows":[2,17,140]; a missing, empty or malformed array is an empty vector.
 pub fn field_usize_array(line: &str, key: &str) -> Vec<usize> {
-    let rest = value_start(line, key).map(|s| line[s..].trim_start()).unwrap_or("");
-    let body = rest.strip_prefix('[').and_then(|r| r.split(']').next()).unwrap_or("");
-    body.split(',').filter_map(|p| p.trim().parse().ok()).collect()
+    let rest = value_start(line, key)
+        .map(|s| line[s..].trim_start())
+        .unwrap_or("");
+    let body = rest
+        .strip_prefix('[')
+        .and_then(|r| r.split(']').next())
+        .unwrap_or("");
+    body.split(',')
+        .filter_map(|p| p.trim().parse().ok())
+        .collect()
 }
 
 // Sample input: "paths":["/home/gm/a.txt","/home/gm/b, [odd].txt"]; a path may hold a comma or a
@@ -173,7 +180,10 @@ mod tests {
     #[test]
     fn a_value_containing_json_syntax_survives_the_scan() {
         let line = r#"{"c":"list","path":"/tmp/a\"b,\"c\":\"d","first":10}"#;
-        assert_eq!(field_str(line, "path").as_deref(), Some("/tmp/a\"b,\"c\":\"d"));
+        assert_eq!(
+            field_str(line, "path").as_deref(),
+            Some("/tmp/a\"b,\"c\":\"d")
+        );
     }
 
     #[test]
@@ -211,10 +221,19 @@ mod tests {
 
     #[test]
     fn a_usize_array_keeps_the_indices_it_can_read_and_drops_the_rest() {
-        assert_eq!(field_usize_array(r#"{"rows":[2,17,140]}"#, "rows"), vec![2, 17, 140]);
+        assert_eq!(
+            field_usize_array(r#"{"rows":[2,17,140]}"#, "rows"),
+            vec![2, 17, 140]
+        );
         // Order and repeats are the client's business, so both survive the scan unchanged.
-        assert_eq!(field_usize_array(r#"{"rows":[9,0,9,0]}"#, "rows"), vec![9, 0, 9, 0]);
-        assert_eq!(field_usize_array(r#"{"rows":[ 3 , 4 ]}"#, "rows"), vec![3, 4]);
+        assert_eq!(
+            field_usize_array(r#"{"rows":[9,0,9,0]}"#, "rows"),
+            vec![9, 0, 9, 0]
+        );
+        assert_eq!(
+            field_usize_array(r#"{"rows":[ 3 , 4 ]}"#, "rows"),
+            vec![3, 4]
+        );
     }
 
     #[test]
@@ -230,15 +249,24 @@ mod tests {
         assert_eq!(field_usize_array(r#"{"rows":[1.5,6]}"#, "rows"), vec![6]);
         assert_eq!(field_usize_array(r#"{"rows":[nope,7]}"#, "rows"), vec![7]);
         // Wider than u64, so the parse fails and the row beside it still lands.
-        assert_eq!(field_usize_array(r#"{"rows":[99999999999999999999999999,8]}"#, "rows"), vec![8]);
-        assert_eq!(field_usize_array(r#"{"rows":[18446744073709551615]}"#, "rows"), vec![usize::MAX]);
+        assert_eq!(
+            field_usize_array(r#"{"rows":[99999999999999999999999999,8]}"#, "rows"),
+            vec![8]
+        );
+        assert_eq!(
+            field_usize_array(r#"{"rows":[18446744073709551615]}"#, "rows"),
+            vec![usize::MAX]
+        );
     }
     #[test]
     fn a_path_array_survives_a_comma_and_a_bracket_inside_a_path() {
         let line = r#"{"c":"trash","paths":["/home/gm/a.txt","/home/gm/b, [odd].txt"]}"#;
         assert_eq!(
             field_str_array(line, "paths"),
-            vec!["/home/gm/a.txt".to_string(), "/home/gm/b, [odd].txt".to_string()],
+            vec![
+                "/home/gm/a.txt".to_string(),
+                "/home/gm/b, [odd].txt".to_string()
+            ],
             "splitting on the comma or the bracket would tear this second path in half"
         );
     }
@@ -263,7 +291,10 @@ mod tests {
         assert!(field_str_array(r#"{"paths":"not an array"}"#, "paths").is_empty());
         assert!(field_str_array(r#"{"paths":[123,456]}"#, "paths").is_empty());
         // An element with no closing quote ends the array rather than running off the line.
-        assert_eq!(field_str_array(r#"{"paths":["/a","/unterminated"#, "paths"), vec!["/a".to_string()]);
+        assert_eq!(
+            field_str_array(r#"{"paths":["/a","/unterminated"#, "paths"),
+            vec!["/a".to_string()]
+        );
         assert!(field_str_array("", "paths").is_empty());
     }
 

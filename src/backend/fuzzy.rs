@@ -34,7 +34,10 @@ struct Folded {
 
 fn fold(c: char) -> Folded {
     let lower = c.to_lowercase().next().unwrap_or(c);
-    Folded { lower, upper: lower != c }
+    Folded {
+        lower,
+        upper: lower != c,
+    }
 }
 
 // Where the candidate's own name begins: the character after its last path separator.
@@ -197,14 +200,24 @@ mod tests {
     fn a_contiguous_run_beats_a_scattered_one() {
         let s_run = score("report.txt", "rep").unwrap();
         let s_scattered = score("raspberry-pie.txt", "rep").unwrap();
-        assert!(s_run > s_scattered, "run {} scattered {}", s_run, s_scattered);
+        assert!(
+            s_run > s_scattered,
+            "run {} scattered {}",
+            s_run,
+            s_scattered
+        );
     }
 
     #[test]
     fn a_boundary_start_beats_one_inside_a_word() {
         let s_boundary = score("my-notes.txt", "notes").unwrap();
         let s_inside = score("bignotes.txt", "notes").unwrap();
-        assert!(s_boundary > s_inside, "boundary {} inside {}", s_boundary, s_inside);
+        assert!(
+            s_boundary > s_inside,
+            "boundary {} inside {}",
+            s_boundary,
+            s_inside
+        );
     }
 
     #[test]

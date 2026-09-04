@@ -45,7 +45,11 @@ impl Search {
     }
 
     fn read_one(&mut self, rel: &str, listing: &mut Listing) {
-        let dir = if rel.is_empty() { self.root.clone() } else { self.root.join(rel) };
+        let dir = if rel.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(rel)
+        };
         // corner: an unreadable directory is skipped in silence, exactly as scan.rs's phase one skips an unreadable entry.
         let rd = match std::fs::read_dir(&dir) {
             Ok(rd) => rd,
@@ -61,7 +65,11 @@ impl Search {
             self.scanned += 1;
             // d_type is free and answers is_dir with no stat, matching scan.rs's phase 1.
             let is_dir = entry.file_type().map(|f| f.is_dir()).unwrap_or(false);
-            let child = if rel.is_empty() { name.to_string() } else { format!("{}/{}", rel, name) };
+            let child = if rel.is_empty() {
+                name.to_string()
+            } else {
+                format!("{}/{}", rel, name)
+            };
             // The candidate is the whole relative path, not the base name, so one query can span a
             // separator: "dwnhelp" reaches "downloads/helper.txt", see docs/protocol.md "search".
             if let Some(score) = self.fuzzy.score(&child) {
@@ -138,7 +146,10 @@ mod tests {
         d.file("unrelated.txt", "");
 
         let (l, s) = walk_all(root(&d), "bench", false);
-        assert_eq!(sorted_names(&l), ["tools/benches", "tools/benches/bench-run.sh"]);
+        assert_eq!(
+            sorted_names(&l),
+            ["tools/benches", "tools/benches/bench-run.sh"]
+        );
         assert_eq!(s.scanned, 4);
         // The directory match keeps its directory bit, so the client can navigate into it.
         for i in 0..l.len() {
@@ -168,7 +179,10 @@ mod tests {
         let (l, _) = walk_all(root(&d), "bench", false);
         // All three carry the query whatever readdir said: the two whose own name is the query lead
         // on score, the shorter of those two leads on the tie, and the parent-only match comes last.
-        assert_eq!(names(&l), ["bench", "bench.txt", "bench/unrelated-notes.txt"]);
+        assert_eq!(
+            names(&l),
+            ["bench", "bench.txt", "bench/unrelated-notes.txt"]
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 // The staging directory every delegated archive job writes into, the jail those jobs run in, and the
 // two reads an extract is verified against. The jobs themselves are archiveops.rs.
-use crate::backend::sandbox;
 use crate::backend::archive::Formats;
 use crate::backend::archivelist::parse_reader;
 use crate::backend::opsreq::op_err;
+use crate::backend::sandbox;
 use crate::error::{from_io, FleaError};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,7 +31,13 @@ impl Work {
         let mut last = String::new();
         for _ in 0..WORK_ATTEMPTS {
             let seq = WORK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = beside.join(format!("{}{}-{}-{}", WORK_PREFIX, tag, std::process::id(), seq));
+            let dir = beside.join(format!(
+                "{}{}-{}-{}",
+                WORK_PREFIX,
+                tag,
+                std::process::id(),
+                seq
+            ));
             match std::fs::create_dir(&dir) {
                 Ok(()) => return Ok(Work { dir }),
                 // Nothing is ever removed here: a name in use may be a live sibling's, and the only
@@ -42,14 +48,22 @@ impl Work {
                 Err(e) => return Err(from_io("archive", &dir.to_string_lossy(), &e)),
             }
         }
-        Err(op_err("archive", &last, "no free work directory beside the destination"))
+        Err(op_err(
+            "archive",
+            &last,
+            "no free work directory beside the destination",
+        ))
     }
 }
 
 impl Drop for Work {
     fn drop(&mut self) {
         // Only ever a directory this process made, under a name only this module writes.
-        if self.dir.file_name().is_some_and(|n| n.to_string_lossy().starts_with(WORK_PREFIX)) {
+        if self
+            .dir
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with(WORK_PREFIX))
+        {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
@@ -62,7 +76,11 @@ pub fn run_boxed(inner: Vec<String>, read_only: &Path, writable: &Path) -> Resul
     // refuses the job rather than running it unsandboxed, the same rule thumbs.rs already follows.
     if !sandbox::available() {
         let tool = inner.first().map_or("", |s| s.as_str());
-        return Err(op_err("archive", tool, "the sandbox is unavailable: bwrap or prlimit is not on PATH"));
+        return Err(op_err(
+            "archive",
+            tool,
+            "the sandbox is unavailable: bwrap or prlimit is not on PATH",
+        ));
     }
     let full = sandbox::wrap(&inner, read_only, writable);
     let out = Command::new(&full[0])
@@ -75,12 +93,17 @@ pub fn run_boxed(inner: Vec<String>, read_only: &Path, writable: &Path) -> Resul
         return Ok(());
     }
     let text = String::from_utf8_lossy(&out.stderr);
-    Err(op_err("archive", "", text.lines().last().unwrap_or("the archive tool failed")))
+    Err(op_err(
+        "archive",
+        "",
+        text.lines().last().unwrap_or("the archive tool failed"),
+    ))
 }
 
-
 pub fn is_empty_dir(dir: &Path) -> bool {
-    std::fs::read_dir(dir).map(|mut e| e.next().is_none()).unwrap_or(true)
+    std::fs::read_dir(dir)
+        .map(|mut e| e.next().is_none())
+        .unwrap_or(true)
 }
 
 // How many members the index names that should have produced something in the destination, per
@@ -117,7 +140,6 @@ pub fn archive_produced_count(formats: &Formats, archive: &Path) -> Option<usize
     Some(listed.produced_entries)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,11 +153,18 @@ mod tests {
             let w = Work::new(d.path(), "arc").expect("work");
             kept = w.dir.clone();
             assert!(kept.is_dir());
-            assert!(kept.file_name().unwrap().to_string_lossy().starts_with(WORK_PREFIX));
+            assert!(kept
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(WORK_PREFIX));
             // Beside the destination, so the rename that follows never crosses a filesystem.
             assert_eq!(kept.parent().unwrap(), d.path());
         }
-        assert!(!kept.exists(), "the work directory goes with the job that made it");
+        assert!(
+            !kept.exists(),
+            "the work directory goes with the job that made it"
+        );
     }
 
     #[test]
@@ -143,13 +172,19 @@ mod tests {
         let d = TestDir::new("archwork2");
         let first = Work::new(d.path(), "ext").expect("first");
         let second = Work::new(d.path(), "ext").expect("second");
-        assert_ne!(first.dir, second.dir, "a second job must not claim the first job's directory");
+        assert_ne!(
+            first.dir, second.dir,
+            "a second job must not claim the first job's directory"
+        );
         assert!(first.dir.is_dir(), "and must not have destroyed it");
         assert!(second.dir.is_dir());
         // In flight, so a live sibling's contents have to survive the other one being created.
         std::fs::write(first.dir.join("in-flight"), b"payload").expect("write");
         let third = Work::new(d.path(), "ext").expect("third");
-        assert!(first.dir.join("in-flight").is_file(), "a third job must not destroy either");
+        assert!(
+            first.dir.join("in-flight").is_file(),
+            "a third job must not destroy either"
+        );
         assert_ne!(third.dir, first.dir);
         assert_ne!(third.dir, second.dir);
     }

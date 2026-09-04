@@ -105,22 +105,37 @@ mod tests {
     #[test]
     fn the_generic_icons_table_wins_when_it_has_an_answer() {
         let n = names();
-        assert_eq!(n.icon_for(Some("model/vrml"), false, PLAIN), "x-office-document");
+        assert_eq!(
+            n.icon_for(Some("model/vrml"), false, PLAIN),
+            "x-office-document"
+        );
     }
 
     #[test]
     fn an_unlisted_type_falls_back_to_its_media_class() {
         let n = names();
-        assert_eq!(n.icon_for(Some("image/jpeg"), false, PLAIN), "image-x-generic");
-        assert_eq!(n.icon_for(Some("video/mp4"), false, PLAIN), "video-x-generic");
-        assert_eq!(n.icon_for(Some("audio/flac"), false, PLAIN), "audio-x-generic");
+        assert_eq!(
+            n.icon_for(Some("image/jpeg"), false, PLAIN),
+            "image-x-generic"
+        );
+        assert_eq!(
+            n.icon_for(Some("video/mp4"), false, PLAIN),
+            "video-x-generic"
+        );
+        assert_eq!(
+            n.icon_for(Some("audio/flac"), false, PLAIN),
+            "audio-x-generic"
+        );
     }
 
     #[test]
     fn an_unknown_type_is_still_a_real_icon_name() {
         let n = names();
         assert_eq!(n.icon_for(None, false, PLAIN), "text-x-generic");
-        assert_eq!(n.icon_for(Some("nonsense/nothing"), false, PLAIN), "text-x-generic");
+        assert_eq!(
+            n.icon_for(Some("nonsense/nothing"), false, PLAIN),
+            "text-x-generic"
+        );
     }
 
     #[test]
@@ -133,7 +148,10 @@ mod tests {
     #[test]
     fn a_missing_table_still_answers() {
         let n = Names::from_str("");
-        assert_eq!(n.icon_for(Some("image/jpeg"), false, PLAIN), "image-x-generic");
+        assert_eq!(
+            n.icon_for(Some("image/jpeg"), false, PLAIN),
+            "image-x-generic"
+        );
     }
 
     #[test]
@@ -147,22 +165,37 @@ mod tests {
     fn an_unlisted_application_type_is_not_an_executable_unless_it_is_one() {
         let n = names();
         // application/pkcs7-mime is unlisted in the fixture, as it is in this box's own table.
-        assert_eq!(n.icon_for(Some("application/pkcs7-mime"), false, PLAIN), "application-x-generic");
-        assert_eq!(n.icon_for(Some("application/x-sharedlib"), false, EXECUTABLE), "application-x-executable");
+        assert_eq!(
+            n.icon_for(Some("application/pkcs7-mime"), false, PLAIN),
+            "application-x-generic"
+        );
+        assert_eq!(
+            n.icon_for(Some("application/x-sharedlib"), false, EXECUTABLE),
+            "application-x-executable"
+        );
     }
 
     #[test]
     fn a_listed_application_type_still_wins_over_the_class_fallback() {
         let n = names();
         // application/x-executable and application/zip both have generic-icons entries on a real box.
-        assert_eq!(n.icon_for(Some("application/x-executable"), false, PLAIN), "application-x-executable");
-        assert_eq!(n.icon_for(Some("application/zip"), false, PLAIN), "package-x-generic");
+        assert_eq!(
+            n.icon_for(Some("application/x-executable"), false, PLAIN),
+            "application-x-executable"
+        );
+        assert_eq!(
+            n.icon_for(Some("application/zip"), false, PLAIN),
+            "package-x-generic"
+        );
     }
 
     #[test]
     fn a_vanished_row_reports_mode_zero_and_still_gets_a_real_name() {
         let n = names();
-        assert_eq!(n.icon_for(Some("application/pkcs7-mime"), false, 0), "application-x-generic");
+        assert_eq!(
+            n.icon_for(Some("application/pkcs7-mime"), false, 0),
+            "application-x-generic"
+        );
     }
 
     // The only test here that reads this box's own table, and it asserts the module's promise rather than any row's value.
@@ -170,8 +203,17 @@ mod tests {
     fn the_live_table_parses_and_never_answers_an_empty_name() {
         let n = Names::load();
         assert_eq!(n.icon_for(None, true, 0o040755), "folder");
-        for mime in ["image/jpeg", "application/zip", "application/pkcs7-mime", "nonsense/nothing", ""] {
-            assert!(!n.icon_for(Some(mime), false, PLAIN).is_empty(), "empty name for {mime}");
+        for mime in [
+            "image/jpeg",
+            "application/zip",
+            "application/pkcs7-mime",
+            "nonsense/nothing",
+            "",
+        ] {
+            assert!(
+                !n.icon_for(Some(mime), false, PLAIN).is_empty(),
+                "empty name for {mime}"
+            );
         }
     }
 }

@@ -41,7 +41,12 @@ pub fn finish_search(out: &mut BufWriter<io::Stdout>, st: &mut State, cancelled:
     };
     let reordered = s.rank(&mut st.listing);
     let ms = since(s.started);
-    writeln!(out, "{}", searched_line(st.listing.len(), s.scanned, ms, cancelled)).ok();
+    writeln!(
+        out,
+        "{}",
+        searched_line(st.listing.len(), s.scanned, ms, cancelled)
+    )
+    .ok();
     out.flush().ok();
     reordered
 }

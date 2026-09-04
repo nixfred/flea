@@ -34,7 +34,9 @@ pub struct Journal {
 
 impl Journal {
     pub fn new() -> Journal {
-        Journal { entries: Vec::new() }
+        Journal {
+            entries: Vec::new(),
+        }
     }
 
     // An operation that changed nothing records nothing, so undo never reports a no-op as work.
@@ -111,7 +113,11 @@ fn remove_empty(path: &PathBuf) -> Result<(), FleaError> {
 }
 
 fn err(msg: &str) -> FleaError {
-    FleaError { where_: "undo".to_string(), path: String::new(), msg: msg.to_string() }
+    FleaError {
+        where_: "undo".to_string(),
+        path: String::new(),
+        msg: msg.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -120,7 +126,10 @@ mod tests {
     use crate::backend::testdir::TestDir;
 
     fn entry(op: &str, steps: Vec<Step>) -> Entry {
-        Entry { op: op.to_string(), steps }
+        Entry {
+            op: op.to_string(),
+            steps,
+        }
     }
 
     #[test]
@@ -135,14 +144,22 @@ mod tests {
     fn an_operation_that_changed_nothing_is_not_recorded() {
         let mut j = Journal::new();
         j.push(entry("rename", Vec::new()));
-        assert!(j.is_empty(), "an empty step list would undo as a no-op reported as work");
+        assert!(
+            j.is_empty(),
+            "an empty step list would undo as a no-op reported as work"
+        );
     }
 
     #[test]
     fn the_ring_is_bounded_at_fifty_and_drops_its_oldest() {
         let mut j = Journal::new();
         for i in 0..DEPTH + 10 {
-            j.push(entry(&format!("op {}", i), vec![Step::Created { path: PathBuf::from("/x") }]));
+            j.push(entry(
+                &format!("op {}", i),
+                vec![Step::Created {
+                    path: PathBuf::from("/x"),
+                }],
+            ));
         }
         assert_eq!(j.len(), DEPTH);
     }
@@ -153,7 +170,13 @@ mod tests {
         let from = d.join("before.txt");
         let to = d.file("after.txt", "body");
         let mut j = Journal::new();
-        j.push(entry("rename", vec![Step::Moved { from: from.clone(), to: to.clone() }]));
+        j.push(entry(
+            "rename",
+            vec![Step::Moved {
+                from: from.clone(),
+                to: to.clone(),
+            }],
+        ));
         assert_eq!(j.undo().expect("undo"), "rename");
         assert!(from.exists(), "the original name is back");
         assert!(!to.exists(), "the new name is gone");
@@ -166,10 +189,21 @@ mod tests {
         let from = d.file("before.txt", "something else wrote this");
         let to = d.file("after.txt", "body");
         let mut j = Journal::new();
-        j.push(entry("rename", vec![Step::Moved { from: from.clone(), to: to.clone() }]));
-        let e = j.undo().expect_err("must refuse rather than destroy the newer file");
+        j.push(entry(
+            "rename",
+            vec![Step::Moved {
+                from: from.clone(),
+                to: to.clone(),
+            }],
+        ));
+        let e = j
+            .undo()
+            .expect_err("must refuse rather than destroy the newer file");
         assert_eq!(e.where_, "rename");
-        assert_eq!(std::fs::read_to_string(&from).unwrap(), "something else wrote this");
+        assert_eq!(
+            std::fs::read_to_string(&from).unwrap(),
+            "something else wrote this"
+        );
     }
 
     #[test]
@@ -178,10 +212,16 @@ mod tests {
         let original = d.file("doc.txt", "original");
         let copy = d.file("doc copy.txt", "original");
         let mut j = Journal::new();
-        j.push(entry("duplicate", vec![Step::Created { path: copy.clone() }]));
+        j.push(entry(
+            "duplicate",
+            vec![Step::Created { path: copy.clone() }],
+        ));
         j.undo().expect("undo");
         assert!(!copy.exists(), "the copy is gone");
-        assert!(original.exists(), "the file it was copied from is untouched");
+        assert!(
+            original.exists(),
+            "the file it was copied from is untouched"
+        );
     }
 
     #[test]
@@ -204,8 +244,13 @@ mod tests {
         j.push(entry(
             "move",
             vec![
-                Step::Moved { from: d.join("first.txt"), to: a.clone() },
-                Step::Created { path: d.file("second.txt", "s") },
+                Step::Moved {
+                    from: d.join("first.txt"),
+                    to: a.clone(),
+                },
+                Step::Created {
+                    path: d.file("second.txt", "s"),
+                },
             ],
         ));
         j.undo().expect("undo");
@@ -220,14 +265,21 @@ mod tests {
         j.push(entry(
             "copy",
             vec![
-                Step::Created { path: d.file("keeper.txt", "k") },
+                Step::Created {
+                    path: d.file("keeper.txt", "k"),
+                },
                 // Reversed first, and it cannot be: nothing is at this path to remove.
-                Step::Created { path: d.join("never-existed.txt") },
+                Step::Created {
+                    path: d.join("never-existed.txt"),
+                },
             ],
         ));
         let e = j.undo().expect_err("the missing path must fail");
         assert_eq!(e.where_, "undo");
-        assert!(d.join("keeper.txt").exists(), "the step behind the failure was not reversed");
+        assert!(
+            d.join("keeper.txt").exists(),
+            "the step behind the failure was not reversed"
+        );
     }
 
     #[test]
@@ -247,10 +299,18 @@ mod tests {
         std::fs::write(made.join("theirs.txt"), "not ours to remove").unwrap();
         let mut j = Journal::new();
         j.push(entry("mkdir", vec![Step::MadeDir { path: made.clone() }]));
-        let e = j.undo().expect_err("must refuse rather than delete what the operation did not put there");
+        let e = j
+            .undo()
+            .expect_err("must refuse rather than delete what the operation did not put there");
         assert_eq!(e.where_, "undo");
-        assert_eq!(e.msg, "the new folder has been filled since, so undo left it in place");
-        assert_eq!(std::fs::read_to_string(made.join("theirs.txt")).unwrap(), "not ours to remove");
+        assert_eq!(
+            e.msg,
+            "the new folder has been filled since, so undo left it in place"
+        );
+        assert_eq!(
+            std::fs::read_to_string(made.join("theirs.txt")).unwrap(),
+            "not ours to remove"
+        );
         // Spent like every failed reversal, so the next undo reaches the operation before this one.
         assert!(j.is_empty());
     }

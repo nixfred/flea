@@ -52,19 +52,33 @@ pub fn copy_file(src: &Path, dst: &Path, total: u64, p: &mut Progress) -> Result
         }
         let n = match r.read(&mut buf) {
             Ok(n) => n,
-            Err(e) => return Err(left_partial(p, dst, from_io("copy", &src.to_string_lossy(), &e))),
+            Err(e) => {
+                return Err(left_partial(
+                    p,
+                    dst,
+                    from_io("copy", &src.to_string_lossy(), &e),
+                ))
+            }
         };
         if n == 0 {
             break;
         }
         if let Err(e) = w.write_all(&buf[..n]) {
-            return Err(left_partial(p, dst, from_io("copy", &dst.to_string_lossy(), &e)));
+            return Err(left_partial(
+                p,
+                dst,
+                from_io("copy", &dst.to_string_lossy(), &e),
+            ));
         }
         done += n as u64;
         (p.on_bytes)(done, total);
     }
     if let Err(e) = w.flush() {
-        return Err(left_partial(p, dst, from_io("copy", &dst.to_string_lossy(), &e)));
+        return Err(left_partial(
+            p,
+            dst,
+            from_io("copy", &dst.to_string_lossy(), &e),
+        ));
     }
     Ok(())
 }
@@ -77,8 +91,10 @@ fn left_partial(p: &mut Progress, dst: &Path, e: FleaError) -> FleaError {
 
 // A symlink is copied as a symlink and never followed, matching cp -a and every rival in the parity audit.
 pub fn copy_symlink(src: &Path, dst: &Path) -> Result<(), FleaError> {
-    let target = std::fs::read_link(src).map_err(|e| from_io("copy", &src.to_string_lossy(), &e))?;
-    std::os::unix::fs::symlink(&target, dst).map_err(|e| from_io("copy", &dst.to_string_lossy(), &e))
+    let target =
+        std::fs::read_link(src).map_err(|e| from_io("copy", &src.to_string_lossy(), &e))?;
+    std::os::unix::fs::symlink(&target, dst)
+        .map_err(|e| from_io("copy", &dst.to_string_lossy(), &e))
 }
 
 // Copies a file, a symlink or a whole directory tree. The destination must not already exist.
@@ -115,7 +131,8 @@ fn copy_dir(src: &Path, dst: &Path, p: &mut Progress) -> Result<(), FleaError> {
 }
 
 fn copy_dir_entries(src: &Path, dst: &Path, p: &mut Progress) -> Result<(), FleaError> {
-    let entries = std::fs::read_dir(src).map_err(|e| from_io("copy", &src.to_string_lossy(), &e))?;
+    let entries =
+        std::fs::read_dir(src).map_err(|e| from_io("copy", &src.to_string_lossy(), &e))?;
     for entry in entries {
         if cancelled(p) {
             return Err(cancel_err(dst));
@@ -169,7 +186,11 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     fn quiet<'a>(flag: &'a AtomicBool, sink: &'a mut dyn FnMut(u64, u64)) -> Progress<'a> {
-        Progress { cancel: flag, on_bytes: sink, partial: None }
+        Progress {
+            cancel: flag,
+            on_bytes: sink,
+            partial: None,
+        }
     }
 
     // copy_any sends a symlink to copy_symlink, so a symlink reaching copy_file was swapped in after
@@ -185,7 +206,10 @@ mod tests {
         let e = copy_file(&src, &d.join("dst.bin"), 9, &mut quiet(&flag, &mut sink))
             .expect_err("a symlinked source must not be followed");
         assert_eq!(e.where_, "copy");
-        assert!(!d.join("dst.bin").exists(), "and nothing of the target reached the destination");
+        assert!(
+            !d.join("dst.bin").exists(),
+            "and nothing of the target reached the destination"
+        );
     }
 
     #[test]
@@ -196,8 +220,15 @@ mod tests {
         let mut seen: Vec<(u64, u64)> = Vec::new();
         let mut sink = |done: u64, total: u64| seen.push((done, total));
         copy_any(&src, &d.join("dst.bin"), &mut quiet(&flag, &mut sink)).expect("copy");
-        assert_eq!(std::fs::read_to_string(d.join("dst.bin")).unwrap(), "0123456789");
-        assert_eq!(seen.last().copied(), Some((10, 10)), "the last report is the whole file");
+        assert_eq!(
+            std::fs::read_to_string(d.join("dst.bin")).unwrap(),
+            "0123456789"
+        );
+        assert_eq!(
+            seen.last().copied(),
+            Some((10, 10)),
+            "the last report is the whole file"
+        );
     }
 
     #[test]
@@ -207,9 +238,13 @@ mod tests {
         d.file("dst.txt", "already here");
         let flag = AtomicBool::new(false);
         let mut sink = |_: u64, _: u64| {};
-        let e = copy_any(&src, &d.join("dst.txt"), &mut quiet(&flag, &mut sink)).expect_err("must refuse");
+        let e = copy_any(&src, &d.join("dst.txt"), &mut quiet(&flag, &mut sink))
+            .expect_err("must refuse");
         assert_eq!(e.where_, "copy");
-        assert_eq!(std::fs::read_to_string(d.join("dst.txt")).unwrap(), "already here");
+        assert_eq!(
+            std::fs::read_to_string(d.join("dst.txt")).unwrap(),
+            "already here"
+        );
     }
 
     #[test]
@@ -222,7 +257,10 @@ mod tests {
         let mut sink = |_: u64, _: u64| {};
         copy_any(&link, &d.join("copied.txt"), &mut quiet(&flag, &mut sink)).expect("copy");
         let meta = d.join("copied.txt").symlink_metadata().unwrap();
-        assert!(meta.file_type().is_symlink(), "following it would silently turn a link into a file");
+        assert!(
+            meta.file_type().is_symlink(),
+            "following it would silently turn a link into a file"
+        );
         assert_eq!(
             std::fs::read_link(d.join("copied.txt")).unwrap(),
             std::path::PathBuf::from("target.txt")
@@ -241,8 +279,16 @@ mod tests {
         let mut sink = |_: u64, _: u64| {};
         copy_any(&src, &d.join("clone"), &mut quiet(&flag, &mut sink)).expect("copy");
         assert_eq!(std::fs::read_to_string(d.join("clone/a.txt")).unwrap(), "a");
-        assert_eq!(std::fs::read_to_string(d.join("clone/sub/b.txt")).unwrap(), "b");
-        assert!(d.join("clone/link").symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(d.join("clone/sub/b.txt")).unwrap(),
+            "b"
+        );
+        assert!(d
+            .join("clone/link")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
@@ -251,9 +297,13 @@ mod tests {
         let src = d.file("big.bin", &"x".repeat(CHUNK * 3));
         let flag = AtomicBool::new(true);
         let mut sink = |_: u64, _: u64| {};
-        let e = copy_any(&src, &d.join("partial.bin"), &mut quiet(&flag, &mut sink)).expect_err("cancelled");
+        let e = copy_any(&src, &d.join("partial.bin"), &mut quiet(&flag, &mut sink))
+            .expect_err("cancelled");
         assert_eq!(e.msg, "cancelled");
-        assert!(!d.join("partial.bin").exists(), "a half-written destination is not a result");
+        assert!(
+            !d.join("partial.bin").exists(),
+            "a half-written destination is not a result"
+        );
     }
 
     #[test]
@@ -287,7 +337,10 @@ mod tests {
             "the tree held one complete file and the one being cut when the cancel landed, got {:?}",
             names_at_cancel
         );
-        assert!(!clone.exists(), "a half-copied tree is not a result, and no journal step records one");
+        assert!(
+            !clone.exists(),
+            "a half-copied tree is not a result, and no journal step records one"
+        );
     }
 
     // The second entry's destination is taken from under it while the first is still streaming, so
@@ -312,7 +365,11 @@ mod tests {
         let mut p = quiet(&flag, &mut sink);
         let e = copy_any(&src, &clone, &mut p).expect_err("the second entry collides");
         assert_ne!(e.msg, "cancelled");
-        assert_eq!(p.partial, Some(clone.clone()), "the tree is reported as the partial to journal");
+        assert_eq!(
+            p.partial,
+            Some(clone.clone()),
+            "the tree is reported as the partial to journal"
+        );
         let a = std::fs::read_to_string(clone.join("a.bin")).unwrap();
         let b = std::fs::read_to_string(clone.join("b.bin")).unwrap();
         assert!(
@@ -335,7 +392,10 @@ mod tests {
         let mut p = quiet(&flag, &mut sink);
         let e = copy_file(&src, &dst, 0, &mut p).expect_err("a directory cannot be read as a file");
         assert_ne!(e.msg, "cancelled");
-        assert!(dst.exists(), "the partial stays: removing it on an error is the cancel path's job only");
+        assert!(
+            dst.exists(),
+            "the partial stays: removing it on an error is the cancel path's job only"
+        );
         assert_eq!(p.partial, Some(dst));
     }
 
@@ -355,8 +415,14 @@ mod tests {
         assert!(p.partial.is_none());
         copy_any(&src_dir, &taken_dir, &mut p).expect_err("must refuse");
         assert!(p.partial.is_none());
-        assert_eq!(std::fs::read_to_string(&taken_file).unwrap(), "already here");
-        assert_eq!(std::fs::read_to_string(taken_dir.join("keep.txt")).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(&taken_file).unwrap(),
+            "already here"
+        );
+        assert_eq!(
+            std::fs::read_to_string(taken_dir.join("keep.txt")).unwrap(),
+            "keep"
+        );
     }
 
     #[test]
@@ -367,7 +433,10 @@ mod tests {
         let mut sink = |_: u64, _: u64| {};
         move_any(&src, &d.join("moved.txt"), &mut quiet(&flag, &mut sink)).expect("move");
         assert!(!src.exists());
-        assert_eq!(std::fs::read_to_string(d.join("moved.txt")).unwrap(), "body");
+        assert_eq!(
+            std::fs::read_to_string(d.join("moved.txt")).unwrap(),
+            "body"
+        );
     }
 
     #[test]
@@ -378,7 +447,13 @@ mod tests {
         let flag = AtomicBool::new(false);
         let mut sink = |_: u64, _: u64| {};
         move_any(&src, &d.join("b.txt"), &mut quiet(&flag, &mut sink)).expect_err("must refuse");
-        assert!(src.exists(), "the source is untouched when the move is refused");
-        assert_eq!(std::fs::read_to_string(d.join("b.txt")).unwrap(), "destination");
+        assert!(
+            src.exists(),
+            "the source is untouched when the move is refused"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join("b.txt")).unwrap(),
+            "destination"
+        );
     }
 }

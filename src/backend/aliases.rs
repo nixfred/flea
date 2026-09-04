@@ -83,7 +83,10 @@ mod tests {
     fn the_two_sides_of_a_pair_compare_equal_through_canonical() {
         let a = a();
         assert_eq!(a.canonical("image/heic"), a.canonical("image/heif"));
-        assert_eq!(a.canonical("video/x-matroska"), a.canonical("video/matroska"));
+        assert_eq!(
+            a.canonical("video/x-matroska"),
+            a.canonical("video/matroska")
+        );
     }
 
     #[test]
@@ -103,7 +106,12 @@ mod tests {
     #[test]
     fn the_live_table_resolves_in_one_hop() {
         let a = Aliases::load();
-        for mime in ["image/heic", "video/x-matroska", "image/jpeg", "nonsense/nothing"] {
+        for mime in [
+            "image/heic",
+            "video/x-matroska",
+            "image/jpeg",
+            "nonsense/nothing",
+        ] {
             let once = a.canonical(mime).to_string();
             assert_eq!(a.canonical(&once), once, "{mime} needs a second hop");
         }

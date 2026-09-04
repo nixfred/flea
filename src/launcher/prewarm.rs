@@ -1,9 +1,9 @@
 use crate::backend::aliases::Aliases;
+use crate::backend::fsinfo::dev_of;
 use crate::backend::icons::Names;
 use crate::backend::kind::Kinds;
 use crate::backend::meta::stat_range;
 use crate::backend::mime::Db;
-use crate::backend::fsinfo::dev_of;
 use crate::backend::proto::listed_line;
 use crate::backend::rows::rows_line;
 use crate::backend::scan::scan;
@@ -45,15 +45,28 @@ fn write_to_tmp(path: &str, first: usize, dest: &Path, tmp: &Path) -> Result<(),
         .map_err(|e| from_io("prewarm", &tmp.display().to_string(), &e))?;
     let mut out = BufWriter::new(file);
 
-    writeln!(out, "{}", listed_line(listing.len(), read_ms, sort_ms, dev_of(&PathBuf::from(path))))
-        .map_err(|e| from_io("prewarm", &tmp.display().to_string(), &e))?;
+    writeln!(
+        out,
+        "{}",
+        listed_line(
+            listing.len(),
+            read_ms,
+            sort_ms,
+            dev_of(&PathBuf::from(path))
+        )
+    )
+    .map_err(|e| from_io("prewarm", &tmp.display().to_string(), &e))?;
     let (metas, ms) = stat_range(&PathBuf::from(path), &listing, 0, first);
     // Its own copy: prewarm is one shot, so there is no loop to hoist the load out of.
     let (mime, icons, aliases) = (Db::load(), Names::load(), Aliases::load());
     let thumbs = Thumbnailers::load(&aliases);
     let mut kinds = Kinds::new();
-    writeln!(out, "{}", rows_line(&listing, &metas, 0, ms, &mime, &icons, &aliases, &thumbs, &mut kinds))
-        .map_err(|e| from_io("prewarm", &tmp.display().to_string(), &e))?;
+    writeln!(
+        out,
+        "{}",
+        rows_line(&listing, &metas, 0, ms, &mime, &icons, &aliases, &thumbs, &mut kinds)
+    )
+    .map_err(|e| from_io("prewarm", &tmp.display().to_string(), &e))?;
     out.flush()
         .map_err(|e| from_io("prewarm", &tmp.display().to_string(), &e))?;
     drop(out);

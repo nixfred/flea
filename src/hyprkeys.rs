@@ -10,7 +10,11 @@ const END: &str = "-- flea --default: end.";
 // Omarchy binds both to Nautilus in default/hypr/bindings/applications.lua; the cwd one opens on the active terminal's directory.
 const BINDS: [(&str, &str, &str); 2] = [
     ("SUPER + SHIFT + F", "File manager", "flea --gui"),
-    ("SUPER + ALT + SHIFT + F", "File manager (cwd)", "flea --gui \"$(omarchy-cmd-terminal-cwd)\""),
+    (
+        "SUPER + ALT + SHIFT + F",
+        "File manager (cwd)",
+        "flea --gui \"$(omarchy-cmd-terminal-cwd)\"",
+    ),
 ];
 // hyprctl binds reports a chord as a mask: SUPER is 64, ALT is 8, SHIFT is 1.
 const MODMASKS: [u32; 2] = [65, 73];
@@ -19,7 +23,10 @@ pub fn claim() -> Result<String, String> {
     let path = bindings_path()?;
     let text = read(&path)?;
     if has_block(&text) {
-        return Ok(format!("keys: already Flea's, the flea --default block is in {}", path.display()));
+        return Ok(format!(
+            "keys: already Flea's, the flea --default block is in {}",
+            path.display()
+        ));
     }
     if let Some(errors) = configerrors().filter(|e| !e.is_empty()) {
         return Err(format!("hyprctl configerrors already reports a problem, fix that first so a change here can be told apart from it: {}", errors));
@@ -39,14 +46,22 @@ pub fn claim() -> Result<String, String> {
         reload();
         return Err(format!("the block broke the Hyprland config and was removed again; hyprctl configerrors said: {}", errors));
     }
-    Ok(format!("keys: {} open Flea, {}; block appended to {} and reloaded", keys, were, path.display()))
+    Ok(format!(
+        "keys: {} open Flea, {}; block appended to {} and reloaded",
+        keys,
+        were,
+        path.display()
+    ))
 }
 
 pub fn release() -> Result<String, String> {
     let path = bindings_path()?;
     let text = read(&path)?;
     let Some(without) = without_block(&text)? else {
-        return Ok(format!("keys: nothing to undo, no flea --default block in {}", path.display()));
+        return Ok(format!(
+            "keys: nothing to undo, no flea --default block in {}",
+            path.display()
+        ));
     };
     replace_file(&path, &without)?;
     if !reload() {
@@ -55,7 +70,10 @@ pub fn release() -> Result<String, String> {
             path.display()
         ));
     }
-    Ok(format!("keys: block removed from {} and reloaded, so Omarchy's own bindings are back", path.display()))
+    Ok(format!(
+        "keys: block removed from {} and reloaded, so Omarchy's own bindings are back",
+        path.display()
+    ))
 }
 
 fn bindings_path() -> Result<PathBuf, String> {
@@ -64,7 +82,13 @@ fn bindings_path() -> Result<PathBuf, String> {
 
 // Omarchy ships the file and hyprland.lua requires it, so a missing one is a broken box and not a first run.
 fn read(path: &std::path::Path) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|e| format!("{} could not be read ({:?}), and it is where the key bindings go; Omarchy ships it", path.display(), e.kind()))
+    fs::read_to_string(path).map_err(|e| {
+        format!(
+            "{} could not be read ({:?}), and it is where the key bindings go; Omarchy ships it",
+            path.display(),
+            e.kind()
+        )
+    })
 }
 
 // The unbind comes first, or both bindings fire: the override shape the Omarchy manual documents.
@@ -72,7 +96,10 @@ pub fn block() -> String {
     let mut out = format!("\n{}\n", BEGIN);
     for (key, description, command) in BINDS {
         out.push_str(&format!("hl.unbind(\"{}\")\n", key));
-        out.push_str(&format!("o.bind(\"{}\", \"{}\", {{ launch = '{}' }})\n", key, description, command));
+        out.push_str(&format!(
+            "o.bind(\"{}\", \"{}\", {{ launch = '{}' }})\n",
+            key, description, command
+        ));
     }
     out.push_str(END);
     out.push('\n');
@@ -81,7 +108,9 @@ pub fn block() -> String {
 
 // The marker counts only at the start of a line, so a comment that quotes it is not a block.
 fn begin_at(text: &str) -> Option<usize> {
-    text.match_indices(BEGIN).map(|(i, _)| i).find(|&i| i == 0 || text.as_bytes()[i - 1] == b'\n')
+    text.match_indices(BEGIN)
+        .map(|(i, _)| i)
+        .find(|&i| i == 0 || text.as_bytes()[i - 1] == b'\n')
 }
 
 pub fn has_block(text: &str) -> bool {
@@ -103,14 +132,18 @@ pub fn without_block(text: &str) -> Result<Option<String>, String> {
         return Ok(None);
     };
     let Some(end_offset) = text[start..].find(END) else {
-        return Err("the flea --default begin marker has no end marker, so remove the block by hand".to_string());
+        return Err(
+            "the flea --default begin marker has no end marker, so remove the block by hand"
+                .to_string(),
+        );
     };
     let mut end = start + end_offset + END.len();
     if text[end..].starts_with('\n') {
         end += 1;
     }
     let bytes = text.as_bytes();
-    let after_blank_line = start >= 1 && bytes[start - 1] == b'\n' && (start == 1 || bytes[start - 2] == b'\n');
+    let after_blank_line =
+        start >= 1 && bytes[start - 1] == b'\n' && (start == 1 || bytes[start - 2] == b'\n');
     if after_blank_line {
         start -= 1;
     }
@@ -126,7 +159,11 @@ pub fn without_block(text: &str) -> Result<Option<String>, String> {
 pub fn descriptions(binds: &str) -> [Option<String>; 2] {
     let mut found: [Option<String>; 2] = [None, None];
     for record in binds.split("\n\n") {
-        let field = |name: &str| record.lines().find_map(|l| l.trim().strip_prefix(name).map(|v| v.trim().to_string()));
+        let field = |name: &str| {
+            record
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(name).map(|v| v.trim().to_string()))
+        };
         if field("key:").as_deref() != Some("F") {
             continue;
         }
@@ -143,7 +180,12 @@ pub fn descriptions(binds: &str) -> [Option<String>; 2] {
 }
 
 fn current_descriptions() -> Option<[Option<String>; 2]> {
-    let out = Command::new("hyprctl").arg("binds").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let out = Command::new("hyprctl")
+        .arg("binds")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -152,9 +194,14 @@ fn current_descriptions() -> Option<[Option<String>; 2]> {
 
 fn were_line(before: Option<[Option<String>; 2]>) -> String {
     let Some(before) = before else {
-        return "what they ran before could not be read because hyprctl is not reachable from here".to_string();
+        return "what they ran before could not be read because hyprctl is not reachable from here"
+            .to_string();
     };
-    let name = |d: &Option<String>| d.as_deref().map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "nothing".to_string());
+    let name = |d: &Option<String>| {
+        d.as_deref()
+            .map(|s| format!("\"{}\"", s))
+            .unwrap_or_else(|| "nothing".to_string())
+    };
     format!("were {} and {}", name(&before[0]), name(&before[1]))
 }
 
@@ -171,7 +218,12 @@ fn reload() -> bool {
 
 // None when hyprctl cannot be reached, otherwise what configerrors printed, which is empty when the config loads.
 fn configerrors() -> Option<String> {
-    let out = Command::new("hyprctl").arg("configerrors").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let out = Command::new("hyprctl")
+        .arg("configerrors")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -201,19 +253,34 @@ mod tests {
 
     #[test]
     fn adding_then_removing_the_block_is_the_identity() {
-        for text in ["", "a\n", "-- a comment\no.bind(\"SUPER + X\", nil, \"x\")\n"] {
+        for text in [
+            "",
+            "a\n",
+            "-- a comment\no.bind(\"SUPER + X\", nil, \"x\")\n",
+        ] {
             let added = with_block(text);
             assert!(has_block(&added));
-            assert_eq!(without_block(&added).expect("well formed"), Some(text.to_string()), "round trip of {:?}", text);
+            assert_eq!(
+                without_block(&added).expect("well formed"),
+                Some(text.to_string()),
+                "round trip of {:?}",
+                text
+            );
         }
         // A file with no final newline gains one, and nothing else.
-        assert_eq!(without_block(&with_block("a")).expect("well formed"), Some("a\n".to_string()));
+        assert_eq!(
+            without_block(&with_block("a")).expect("well formed"),
+            Some("a\n".to_string())
+        );
     }
 
     #[test]
     fn a_line_the_user_added_after_the_block_survives_its_removal() {
         let text = format!("{}o.bind(\"SUPER + Y\", nil, \"y\")\n", with_block("a\n"));
-        assert_eq!(without_block(&text).expect("well formed"), Some("a\no.bind(\"SUPER + Y\", nil, \"y\")\n".to_string()));
+        assert_eq!(
+            without_block(&text).expect("well formed"),
+            Some("a\no.bind(\"SUPER + Y\", nil, \"y\")\n".to_string())
+        );
     }
 
     #[test]
@@ -221,14 +288,19 @@ mod tests {
         assert!(!has_block("a\n"));
         assert_eq!(without_block("a\n").expect("well formed"), None);
         // The marker counts only at the start of a line.
-        let quoted = format!("-- do not write {} here\n", block().lines().nth(1).expect("begin"));
+        let quoted = format!(
+            "-- do not write {} here\n",
+            block().lines().nth(1).expect("begin")
+        );
         assert!(!has_block(&quoted));
     }
 
     #[test]
     fn a_begin_marker_with_no_end_marker_is_refused() {
         let begin = block().lines().nth(1).expect("begin").to_string();
-        assert!(without_block(&format!("a\n{}\nhl.unbind(\"SUPER + SHIFT + F\")\n", begin)).is_err());
+        assert!(
+            without_block(&format!("a\n{}\nhl.unbind(\"SUPER + SHIFT + F\")\n", begin)).is_err()
+        );
     }
 
     // Read off this box's hyprctl binds, with SUPER + F's fullscreen record as the distractor.
@@ -236,8 +308,17 @@ mod tests {
 
     #[test]
     fn descriptions_are_read_off_hyprctl_binds_by_chord() {
-        assert_eq!(descriptions(BINDS_TEXT), [Some("File manager".to_string()), Some("File manager (cwd)".to_string())]);
-        assert_eq!(descriptions("bindd\n\tmodmask: 65\n\tkey: G\n\tdescription: Other\n\n"), [None, None]);
+        assert_eq!(
+            descriptions(BINDS_TEXT),
+            [
+                Some("File manager".to_string()),
+                Some("File manager (cwd)".to_string())
+            ]
+        );
+        assert_eq!(
+            descriptions("bindd\n\tmodmask: 65\n\tkey: G\n\tdescription: Other\n\n"),
+            [None, None]
+        );
         assert_eq!(descriptions(""), [None, None]);
     }
 }

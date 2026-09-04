@@ -35,5 +35,4 @@ mod tests {
         // No format flag anywhere: the destination's own extension is what magick reads.
         assert!(!plain.iter().any(|s| s == "-format" || s == "-define"));
     }
-
 }

@@ -2,38 +2,97 @@ use crate::error::FleaError;
 use crate::json::{escape, field_bool, field_str, field_str_array, field_usize, field_usize_array};
 
 pub enum Request {
-    List { path: String, first: usize, hidden: bool },
-    Window { start: usize, count: usize },
-    Sort { by: String, desc: bool },
-    Search { path: String, query: String, hidden: bool },
+    List {
+        path: String,
+        first: usize,
+        hidden: bool,
+    },
+    Window {
+        start: usize,
+        count: usize,
+    },
+    Sort {
+        by: String,
+        desc: bool,
+    },
+    Search {
+        path: String,
+        query: String,
+        hidden: bool,
+    },
     // Unlike thumbcancel there is no rows form: one walk runs at a time, so a cancel can only mean that one.
     SearchCancel,
-    Thumb { rows: Vec<usize> },
-    ThumbCancel { rows: Vec<usize> },
-    DirSize { rows: Vec<usize> },
+    Thumb {
+        rows: Vec<usize>,
+    },
+    ThumbCancel {
+        rows: Vec<usize>,
+    },
+    DirSize {
+        rows: Vec<usize>,
+    },
     // Unlike thumbcancel, there is no rows form: it always cancels everything in flight, see docs/protocol.md "dirsizecancel".
     DirSizeCancel,
     // The five write operations and their cancel, per the operations design's own wire.
-    Transfer { op: String, paths: Vec<String>, rows: Vec<usize>, dest: String },
-    TransferCancel { id: usize },
-    Trash { paths: Vec<String>, rows: Vec<usize> },
-    Rename { path: String, to: String },
-    Duplicate { path: String },
+    Transfer {
+        op: String,
+        paths: Vec<String>,
+        rows: Vec<usize>,
+        dest: String,
+    },
+    TransferCancel {
+        id: usize,
+    },
+    Trash {
+        paths: Vec<String>,
+        rows: Vec<usize>,
+    },
+    Rename {
+        path: String,
+        to: String,
+    },
+    Duplicate {
+        path: String,
+    },
     // One new empty directory inside parent path; an empty name asks for the first free "New Folder".
-    MkDir { path: String, name: String },
+    MkDir {
+        path: String,
+        name: String,
+    },
     Undo,
     // Resolves row indices to absolute paths, which is what lets a client hold a clipboard for a
     // selection wider than the window it renders; see docs/protocol.md "paths".
-    Paths { rows: Vec<usize> },
+    Paths {
+        rows: Vec<usize>,
+    },
     // The preview column's own extras for one row: pixels, line count, symlink target.
-    Meta { row: usize, text: bool, media: bool, archive: bool },
+    Meta {
+        row: usize,
+        text: bool,
+        media: bool,
+        archive: bool,
+    },
     // The status bar's filesystem line for the directory the pane is on.
     FsInfo,
     // A read-only look at a directory that is not the current listing; the columns view's ancestors.
-    Peek { path: String, first: usize, hidden: bool },
+    Peek {
+        path: String,
+        first: usize,
+        hidden: bool,
+    },
     // op is "compress" or "extract"; a compress names paths and a format, an extract names one path.
-    Archive { op: String, paths: Vec<String>, path: String, dest: String, format: String },
-    Convert { path: String, dest: String, strip: bool },
+    Archive {
+        op: String,
+        paths: Vec<String>,
+        path: String,
+        dest: String,
+        format: String,
+    },
+    Convert {
+        path: String,
+        dest: String,
+        strip: bool,
+    },
     // Which archive formats this box actually offers, and whether a converter is installed at all.
     Formats,
     Quit,
@@ -63,9 +122,15 @@ pub fn parse_request(line: &str) -> Request {
             hidden: field_bool(line, "hidden"),
         },
         Some("searchcancel") => Request::SearchCancel,
-        Some("thumb") => Request::Thumb { rows: field_usize_array(line, "rows") },
-        Some("thumbcancel") => Request::ThumbCancel { rows: field_usize_array(line, "rows") },
-        Some("dirsize") => Request::DirSize { rows: field_usize_array(line, "rows") },
+        Some("thumb") => Request::Thumb {
+            rows: field_usize_array(line, "rows"),
+        },
+        Some("thumbcancel") => Request::ThumbCancel {
+            rows: field_usize_array(line, "rows"),
+        },
+        Some("dirsize") => Request::DirSize {
+            rows: field_usize_array(line, "rows"),
+        },
         Some("dirsizecancel") => Request::DirSizeCancel,
         Some("transfer") => Request::Transfer {
             // Anything that is not "move" is a copy, so a malformed op can never delete a source.
@@ -75,7 +140,9 @@ pub fn parse_request(line: &str) -> Request {
             rows: field_usize_array(line, "rows"),
             dest: field_str(line, "dest").unwrap_or_default(),
         },
-        Some("transfercancel") => Request::TransferCancel { id: field_usize(line, "id").unwrap_or(0) },
+        Some("transfercancel") => Request::TransferCancel {
+            id: field_usize(line, "id").unwrap_or(0),
+        },
         Some("trash") => Request::Trash {
             paths: field_str_array(line, "paths"),
             rows: field_usize_array(line, "rows"),
@@ -84,13 +151,17 @@ pub fn parse_request(line: &str) -> Request {
             path: field_str(line, "path").unwrap_or_default(),
             to: field_str(line, "to").unwrap_or_default(),
         },
-        Some("duplicate") => Request::Duplicate { path: field_str(line, "path").unwrap_or_default() },
+        Some("duplicate") => Request::Duplicate {
+            path: field_str(line, "path").unwrap_or_default(),
+        },
         Some("mkdir") => Request::MkDir {
             path: field_str(line, "path").unwrap_or_default(),
             name: field_str(line, "name").unwrap_or_default(),
         },
         Some("undo") => Request::Undo,
-        Some("paths") => Request::Paths { rows: field_usize_array(line, "rows") },
+        Some("paths") => Request::Paths {
+            rows: field_usize_array(line, "rows"),
+        },
         Some("fsinfo") => Request::FsInfo,
         Some("archive") => Request::Archive {
             // Anything that is not "compress" is an extract, so a malformed op never writes an archive.
@@ -131,7 +202,10 @@ pub fn listed_line(n: usize, read_ms: f64, sort_ms: f64, dev: u64) -> String {
 
 // The streaming progress of a search: its own type rather than a listed line, because a mid-walk update is not a fresh listing and carries no read or sort timing.
 pub fn searching_line(n: usize, scanned: usize, ms: f64) -> String {
-    format!(r#"{{"t":"searching","n":{},"scanned":{},"ms":{:.3}}}"#, n, scanned, ms)
+    format!(
+        r#"{{"t":"searching","n":{},"scanned":{},"ms":{:.3}}}"#,
+        n, scanned, ms
+    )
 }
 
 // The terminal line of a search: cancelled is true when the client stopped the walk or a new listing replaced it.
@@ -144,12 +218,20 @@ pub fn searched_line(n: usize, scanned: usize, ms: f64, cancelled: bool) -> Stri
 
 // The file is empty rather than absent on failure, so a client never waits forever for a row that will not arrive.
 pub fn thumbed_line(row: usize, file: &str, ms: f64) -> String {
-    format!(r#"{{"t":"thumbed","row":{},"file":"{}","ms":{:.3}}}"#, row, escape(file), ms)
+    format!(
+        r#"{{"t":"thumbed","row":{},"file":"{}","ms":{:.3}}}"#,
+        row,
+        escape(file),
+        ms
+    )
 }
 
 // partial is true when the 2000 ms deadline cut the walk short, see docs/protocol.md "dirsized".
 pub fn dirsized_line(row: usize, bytes: u64, partial: bool, ms: f64) -> String {
-    format!(r#"{{"t":"dirsized","row":{},"bytes":{},"partial":{},"ms":{:.3}}}"#, row, bytes, partial, ms)
+    format!(
+        r#"{{"t":"dirsized","row":{},"bytes":{},"partial":{},"ms":{:.3}}}"#,
+        row, bytes, partial, ms
+    )
 }
 
 // Sample output: {"t":"paths","paths":["/home/gm/a.txt","/home/gm/b.txt"]}
@@ -199,7 +281,11 @@ mod tests {
     #[test]
     fn parses_each_request_shape() {
         match parse_request(r#"{"c":"list","path":"/home/gm","first":350}"#) {
-            Request::List { path, first, hidden } => {
+            Request::List {
+                path,
+                first,
+                hidden,
+            } => {
                 assert_eq!(path, "/home/gm");
                 assert_eq!(first, 350);
                 assert!(!hidden);
@@ -221,7 +307,11 @@ mod tests {
             _ => panic!("expected Sort"),
         }
         match parse_request(r#"{"c":"search","path":"/home/gm","query":"bench","hidden":true}"#) {
-            Request::Search { path, query, hidden } => {
+            Request::Search {
+                path,
+                query,
+                hidden,
+            } => {
                 assert_eq!(path, "/home/gm");
                 assert_eq!(query, "bench");
                 assert!(hidden);
@@ -229,10 +319,15 @@ mod tests {
             _ => panic!("expected Search"),
         }
         match parse_request(r#"{"c":"mkdir","path":"/home/gm","name":"New Folder"}"#) {
-            Request::MkDir { path, name } => assert_eq!((path.as_str(), name.as_str()), ("/home/gm", "New Folder")),
+            Request::MkDir { path, name } => {
+                assert_eq!((path.as_str(), name.as_str()), ("/home/gm", "New Folder"))
+            }
             _ => panic!("expected MkDir"),
         }
-        assert!(matches!(parse_request(r#"{"c":"searchcancel"}"#), Request::SearchCancel));
+        assert!(matches!(
+            parse_request(r#"{"c":"searchcancel"}"#),
+            Request::SearchCancel
+        ));
         assert!(matches!(parse_request(r#"{"c":"quit"}"#), Request::Quit));
     }
 
@@ -240,7 +335,10 @@ mod tests {
     fn a_paths_line_escapes_every_element_and_survives_an_empty_list() {
         assert_eq!(paths_line(&[]), r#"{"t":"paths","paths":[]}"#);
         assert_eq!(
-            paths_line(&["/home/gm/a.txt".to_string(), "/home/gm/say \"hi\".txt".to_string()]),
+            paths_line(&[
+                "/home/gm/a.txt".to_string(),
+                "/home/gm/say \"hi\".txt".to_string()
+            ]),
             r#"{"t":"paths","paths":["/home/gm/a.txt","/home/gm/say \"hi\".txt"]}"#
         );
     }
@@ -256,12 +354,30 @@ mod tests {
     #[test]
     fn a_malformed_escape_never_panics() {
         // A bad escape only empties that one field; "c" alone decides the variant.
-        assert!(matches!(parse_request(r#"{"c":"list","path":"/tmp/a"#), Request::List { .. }));
-        assert!(matches!(parse_request(r#"{"c":"list","path":"\u00"#), Request::List { .. }));
-        assert!(matches!(parse_request(r#"{"c":"list","path":"\ud800","first":1}"#), Request::List { .. }));
-        assert!(matches!(parse_request(r#"{"c":"list","path":"trailing\"#), Request::List { .. }));
-        assert!(matches!(parse_request(r#"{"c":"window","start":-5,"count":10}"#), Request::Window { .. }));
-        assert!(matches!(parse_request(r#"{"c":"sort","by":"name","desc":truthy}"#), Request::Sort { .. }));
+        assert!(matches!(
+            parse_request(r#"{"c":"list","path":"/tmp/a"#),
+            Request::List { .. }
+        ));
+        assert!(matches!(
+            parse_request(r#"{"c":"list","path":"\u00"#),
+            Request::List { .. }
+        ));
+        assert!(matches!(
+            parse_request(r#"{"c":"list","path":"\ud800","first":1}"#),
+            Request::List { .. }
+        ));
+        assert!(matches!(
+            parse_request(r#"{"c":"list","path":"trailing\"#),
+            Request::List { .. }
+        ));
+        assert!(matches!(
+            parse_request(r#"{"c":"window","start":-5,"count":10}"#),
+            Request::Window { .. }
+        ));
+        assert!(matches!(
+            parse_request(r#"{"c":"sort","by":"name","desc":truthy}"#),
+            Request::Sort { .. }
+        ));
     }
 
     #[test]
@@ -292,7 +408,10 @@ mod tests {
     #[test]
     fn emits_a_listed_line() {
         let s = listed_line(100000, 26.4, 2.5, 56);
-        assert_eq!(s, r#"{"t":"listed","n":100000,"read":26.400,"sort":2.500,"v":56}"#);
+        assert_eq!(
+            s,
+            r#"{"t":"listed","n":100000,"read":26.400,"sort":2.500,"v":56}"#
+        );
     }
 
     #[test]
@@ -314,7 +433,10 @@ mod tests {
             _ => panic!("expected DirSize"),
         }
         // Unlike thumbcancel, dirsizecancel names nothing: it always cancels everything in flight.
-        assert!(matches!(parse_request(r#"{"c":"dirsizecancel"}"#), Request::DirSizeCancel));
+        assert!(matches!(
+            parse_request(r#"{"c":"dirsizecancel"}"#),
+            Request::DirSizeCancel
+        ));
         assert!(matches!(
             parse_request(r#"{"c":"dirsizecancel","rows":[1,2]}"#),
             Request::DirSizeCancel
@@ -331,7 +453,9 @@ mod tests {
             r#"{"c":"thumbcancel","rows":nonsense}"#,
         ] {
             match parse_request(line) {
-                Request::ThumbCancel { rows } => assert!(rows.is_empty(), "{} should carry no rows", line),
+                Request::ThumbCancel { rows } => {
+                    assert!(rows.is_empty(), "{} should carry no rows", line)
+                }
                 _ => panic!("expected ThumbCancel for {}", line),
             }
         }
@@ -348,7 +472,10 @@ mod tests {
             r#"{"t":"thumbed","row":2,"file":"/home/gm/.cache/thumbnails/large/b98fa408.png","ms":75.823}"#
         );
         // The empty file is the whole failure form on this wire, so a client never waits forever.
-        assert_eq!(thumbed_line(0, "", 0.0), r#"{"t":"thumbed","row":0,"file":"","ms":0.000}"#);
+        assert_eq!(
+            thumbed_line(0, "", 0.0),
+            r#"{"t":"thumbed","row":0,"file":"","ms":0.000}"#
+        );
     }
 
     #[test]

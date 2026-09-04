@@ -76,11 +76,17 @@ mod tests {
 
     fn stamp(path: &Path, seconds: u64) {
         let when = SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
-        std::fs::File::open(path).unwrap().set_modified(when).unwrap();
+        std::fs::File::open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
     }
 
     fn names(l: &Listing) -> String {
-        (0..l.len()).map(|i| l.name(i)).collect::<Vec<_>>().join(" ")
+        (0..l.len())
+            .map(|i| l.name(i))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     #[test]
@@ -102,7 +108,11 @@ mod tests {
     fn mtime_orders_both_groups_by_time_directories_still_first_in_both_directions() {
         let (d, mut l) = tree("mtime");
         sort_by_stat(&mut l, d.path(), SortBy::Mtime, false);
-        assert_eq!(names(&l), "11 1 2 3", "a build that lost the grouping answers 2 11 1 3");
+        assert_eq!(
+            names(&l),
+            "11 1 2 3",
+            "a build that lost the grouping answers 2 11 1 3"
+        );
         sort_by_stat(&mut l, d.path(), SortBy::Mtime, true);
         assert_eq!(names(&l), "1 11 3 2");
     }
@@ -124,7 +134,11 @@ mod tests {
         }
         sort_by_stat(&mut once, d.path(), SortBy::Size, false);
         sort_by_stat(&mut again, d.path(), SortBy::Size, false);
-        assert_eq!(names(&once), "a B b file_2 file_10", "the tie-break is the name order, digits by value");
+        assert_eq!(
+            names(&once),
+            "a B b file_2 file_10",
+            "the tie-break is the name order, digits by value"
+        );
         assert_eq!(names(&once), names(&again), "whatever readdir said");
     }
 
@@ -137,7 +151,11 @@ mod tests {
         // Named to sort after real by name, so this can only pass on size.
         l.push("zzz-gone", false);
         sort_by_stat(&mut l, d.path(), SortBy::Size, false);
-        assert_eq!(names(&l), "zzz-gone real", "the zeroes stat_range would send sort as the smallest");
+        assert_eq!(
+            names(&l),
+            "zzz-gone real",
+            "the zeroes stat_range would send sort as the smallest"
+        );
         let mut empty = Listing::new();
         let (pass, sort) = sort_by_stat(&mut empty, d.path(), SortBy::Mtime, true);
         assert_eq!(empty.len(), 0);
@@ -147,11 +165,18 @@ mod tests {
     #[test]
     fn the_gather_moves_spans_and_leaves_every_name_and_flag_intact() {
         let (d, mut l) = tree("gather");
-        let mut before: Vec<(String, bool)> = (0..l.len()).map(|i| (l.name(i).to_string(), l.is_dir(i))).collect();
+        let mut before: Vec<(String, bool)> = (0..l.len())
+            .map(|i| (l.name(i).to_string(), l.is_dir(i)))
+            .collect();
         sort_by_stat(&mut l, d.path(), SortBy::Mtime, true);
-        let mut after: Vec<(String, bool)> = (0..l.len()).map(|i| (l.name(i).to_string(), l.is_dir(i))).collect();
+        let mut after: Vec<(String, bool)> = (0..l.len())
+            .map(|i| (l.name(i).to_string(), l.is_dir(i)))
+            .collect();
         before.sort();
         after.sort();
-        assert_eq!(before, after, "a sort is a permutation of the rows and nothing else");
+        assert_eq!(
+            before, after,
+            "a sort is a permutation of the rows and nothing else"
+        );
     }
 }

@@ -12,7 +12,6 @@ const BSDTAR_NAME_AFTER: usize = 8;
 // Sample input: 2026-09-01 09:14:15 ....A           10           19  a.txt
 const SEVENZIP_SIZE_COLUMN: usize = 3;
 
-
 // How one tool's listing is read: which whitespace field holds the size, and how the name is found.
 pub struct ListSpec {
     pub size_column: usize,
@@ -32,13 +31,21 @@ pub enum DirMarker {
 
 // The two tools this box lists archives with, each described once.
 pub fn tar_spec() -> ListSpec {
-    ListSpec { size_column: BSDTAR_SIZE_COLUMN, name_after_fields: BSDTAR_NAME_AFTER,
-               name_after_double_space: false, dir_marker: DirMarker::ModePrefix }
+    ListSpec {
+        size_column: BSDTAR_SIZE_COLUMN,
+        name_after_fields: BSDTAR_NAME_AFTER,
+        name_after_double_space: false,
+        dir_marker: DirMarker::ModePrefix,
+    }
 }
 
 pub fn seven_spec() -> ListSpec {
-    ListSpec { size_column: SEVENZIP_SIZE_COLUMN, name_after_fields: 0,
-               name_after_double_space: true, dir_marker: DirMarker::AttrFlag }
+    ListSpec {
+        size_column: SEVENZIP_SIZE_COLUMN,
+        name_after_fields: 0,
+        name_after_double_space: true,
+        dir_marker: DirMarker::AttrFlag,
+    }
 }
 
 // Sample input, bsdtar -tvf: "-rw-r--r--  0 gm     gm          2 Sep  1 12:10 ./name with spaces.txt"
@@ -99,7 +106,6 @@ pub fn row_of<'a>(line: &'a str, spec: &ListSpec) -> Option<Row<'a>> {
     Some(Row { name, is_dir })
 }
 
-
 // One whitespace-separated field by index, without collecting the rest of them.
 fn nth_field(line: &str, index: usize) -> Option<&str> {
     line.split_whitespace().nth(index)
@@ -114,5 +120,3 @@ fn nth_field_rest(line: &str, skip: usize) -> Option<&str> {
     }
     Some(rest)
 }
-
-

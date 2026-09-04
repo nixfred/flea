@@ -80,10 +80,8 @@ fn jpeg(b: &[u8]) -> Option<(u32, u32)> {
         }
         let marker = b[i + 1];
         // A frame header, except the four that are not: DHT, JPG, DAC and the restart markers.
-        let is_frame = (0xC0..=0xCF).contains(&marker)
-            && marker != 0xC4
-            && marker != 0xC8
-            && marker != 0xCC;
+        let is_frame =
+            (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
         if is_frame {
             return Some((be16(b, i + 7)?, be16(b, i + 5)?));
         }
@@ -124,8 +122,10 @@ fn webp(b: &[u8]) -> Option<(u32, u32)> {
         }
         b"VP8X" => {
             // The extended header stores each dimension minus one as three little-endian bytes.
-            let w = u32::from(*b.get(24)?) | u32::from(*b.get(25)?) << 8 | u32::from(*b.get(26)?) << 16;
-            let h = u32::from(*b.get(27)?) | u32::from(*b.get(28)?) << 8 | u32::from(*b.get(29)?) << 16;
+            let w =
+                u32::from(*b.get(24)?) | u32::from(*b.get(25)?) << 8 | u32::from(*b.get(26)?) << 16;
+            let h =
+                u32::from(*b.get(27)?) | u32::from(*b.get(28)?) << 8 | u32::from(*b.get(29)?) << 16;
             Some((w + 1, h + 1))
         }
         _ => None,
@@ -173,7 +173,11 @@ mod tests {
         v.extend_from_slice(&600u16.to_be_bytes());
         v.extend_from_slice(&800u16.to_be_bytes());
         v.extend_from_slice(&[0u8; 8]);
-        assert_eq!(from_header(&v), Some((800, 600)), "the progressive frame FFC2 is the answer");
+        assert_eq!(
+            from_header(&v),
+            Some((800, 600)),
+            "the progressive frame FFC2 is the answer"
+        );
     }
 
     #[test]
@@ -194,13 +198,24 @@ mod tests {
     #[test]
     fn a_truncated_or_unknown_header_is_none_rather_than_a_panic() {
         assert_eq!(from_header(&[]), None);
-        assert_eq!(from_header(PNG_MAGIC), None, "the magic alone carries no IHDR");
-        assert_eq!(from_header(&png_header(1, 1)[..20]), None, "a header cut mid-field");
+        assert_eq!(
+            from_header(PNG_MAGIC),
+            None,
+            "the magic alone carries no IHDR"
+        );
+        assert_eq!(
+            from_header(&png_header(1, 1)[..20]),
+            None,
+            "a header cut mid-field"
+        );
         assert_eq!(from_header(b"GIF8"), None);
         assert_eq!(from_header(b"not an image at all"), None);
         assert_eq!(from_header(&[0xFF, 0xD8]), None, "a jpeg with no segments");
         // A segment claiming a zero length would otherwise loop forever.
-        assert_eq!(from_header(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x00, 0, 0, 0, 0, 0, 0]), None);
+        assert_eq!(
+            from_header(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x00, 0, 0, 0, 0, 0, 0]),
+            None
+        );
     }
 
     #[test]

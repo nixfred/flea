@@ -29,7 +29,10 @@ fn parse_list(stdout: &str) -> Vec<Entry> {
         };
         if let Some(original) = parts.next() {
             if !original.is_empty() {
-                out.push(Entry { original: PathBuf::from(original), uri: uri.to_string() });
+                out.push(Entry {
+                    original: PathBuf::from(original),
+                    uri: uri.to_string(),
+                });
             }
         }
     }
@@ -68,7 +71,10 @@ pub fn trash(paths: &[PathBuf]) -> (Vec<Entry>, usize) {
         match newest_entry_for(&before, &after, p) {
             Some(e) => ok.push(e),
             // corner: the file went but gio listed no entry for it, so it is gone and simply not reversible.
-            None => ok.push(Entry { original: p.clone(), uri: String::new() }),
+            None => ok.push(Entry {
+                original: p.clone(),
+                uri: String::new(),
+            }),
         }
     }
     (ok, failed)
@@ -84,20 +90,29 @@ fn newest_entry_for(before: &[Entry], after: &[Entry], path: &Path) -> Option<En
 
 pub fn restore(entry: &Entry) -> Result<(), FleaError> {
     if entry.uri.is_empty() {
-        return Err(err("this item was trashed without a trash entry, so it cannot be restored"));
+        return Err(err(
+            "this item was trashed without a trash entry, so it cannot be restored",
+        ));
     }
     match gio(&["trash", "--restore", &entry.uri]) {
         Some(o) if o.status.success() => Ok(()),
         Some(o) => {
             let msg = String::from_utf8_lossy(&o.stderr);
-            Err(err(msg.lines().last().unwrap_or("gio trash --restore failed")))
+            Err(err(msg
+                .lines()
+                .last()
+                .unwrap_or("gio trash --restore failed")))
         }
         None => Err(err("gio is not available to restore from the trash")),
     }
 }
 
 fn err(msg: &str) -> FleaError {
-    FleaError { where_: "undo".to_string(), path: String::new(), msg: msg.to_string() }
+    FleaError {
+        where_: "undo".to_string(),
+        path: String::new(),
+        msg: msg.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -124,10 +139,19 @@ mod tests {
     #[test]
     fn only_an_entry_absent_before_the_call_is_taken_as_ours() {
         let p = PathBuf::from("/home/gm/dup.txt");
-        let before = vec![Entry { original: p.clone(), uri: "trash:///dup.txt".to_string() }];
+        let before = vec![Entry {
+            original: p.clone(),
+            uri: "trash:///dup.txt".to_string(),
+        }];
         let after = vec![
-            Entry { original: p.clone(), uri: "trash:///dup.txt".to_string() },
-            Entry { original: p.clone(), uri: "trash:///dup.2.txt".to_string() },
+            Entry {
+                original: p.clone(),
+                uri: "trash:///dup.txt".to_string(),
+            },
+            Entry {
+                original: p.clone(),
+                uri: "trash:///dup.2.txt".to_string(),
+            },
         ];
         // Both entries name the same original, which is exactly why the URI is captured at trash time.
         let got = newest_entry_for(&before, &after, &p).expect("the new one");
@@ -136,7 +160,10 @@ mod tests {
 
     #[test]
     fn an_entry_with_no_uri_refuses_to_restore_instead_of_running_gio_with_an_empty_argument() {
-        let e = Entry { original: PathBuf::from("/x"), uri: String::new() };
+        let e = Entry {
+            original: PathBuf::from("/x"),
+            uri: String::new(),
+        };
         let err = restore(&e).expect_err("must refuse");
         assert_eq!(err.where_, "undo");
         assert!(err.msg.contains("cannot be restored"));

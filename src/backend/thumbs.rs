@@ -43,7 +43,14 @@ pub fn trace(row: usize) -> Option<Trace> {
         return None;
     }
     let zero = Duration::ZERO;
-    Some(Trace { row, depth: 0, at: Instant::now(), popped: zero, spawned: zero, exited: zero })
+    Some(Trace {
+        row,
+        depth: 0,
+        at: Instant::now(),
+        popped: zero,
+        spawned: zero,
+        exited: zero,
+    })
 }
 
 pub enum Outcome {
@@ -73,16 +80,43 @@ pub struct Pool {
 
 impl Pool {
     // The cache root and both tables are the caller's: a test never writes into the operator's shared cache, and run.rs has already parsed these two files.
-    pub fn new(workers: usize, results: Sender<Done>, root: PathBuf, aliases: Arc<Aliases>, specs: Arc<Thumbnailers>) -> Pool {
-        Pool::start(workers, results, Tables { aliases, specs, cache: Cache::at(root) })
+    pub fn new(
+        workers: usize,
+        results: Sender<Done>,
+        root: PathBuf,
+        aliases: Arc<Aliases>,
+        specs: Arc<Thumbnailers>,
+    ) -> Pool {
+        Pool::start(
+            workers,
+            results,
+            Tables {
+                aliases,
+                specs,
+                cache: Cache::at(root),
+            },
+        )
     }
 
     // A test names its own thumbnailers, because no shipped one can be made to hang on demand.
     #[cfg(test)]
-    fn with_specs(workers: usize, results: Sender<Done>, root: PathBuf, entries: &[(String, String)]) -> Pool {
+    fn with_specs(
+        workers: usize,
+        results: Sender<Done>,
+        root: PathBuf,
+        entries: &[(String, String)],
+    ) -> Pool {
         let aliases = Arc::new(Aliases::load());
         let specs = Arc::new(Thumbnailers::from_entries(entries, &aliases));
-        Pool::start(workers, results, Tables { aliases, specs, cache: Cache::at(root) })
+        Pool::start(
+            workers,
+            results,
+            Tables {
+                aliases,
+                specs,
+                cache: Cache::at(root),
+            },
+        )
     }
 
     fn start(workers: usize, results: Sender<Done>, tables: Tables) -> Pool {
@@ -160,7 +194,15 @@ fn worker(inner: Shared, results: Sender<Done>, tables: Arc<Tables>) {
         let started = Instant::now();
         let outcome = run_one(&tables, &mut job);
         let ms = started.elapsed().as_secs_f64() * 1000.0;
-        if results.send(Done { path: job.path, result: outcome, ms, trace: job.trace }).is_err() {
+        if results
+            .send(Done {
+                path: job.path,
+                result: outcome,
+                ms,
+                trace: job.trace,
+            })
+            .is_err()
+        {
             return;
         }
     }
@@ -222,7 +264,9 @@ fn run_one(tables: &Tables, job: &mut Job) -> Outcome {
 
 // A decoder that ran to completion and left an empty file has judged these bytes, which is exactly what a fail marker records.
 fn wrote_something(temp: &Path) -> bool {
-    std::fs::metadata(temp).map(|m| m.len() > 0).unwrap_or(false)
+    std::fs::metadata(temp)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
 }
 
 // Every failing path drops its own temp; the one path that cannot is a worker abandoned at exit, which run.rs sweeps by pid.
@@ -262,7 +306,12 @@ mod tests {
     }
 
     fn job(path: &str) -> Job {
-        Job { path: PathBuf::from(path), mtime: 0, mime: "image/jpeg".to_string(), trace: None }
+        Job {
+            path: PathBuf::from(path),
+            mtime: 0,
+            mime: "image/jpeg".to_string(),
+            trace: None,
+        }
     }
 
     // Returns a pool whose one worker is already inside a ten minute child, so the queue can only change by the caller's own hand.
@@ -341,7 +390,10 @@ mod tests {
         // The oldest submissions are the dropped ones, so cancelling one of those changes nothing.
         pool.cancel(&PathBuf::from("/definitely/not/here-0.jpg"));
         assert_eq!(pool.pending(), MAX_QUEUE);
-        pool.cancel(&PathBuf::from(format!("/definitely/not/here-{}.jpg", MAX_QUEUE * 2 - 1)));
+        pool.cancel(&PathBuf::from(format!(
+            "/definitely/not/here-{}.jpg",
+            MAX_QUEUE * 2 - 1
+        )));
         let left = pool.pending();
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(left, MAX_QUEUE - 1);
@@ -352,7 +404,13 @@ mod tests {
         let (tx, rx) = channel();
         let dir = root("missing");
         let aliases = Arc::new(Aliases::load());
-        let pool = Pool::new(1, tx, dir.clone(), Arc::clone(&aliases), Arc::new(Thumbnailers::load(&aliases)));
+        let pool = Pool::new(
+            1,
+            tx,
+            dir.clone(),
+            Arc::clone(&aliases),
+            Arc::new(Thumbnailers::load(&aliases)),
+        );
         pool.submit(job(MISSING));
         let done = rx.recv_timeout(Duration::from_secs(10)).expect("no result");
         assert_eq!(done.path, PathBuf::from(MISSING));
@@ -374,8 +432,19 @@ mod tests {
         // A real thumbnailer needs a real image, and the fail marker writer already makes the smallest valid one.
         write_marker(&src, "file:///input", 0).unwrap();
         let aliases = Arc::new(Aliases::load());
-        let pool = Pool::new(1, tx, dir.clone(), Arc::clone(&aliases), Arc::new(Thumbnailers::load(&aliases)));
-        pool.submit(Job { path: src.clone(), mtime: FIXTURE_MTIME, mime: "image/png".to_string(), trace: None });
+        let pool = Pool::new(
+            1,
+            tx,
+            dir.clone(),
+            Arc::clone(&aliases),
+            Arc::new(Thumbnailers::load(&aliases)),
+        );
+        pool.submit(Job {
+            path: src.clone(),
+            mtime: FIXTURE_MTIME,
+            mime: "image/png".to_string(),
+            trace: None,
+        });
         let done = rx.recv_timeout(Duration::from_secs(30)).expect("no result");
         let out = match done.result {
             Outcome::Ready(p) => p,
@@ -387,7 +456,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(out, want);
         assert_eq!(png_text(&bytes, "Thumb::URI"), Some(uri_for(&src)));
-        assert_eq!(png_text(&bytes, "Thumb::MTime"), Some(FIXTURE_MTIME.to_string()));
+        assert_eq!(
+            png_text(&bytes, "Thumb::MTime"),
+            Some(FIXTURE_MTIME.to_string())
+        );
         assert_eq!(published, 1, "a temp file survived the publish");
     }
 }

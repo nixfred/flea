@@ -35,7 +35,11 @@ pub fn walk_one_dirsize(out: &mut BufWriter<io::Stdout>, st: &mut State) {
     let result = dirsize::walk(&path);
     let ms = since(t);
     st.dirsizes.insert(row, (result.bytes, result.partial));
-    writeln!(out, "{}", dirsized_line(row, result.bytes, result.partial, ms)).ok();
+    writeln!(
+        out,
+        "{}",
+        dirsized_line(row, result.bytes, result.partial, ms)
+    )
+    .ok();
     out.flush().ok();
 }
-

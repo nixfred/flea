@@ -39,7 +39,8 @@ pub fn rows_line(
         // Looked up once and shared with the icon and the Kind text, because it is the only per-row allocation here.
         let mime_name = mime.lookup(name);
         // A directory or a special file is never thumbnailed, so the spec lookup is skipped for one; see AGENTS.md "Thumbnail requests".
-        let can_thumb = thumbnailable(m.mode) && mime_name.is_some_and(|m| thumbs.for_mime(m, aliases).is_some());
+        let can_thumb = thumbnailable(m.mode)
+            && mime_name.is_some_and(|m| thumbs.for_mime(m, aliases).is_some());
         // A symlink to a directory carries d:false by contract, so only the ICON follows the target.
         let folder_icon = is_dir || m.target_is_dir;
         let icon = icons.icon_for(mime_name, folder_icon, m.mode);
@@ -56,7 +57,11 @@ pub fn rows_line(
         // Only a directory carries its filesystem id, because only a directory can be a drop
         // destination: canDrop requires d true, so a file row's device would never be read. On the
         // 100k scale fixture, which holds no directories at all, this adds nothing whatsoever.
-        let dev = if is_dir { format!(r#","v":{}"#, m.dev) } else { String::new() };
+        let dev = if is_dir {
+            format!(r#","v":{}"#, m.dev)
+        } else {
+            String::new()
+        };
         // The icon is escaped like every other field: the escape is the contract, not an optimisation.
         s.push_str(&format!(
             r#"{{"n":"{}","d":{},"s":{},"m":{},"p":{},"i":"{}","t":{},"k":{}{}}}"#,
@@ -71,7 +76,11 @@ pub fn rows_line(
             dev
         ));
     }
-    let kinds_json: String = kind_list.iter().map(|k| format!(r#""{}""#, escape(k))).collect::<Vec<_>>().join(",");
+    let kinds_json: String = kind_list
+        .iter()
+        .map(|k| format!(r#""{}""#, escape(k)))
+        .collect::<Vec<_>>()
+        .join(",");
     s.push_str(&format!(r#"],"kinds":[{}],"ms":{:.3}}}"#, kinds_json, ms));
     s
 }
@@ -82,12 +91,20 @@ pub fn rows_line(
 // string and the Kind column is a human description. Data is the canvas's own word for it.
 pub const UNKNOWN_KIND: &str = "Data";
 
-fn kind_for(folder_icon: bool, mime_name: Option<&str>, _icon: &str, aliases: &Aliases, kinds: &mut Kinds) -> String {
+fn kind_for(
+    folder_icon: bool,
+    mime_name: Option<&str>,
+    _icon: &str,
+    aliases: &Aliases,
+    kinds: &mut Kinds,
+) -> String {
     if folder_icon {
         return "Folder".to_string();
     }
     match mime_name {
-        Some(m) => kinds.comment(aliases.canonical(m)).unwrap_or_else(|| UNKNOWN_KIND.to_string()),
+        Some(m) => kinds
+            .comment(aliases.canonical(m))
+            .unwrap_or_else(|| UNKNOWN_KIND.to_string()),
         None => UNKNOWN_KIND.to_string(),
     }
 }
@@ -100,9 +117,12 @@ mod tests {
     fn dbs() -> (Db, Names, Aliases, Thumbnailers, Kinds) {
         // The glob names the alias and the thumbnailer the canonical type, so a dropped aliases argument reddens.
         let aliases = Aliases::from_str("image/pjpeg image/jpeg\n");
-        let spec = "[Thumbnailer Entry]\nTryExec=/bin/sh\nExec=/bin/sh %i %o\nMimeType=image/jpeg;\n";
-        let thumbs =
-            Thumbnailers::from_entries(&[("t.thumbnailer".to_string(), spec.to_string())], &aliases);
+        let spec =
+            "[Thumbnailer Entry]\nTryExec=/bin/sh\nExec=/bin/sh %i %o\nMimeType=image/jpeg;\n";
+        let thumbs = Thumbnailers::from_entries(
+            &[("t.thumbnailer".to_string(), spec.to_string())],
+            &aliases,
+        );
         // Seeded under the canonical name, the same one kind_for reaches through aliases.canonical first.
         let kinds = Kinds::from_pairs(&[
             ("text/plain", Some("Plain Text Document")),
@@ -123,11 +143,25 @@ mod tests {
         l.push("say \"hi\".txt", false);
         l.push("sub", true);
         let metas = vec![
-            Meta { size: 12, mtime: 1787790423, mode: 33188, target_is_dir: false, dev: 0 },
-            Meta { size: 4096, mtime: 1787790424, mode: 16877, target_is_dir: false, dev: 42 },
+            Meta {
+                size: 12,
+                mtime: 1787790423,
+                mode: 33188,
+                target_is_dir: false,
+                dev: 0,
+            },
+            Meta {
+                size: 4096,
+                mtime: 1787790424,
+                mode: 16877,
+                target_is_dir: false,
+                dev: 42,
+            },
         ];
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
-        let s = rows_line(&l, &metas, 0, 1.25, &mime, &icons, &aliases, &thumbs, &mut kinds);
+        let s = rows_line(
+            &l, &metas, 0, 1.25, &mime, &icons, &aliases, &thumbs, &mut kinds,
+        );
         assert!(s.starts_with(r#"{"t":"rows","start":0,"rows":["#));
         assert!(s.contains(
             r#""n":"say \"hi\".txt","d":false,"s":12,"m":1787790423,"p":33188,"i":"text-x-generic","t":false,"k":0"#
@@ -141,10 +175,26 @@ mod tests {
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
         let mut l = Listing::new();
         l.push("linkdir", false);
-        let metas = vec![Meta { size: 1, mtime: 2, mode: 0o120777, target_is_dir: true, dev: 0 }];
-        let line = rows_line(&l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds);
-        assert!(line.contains(r#""d":false"#), "d describes the link: {}", line);
-        assert!(line.contains(r#""i":"folder""#), "the icon describes the target: {}", line);
+        let metas = vec![Meta {
+            size: 1,
+            mtime: 2,
+            mode: 0o120777,
+            target_is_dir: true,
+            dev: 0,
+        }];
+        let line = rows_line(
+            &l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds,
+        );
+        assert!(
+            line.contains(r#""d":false"#),
+            "d describes the link: {}",
+            line
+        );
+        assert!(
+            line.contains(r#""i":"folder""#),
+            "the icon describes the target: {}",
+            line
+        );
     }
 
     #[test]
@@ -154,22 +204,48 @@ mod tests {
         l.push("notes.txt", false);
         // Real st_mode values, because the flag now reads the file type out of the mode.
         let metas = vec![
-            Meta { size: 1, mtime: 2, mode: 33188, target_is_dir: false, dev: 0 },
-            Meta { size: 4, mtime: 5, mode: 33188, target_is_dir: false, dev: 0 },
+            Meta {
+                size: 1,
+                mtime: 2,
+                mode: 33188,
+                target_is_dir: false,
+                dev: 0,
+            },
+            Meta {
+                size: 4,
+                mtime: 5,
+                mode: 33188,
+                target_is_dir: false,
+                dev: 0,
+            },
         ];
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
-        let s = rows_line(&l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds);
-        assert!(s.contains(r#""n":"photo.jpg","d":false,"s":1,"m":2,"p":33188,"i":"image-x-generic","t":true"#));
-        assert!(s.contains(r#""n":"notes.txt","d":false,"s":4,"m":5,"p":33188,"i":"text-x-generic","t":false"#));
+        let s = rows_line(
+            &l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds,
+        );
+        assert!(s.contains(
+            r#""n":"photo.jpg","d":false,"s":1,"m":2,"p":33188,"i":"image-x-generic","t":true"#
+        ));
+        assert!(s.contains(
+            r#""n":"notes.txt","d":false,"s":4,"m":5,"p":33188,"i":"text-x-generic","t":false"#
+        ));
     }
 
     #[test]
     fn a_newline_in_a_name_stays_on_one_line() {
         let mut l = Listing::new();
         l.push("two\nlines.txt", false);
-        let metas = vec![Meta { size: 1, mtime: 2, mode: 3, target_is_dir: false, dev: 0 }];
+        let metas = vec![Meta {
+            size: 1,
+            mtime: 2,
+            mode: 3,
+            target_is_dir: false,
+            dev: 0,
+        }];
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
-        let s = rows_line(&l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds);
+        let s = rows_line(
+            &l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds,
+        );
         assert_eq!(s.lines().count(), 1);
         assert!(s.contains(r#""n":"two\nlines.txt""#));
     }
@@ -180,7 +256,13 @@ mod tests {
         l.push("zero.txt", false);
         l.push("one.txt", false);
         l.push("two-dir", true);
-        let metas = vec![Meta { size: 7, mtime: 8, mode: 9, target_is_dir: false, dev: 77 }];
+        let metas = vec![Meta {
+            size: 7,
+            mtime: 8,
+            mode: 9,
+            target_is_dir: false,
+            dev: 77,
+        }];
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
         assert_eq!(
             rows_line(&l, &metas, 2, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds),
@@ -194,37 +276,83 @@ mod tests {
         l.push("a.txt", false);
         l.push("b.txt", false);
         let metas = vec![
-            Meta { size: 1, mtime: 2, mode: 3, target_is_dir: false, dev: 0 },
-            Meta { size: 4, mtime: 5, mode: 6, target_is_dir: false, dev: 0 },
+            Meta {
+                size: 1,
+                mtime: 2,
+                mode: 3,
+                target_is_dir: false,
+                dev: 0,
+            },
+            Meta {
+                size: 4,
+                mtime: 5,
+                mode: 6,
+                target_is_dir: false,
+                dev: 0,
+            },
         ];
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
-        let s = rows_line(&l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds);
-        assert!(s.contains(r#""kinds":["Plain Text Document"]"#), "two rows of one type share one entry: {}", s);
-        assert_eq!(s.matches(r#""k":0"#).count(), 2, "both rows point at that one index: {}", s);
+        let s = rows_line(
+            &l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds,
+        );
+        assert!(
+            s.contains(r#""kinds":["Plain Text Document"]"#),
+            "two rows of one type share one entry: {}",
+            s
+        );
+        assert_eq!(
+            s.matches(r#""k":0"#).count(),
+            2,
+            "both rows point at that one index: {}",
+            s
+        );
     }
 
     #[test]
     fn a_type_nothing_can_describe_reads_as_data_and_never_as_an_icon_name() {
         let mut l = Listing::new();
         l.push("thing.zzzznotreal", false);
-        let metas = vec![Meta { size: 1, mtime: 2, mode: 3, target_is_dir: false, dev: 0 }];
+        let metas = vec![Meta {
+            size: 1,
+            mtime: 2,
+            mode: 3,
+            target_is_dir: false,
+            dev: 0,
+        }];
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
-        let s = rows_line(&l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds);
+        let s = rows_line(
+            &l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds,
+        );
         // No glob matches, so there is no type to describe. The icon ladder still falls to
         // text-x-generic, but the Kind must not claim the row is text, and must not leak an
         // internal icon name into a human column; see the preview column's Unsupported state.
-        assert!(s.contains(r#""kinds":["Data"]"#), "an unresolved type reads as Data: {}", s);
+        assert!(
+            s.contains(r#""kinds":["Data"]"#),
+            "an unresolved type reads as Data: {}",
+            s
+        );
         assert!(!s.contains(r#""kinds":["text-x-generic"]"#));
-        assert!(s.contains(r#""i":"text-x-generic""#), "the icon itself is unchanged");
+        assert!(
+            s.contains(r#""i":"text-x-generic""#),
+            "the icon itself is unchanged"
+        );
     }
 
     #[test]
     fn a_control_character_in_a_name_is_escaped() {
         let mut l = Listing::new();
         l.push("bell\u{7}tab\ttwo\nlines", false);
-        let metas = vec![Meta { size: 1, mtime: 2, mode: 3, target_is_dir: false, dev: 0 }];
+        let metas = vec![Meta {
+            size: 1,
+            mtime: 2,
+            mode: 3,
+            target_is_dir: false,
+            dev: 0,
+        }];
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
-        let s = rows_line(&l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds);
+        let s = rows_line(
+            &l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds,
+        );
         assert_eq!(s.lines().count(), 1);
         assert!(s.contains(r#""n":"bell\u0007tab\ttwo\nlines""#));
     }
@@ -233,7 +361,13 @@ mod tests {
     fn a_start_past_the_end_emits_no_rows() {
         let mut l = Listing::new();
         l.push("only.txt", false);
-        let metas = vec![Meta { size: 1, mtime: 2, mode: 3, target_is_dir: false, dev: 0 }];
+        let metas = vec![Meta {
+            size: 1,
+            mtime: 2,
+            mode: 3,
+            target_is_dir: false,
+            dev: 0,
+        }];
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
         // run.rs clamps start to l.len() before calling rows_line, see docs/protocol.md.
         assert_eq!(
@@ -249,13 +383,33 @@ mod tests {
         let (mime, icons, aliases, thumbs, mut kinds) = dbs();
         // A fifo, a socket, a character device and a vanished row, all carrying a name a thumbnailer declares.
         for mode in [0o010644, 0o140644, 0o020644, 0] {
-            let metas = vec![Meta { size: 1, mtime: 2, mode, target_is_dir: false, dev: 0 }];
-            let s = rows_line(&l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds);
-            assert!(s.contains(r#""i":"image-x-generic","t":false"#), "mode {:o} was offered", mode);
+            let metas = vec![Meta {
+                size: 1,
+                mtime: 2,
+                mode,
+                target_is_dir: false,
+                dev: 0,
+            }];
+            let s = rows_line(
+                &l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds,
+            );
+            assert!(
+                s.contains(r#""i":"image-x-generic","t":false"#),
+                "mode {:o} was offered",
+                mode
+            );
         }
         // The symlink is true, because the request path stats the target before it queues anything.
-        let metas = vec![Meta { size: 1, mtime: 2, mode: 0o120777, target_is_dir: false, dev: 0 }];
-        let s = rows_line(&l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds);
+        let metas = vec![Meta {
+            size: 1,
+            mtime: 2,
+            mode: 0o120777,
+            target_is_dir: false,
+            dev: 0,
+        }];
+        let s = rows_line(
+            &l, &metas, 0, 0.0, &mime, &icons, &aliases, &thumbs, &mut kinds,
+        );
         assert!(s.contains(r#""i":"image-x-generic","t":true"#));
     }
 }

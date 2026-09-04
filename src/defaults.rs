@@ -73,16 +73,36 @@ fn release_mime() -> Result<String, String> {
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(format!("{}: nothing to undo, {} does not exist", MIME, path.display()));
+            return Ok(format!(
+                "{}: nothing to undo, {} does not exist",
+                MIME,
+                path.display()
+            ));
         }
-        Err(e) => return Err(format!("{} could not be read ({:?})", path.display(), e.kind())),
+        Err(e) => {
+            return Err(format!(
+                "{} could not be read ({:?})",
+                path.display(),
+                e.kind()
+            ))
+        }
     };
     let Some(without) = drop_default(&text, MIME, DESKTOP_ID) else {
-        return Ok(format!("{}: nothing to undo, {} does not name {}", MIME, path.display(), DESKTOP_ID));
+        return Ok(format!(
+            "{}: nothing to undo, {} does not name {}",
+            MIME,
+            path.display(),
+            DESKTOP_ID
+        ));
     };
     replace_file(&path, &without)?;
     let now = query_default()?;
-    Ok(format!("{}: now {}, Flea's line removed from {}", MIME, handler_name(&now), path.display()))
+    Ok(format!(
+        "{}: now {}, Flea's line removed from {}",
+        MIME,
+        handler_name(&now),
+        path.display()
+    ))
 }
 
 fn handler_name(id: &str) -> &str {
@@ -104,9 +124,16 @@ fn xdg_mime(args: &[&str]) -> Result<String, String> {
         .stdin(Stdio::null())
         .stderr(Stdio::inherit())
         .output()
-        .map_err(|_| "xdg-mime is not on PATH; it ships in xdg-utils, which the package depends on".to_string())?;
+        .map_err(|_| {
+            "xdg-mime is not on PATH; it ships in xdg-utils, which the package depends on"
+                .to_string()
+        })?;
     if !out.status.success() {
-        return Err(format!("xdg-mime {} exited {}", args.join(" "), out.status.code().unwrap_or(-1)));
+        return Err(format!(
+            "xdg-mime {} exited {}",
+            args.join(" "),
+            out.status.code().unwrap_or(-1)
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -126,10 +153,19 @@ fn installed_entry() -> Option<PathBuf> {
             }
         }
     }
-    let system = std::env::var("XDG_DATA_DIRS").ok().filter(|v| !v.is_empty());
+    let system = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|v| !v.is_empty());
     let system = system.unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
-    dirs.extend(system.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
-    dirs.into_iter().map(|d| d.join("applications").join(DESKTOP_ID)).find(|p| p.is_file())
+    dirs.extend(
+        system
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from),
+    );
+    dirs.into_iter()
+        .map(|d| d.join("applications").join(DESKTOP_ID))
+        .find(|p| p.is_file())
 }
 
 // The per-user file xdg-mime writes, of which only the [Default Applications] section is ours to touch:
@@ -147,7 +183,10 @@ pub fn drop_default(text: &str, mime: &str, id: &str) -> Option<String> {
         if body.starts_with('[') {
             in_defaults = body == "[Default Applications]";
         } else if in_defaults {
-            if let Some(value) = body.strip_prefix(mime).and_then(|rest| rest.strip_prefix('=')) {
+            if let Some(value) = body
+                .strip_prefix(mime)
+                .and_then(|rest| rest.strip_prefix('='))
+            {
                 // A value is a semicolon list: gio writes a trailing semicolon and xdg-mime writes none.
                 let all: Vec<&str> = value.split(';').filter(|v| !v.is_empty()).collect();
                 let kept: Vec<&str> = all.iter().copied().filter(|v| *v != id).collect();
@@ -186,15 +225,36 @@ mod tests {
 
     #[test]
     fn drop_default_leaves_a_file_that_does_not_name_flea_alone() {
-        assert_eq!(drop_default("[Default Applications]\ninode/directory=thunar.desktop\n", MIME, DESKTOP_ID), None);
-        assert_eq!(drop_default("inode/directory=com.thisisgm.flea.desktop\n", MIME, DESKTOP_ID), None);
+        assert_eq!(
+            drop_default(
+                "[Default Applications]\ninode/directory=thunar.desktop\n",
+                MIME,
+                DESKTOP_ID
+            ),
+            None
+        );
+        assert_eq!(
+            drop_default(
+                "inode/directory=com.thisisgm.flea.desktop\n",
+                MIME,
+                DESKTOP_ID
+            ),
+            None
+        );
         assert_eq!(drop_default("", MIME, DESKTOP_ID), None);
     }
 
     #[test]
     fn drop_default_keeps_the_rest_of_a_list_value() {
         // gio writes a trailing semicolon where xdg-mime writes none; both are one claim.
-        assert_eq!(drop_default("[Default Applications]\ninode/directory=com.thisisgm.flea.desktop;\n", MIME, DESKTOP_ID), Some("[Default Applications]\n".to_string()));
+        assert_eq!(
+            drop_default(
+                "[Default Applications]\ninode/directory=com.thisisgm.flea.desktop;\n",
+                MIME,
+                DESKTOP_ID
+            ),
+            Some("[Default Applications]\n".to_string())
+        );
         assert_eq!(
             drop_default("[Default Applications]\ninode/directory=com.thisisgm.flea.desktop;thunar.desktop;\n", MIME, DESKTOP_ID),
             Some("[Default Applications]\ninode/directory=thunar.desktop\n".to_string())
@@ -204,6 +264,9 @@ mod tests {
     #[test]
     fn drop_default_keeps_a_last_line_with_no_newline_intact() {
         let out = drop_default("[Default Applications]\ninode/directory=com.thisisgm.flea.desktop\nimage/png=imv.desktop", MIME, DESKTOP_ID);
-        assert_eq!(out, Some("[Default Applications]\nimage/png=imv.desktop".to_string()));
+        assert_eq!(
+            out,
+            Some("[Default Applications]\nimage/png=imv.desktop".to_string())
+        );
     }
 }

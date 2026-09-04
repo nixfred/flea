@@ -35,7 +35,11 @@ pub fn stat_range(base: &Path, l: &Listing, start: usize, count: usize) -> (Vec<
             Ok(m) => {
                 // corner: only a symlink pays a second stat, and only so its icon can be a folder; see AGENTS.md "Icons in the row".
                 let target_is_dir = m.file_type().is_symlink()
-                    && base.join(l.name(i)).metadata().map(|t| t.is_dir()).unwrap_or(false);
+                    && base
+                        .join(l.name(i))
+                        .metadata()
+                        .map(|t| t.is_dir())
+                        .unwrap_or(false);
                 out.push(Meta {
                     size: m.size(),
                     mtime: m.mtime(),
@@ -74,7 +78,9 @@ pub fn stat_all(base: &Path, l: &Listing) -> (Vec<Stat>, f64) {
     let t = Instant::now();
     let n = l.len();
     let mut out = vec![Stat { size: 0, mtime: 0 }; n];
-    let workers = std::thread::available_parallelism().map(|w| w.get()).unwrap_or(1);
+    let workers = std::thread::available_parallelism()
+        .map(|w| w.get())
+        .unwrap_or(1);
     // Ceiling division, so every row lands in exactly one chunk; max(1) keeps chunks_mut off zero.
     let per_worker = n.div_ceil(workers).max(1);
     std::thread::scope(|s| {
@@ -93,7 +99,10 @@ pub fn stat_all(base: &Path, l: &Listing) -> (Vec<Stat>, f64) {
 // corner: a row that vanished between listing and stat reports zeroes, the same zeroes stat_range sends.
 fn stat_one(base: &Path, name: &str) -> Stat {
     match base.join(name).symlink_metadata() {
-        Ok(m) => Stat { size: m.size(), mtime: m.mtime() },
+        Ok(m) => Stat {
+            size: m.size(),
+            mtime: m.mtime(),
+        },
         Err(_) => Stat { size: 0, mtime: 0 },
     }
 }
@@ -143,11 +152,23 @@ mod tests {
     fn only_a_regular_file_or_a_symlink_is_offered_as_thumbnailable() {
         let (d, l) = fixture("mode");
         let (metas, _) = stat_range(Path::new(&d), &l, 0, 1);
-        assert!(thumbnailable(metas[0].mode), "a regular file must be offered");
-        assert!(thumbnailable(0o120777), "a symlink is stat'd when it is asked for");
-        assert!(!thumbnailable(0o010644), "a fifo blocks a decoder for its whole timeout");
+        assert!(
+            thumbnailable(metas[0].mode),
+            "a regular file must be offered"
+        );
+        assert!(
+            thumbnailable(0o120777),
+            "a symlink is stat'd when it is asked for"
+        );
+        assert!(
+            !thumbnailable(0o010644),
+            "a fifo blocks a decoder for its whole timeout"
+        );
         assert!(!thumbnailable(0o140644), "a socket is not a file to decode");
-        assert!(!thumbnailable(0o020644), "a character device is not a file to decode");
+        assert!(
+            !thumbnailable(0o020644),
+            "a character device is not a file to decode"
+        );
         assert!(!thumbnailable(0o040755), "a directory has no thumbnail");
         assert!(!thumbnailable(0), "a row that vanished reports mode 0");
         fs::remove_dir_all(&d).unwrap();
@@ -162,8 +183,14 @@ mod tests {
         assert_eq!(metas[2].size, 0);
         assert_eq!(metas[2].mode, 0);
         // The claim mode 0 rests on: a row that was stat'd can never answer 0, so the two never blur.
-        assert_ne!(metas[0].mode, 0, "a real row always carries its file-type bits");
-        assert_ne!(metas[1].mode, 0, "including the empty file, whose size really is 0");
+        assert_ne!(
+            metas[0].mode, 0,
+            "a real row always carries its file-type bits"
+        );
+        assert_ne!(
+            metas[1].mode, 0,
+            "including the empty file, whose size really is 0"
+        );
         fs::remove_dir_all(&d).unwrap();
     }
 
@@ -184,11 +211,27 @@ mod tests {
         l.push("brokenlink", false);
         let (metas, _) = stat_range(Path::new(&d), &l, 0, 4);
         assert_eq!(metas.len(), 4);
-        assert!(!metas[0].target_is_dir, "a real directory is not a symlink to one, so is_dir already covers it");
-        assert!(metas[1].target_is_dir, "a symlink to a directory is the one row that draws as a folder");
-        assert!(!metas[2].target_is_dir, "a symlink to a regular file is not a folder");
-        assert!(!metas[3].target_is_dir, "a broken symlink resolves to nothing, which is not a folder");
-        assert_eq!(metas.iter().filter(|m| m.target_is_dir).count(), 1, "exactly one of the four");
+        assert!(
+            !metas[0].target_is_dir,
+            "a real directory is not a symlink to one, so is_dir already covers it"
+        );
+        assert!(
+            metas[1].target_is_dir,
+            "a symlink to a directory is the one row that draws as a folder"
+        );
+        assert!(
+            !metas[2].target_is_dir,
+            "a symlink to a regular file is not a folder"
+        );
+        assert!(
+            !metas[3].target_is_dir,
+            "a broken symlink resolves to nothing, which is not a folder"
+        );
+        assert_eq!(
+            metas.iter().filter(|m| m.target_is_dir).count(),
+            1,
+            "exactly one of the four"
+        );
         fs::remove_dir_all(&d).unwrap();
     }
 
@@ -221,9 +264,20 @@ mod tests {
         let (stats, _) = stat_all(d.path(), &l);
         assert_eq!(stats.len(), 2);
         // The same lstat stat_range makes, so the order agrees with the s the column shows for the link.
-        assert_eq!(stats[0].size as usize, "never-existed".len(), "a link's size is its target path");
-        assert_eq!((stats[1].size, stats[1].mtime), (0, 0), "the zeroes stat_range would send");
+        assert_eq!(
+            stats[0].size as usize,
+            "never-existed".len(),
+            "a link's size is its target path"
+        );
+        assert_eq!(
+            (stats[1].size, stats[1].mtime),
+            (0, 0),
+            "the zeroes stat_range would send"
+        );
         let (none, _) = stat_all(d.path(), &Listing::new());
-        assert!(none.is_empty(), "an empty listing spawns no work and answers nothing");
+        assert!(
+            none.is_empty(),
+            "an empty listing spawns no work and answers nothing"
+        );
     }
 }

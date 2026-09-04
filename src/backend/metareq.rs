@@ -9,8 +9,8 @@ use crate::backend::opsreq::OpMsg;
 use crate::backend::owner;
 use crate::backend::sandbox;
 use crate::json::escape;
-use std::path::Path;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -50,7 +50,22 @@ pub struct Meta {
 
 impl Meta {
     fn empty() -> Meta {
-        Meta { width: 0, height: 0, duration_ms: 0, sample_rate: 0, entries: 0, unpacked: 0, names: Vec::new(), archive_failed: false, lines: 0, lines_partial: false, lines_failed: false, target: String::new(), target_is_dir: false, owner: String::new() }
+        Meta {
+            width: 0,
+            height: 0,
+            duration_ms: 0,
+            sample_rate: 0,
+            entries: 0,
+            unpacked: 0,
+            names: Vec::new(),
+            archive_failed: false,
+            lines: 0,
+            lines_partial: false,
+            lines_failed: false,
+            target: String::new(),
+            target_is_dir: false,
+            owner: String::new(),
+        }
     }
 }
 
@@ -99,7 +114,10 @@ pub fn read(path: &Path, text: bool, media: bool, archive: Option<&Formats>) -> 
 // Listing an archive reads its index and extracts nothing, in the same jail every other delegated
 // tool here runs in.
 fn list_archive(path: &Path, formats: &Formats) -> Contents {
-    let failed = Contents { failed: true, ..Default::default() };
+    let failed = Contents {
+        failed: true,
+        ..Default::default()
+    };
     let (inner, spec) = match formats.list_argv(path) {
         Some(v) => v,
         None => return failed,
@@ -187,15 +205,33 @@ pub fn meta_line(row: usize, m: &Meta) -> String {
         .collect();
     format!(
         r#"{{"t":"meta","row":{},"w":{},"h":{},"ms":{},"rate":{},"entries":{},"unpacked":{},"afailed":{},"names":[{}],"lines":{},"partial":{},"lfailed":{},"target":"{}","targetdir":{},"owner":"{}"}}"#,
-        row, m.width, m.height, m.duration_ms, m.sample_rate, m.entries, m.unpacked,
-        m.archive_failed, names.join(","), m.lines, m.lines_partial, m.lines_failed,
-        escape(&m.target), m.target_is_dir, escape(&m.owner)
+        row,
+        m.width,
+        m.height,
+        m.duration_ms,
+        m.sample_rate,
+        m.entries,
+        m.unpacked,
+        m.archive_failed,
+        names.join(","),
+        m.lines,
+        m.lines_partial,
+        m.lines_failed,
+        escape(&m.target),
+        m.target_is_dir,
+        escape(&m.owner)
     )
 }
 
 // Answers on a thread, because a media row costs an ffprobe and the loop waits on nothing.
-pub fn spawn(row: usize, path: std::path::PathBuf, text: bool, media: bool,
-             archive: Option<std::sync::Arc<Formats>>, tx: std::sync::mpsc::Sender<OpMsg>) {
+pub fn spawn(
+    row: usize,
+    path: std::path::PathBuf,
+    text: bool,
+    media: bool,
+    archive: Option<std::sync::Arc<Formats>>,
+    tx: std::sync::mpsc::Sender<OpMsg>,
+) {
     std::thread::spawn(move || {
         let line = meta_line(row, &read(&path, text, media, archive.as_deref()));
         let _ = tx.send(OpMsg::Meta { line });
@@ -243,16 +279,27 @@ mod tests {
         std::fs::write(&p, png).unwrap();
         let m = read(&p, true, false, None);
         assert_eq!((m.width, m.height), (64, 64));
-        assert_eq!(m.lines, 0, "the newlines in a bitmap are a number nothing should be shown");
+        assert_eq!(
+            m.lines, 0,
+            "the newlines in a bitmap are a number nothing should be shown"
+        );
     }
 
     #[test]
     fn a_text_file_counts_its_lines_including_one_with_no_trailing_newline() {
         let d = TestDir::new("metalines");
         assert_eq!(read2(&d.file("three.txt", "a\nb\nc\n"), true).lines, 3);
-        assert_eq!(read2(&d.file("noeol.txt", "a\nb\nc"), true).lines, 3, "the last line still counts");
+        assert_eq!(
+            read2(&d.file("noeol.txt", "a\nb\nc"), true).lines,
+            3,
+            "the last line still counts"
+        );
         assert_eq!(read2(&d.file("one.txt", "single"), true).lines, 1);
-        assert_eq!(read2(&d.file("empty.txt", ""), true).lines, 0, "an empty file has no lines");
+        assert_eq!(
+            read2(&d.file("empty.txt", ""), true).lines,
+            0,
+            "an empty file has no lines"
+        );
         assert_eq!(read2(&d.file("blank.txt", "\n"), true).lines, 1);
     }
 
@@ -265,8 +312,16 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let empty = read2(&d.file("empty.txt", ""), true);
         // These two carried the same three values until lfailed, which read as "this file is empty".
-        assert!(meta_line(1, &empty).contains(r#""lines":0,"partial":false,"lfailed":false"#), "{}", meta_line(1, &empty));
-        assert!(meta_line(2, &denied).contains(r#""lines":0,"partial":false,"lfailed":true"#), "{}", meta_line(2, &denied));
+        assert!(
+            meta_line(1, &empty).contains(r#""lines":0,"partial":false,"lfailed":false"#),
+            "{}",
+            meta_line(1, &empty)
+        );
+        assert!(
+            meta_line(2, &denied).contains(r#""lines":0,"partial":false,"lfailed":true"#),
+            "{}",
+            meta_line(2, &denied)
+        );
         // A row nobody asked for a count of never claims a failure either.
         assert!(!read2(&d.file("unasked.txt", "a\n"), false).lines_failed);
     }
@@ -277,7 +332,10 @@ mod tests {
         let body = "x\n".repeat((LINE_BUDGET as usize) / 2 + 1000);
         let p = d.file("huge.log", &body);
         let m = read(&p, true, false, None);
-        assert!(m.lines_partial, "a count that stopped at the budget must say so");
+        assert!(
+            m.lines_partial,
+            "a count that stopped at the budget must say so"
+        );
         assert!(m.lines > 0);
     }
 
@@ -292,14 +350,20 @@ mod tests {
 
         let m = read2(&d.join("linkdir"), false);
         assert_eq!(m.target, "realdir");
-        assert!(m.target_is_dir, "the mark follows the target, so the column has to know");
+        assert!(
+            m.target_is_dir,
+            "the mark follows the target, so the column has to know"
+        );
 
         let m = read2(&d.join("linkfile"), false);
         assert_eq!(m.target, "real.txt");
         assert!(!m.target_is_dir);
 
         let m = read2(&d.join("broken"), false);
-        assert_eq!(m.target, "nowhere", "a broken link still tells the truth about where it points");
+        assert_eq!(
+            m.target, "nowhere",
+            "a broken link still tells the truth about where it points"
+        );
         assert!(!m.target_is_dir);
     }
 
@@ -309,14 +373,20 @@ mod tests {
         let m = read2(&d.join("never-existed"), true);
         assert_eq!((m.width, m.height, m.lines), (0, 0, 0));
         assert!(m.target.is_empty());
-        assert!(m.owner.is_empty(), "a path that is not there has no owner to name");
+        assert!(
+            m.owner.is_empty(),
+            "a path that is not there has no owner to name"
+        );
     }
 
     #[test]
     fn a_file_carries_its_owner_and_the_line_puts_it_on_the_wire_escaped() {
         let d = TestDir::new("metaowner");
         let m = read2(&d.file("mine.txt", "body"), false);
-        assert!(!m.owner.is_empty(), "the test runner's uid is a local account on this box");
+        assert!(
+            !m.owner.is_empty(),
+            "the test runner's uid is a local account on this box"
+        );
         assert!(meta_line(1, &m).ends_with(&format!(r#""owner":"{}"}}"#, m.owner)));
         let mut odd = Meta::empty();
         odd.owner = "say \"hi\"".to_string();
@@ -329,13 +399,26 @@ mod tests {
         m.entries = 214;
         m.unpacked = 3400;
         m.names = vec![
-            Entry { name: "ui".to_string(), is_dir: true },
-            Entry { name: "say \"hi\".txt".to_string(), is_dir: false },
+            Entry {
+                name: "ui".to_string(),
+                is_dir: true,
+            },
+            Entry {
+                name: "say \"hi\".txt".to_string(),
+                is_dir: false,
+            },
         ];
         let line = meta_line(2, &m);
-        assert!(line.contains(r#""entries":214"#), "the count is exact, never a cap: {}", line);
-        assert!(line.contains(r#""names":[{"n":"ui","d":true},{"n":"say \"hi\".txt","d":false}]"#),
-                "a name is escaped like every other string on this wire: {}", line);
+        assert!(
+            line.contains(r#""entries":214"#),
+            "the count is exact, never a cap: {}",
+            line
+        );
+        assert!(
+            line.contains(r#""names":[{"n":"ui","d":true},{"n":"say \"hi\".txt","d":false}]"#),
+            "a name is escaped like every other string on this wire: {}",
+            line
+        );
         assert!(line.contains(r#""afailed":false"#));
     }
 

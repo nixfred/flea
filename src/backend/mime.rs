@@ -44,7 +44,9 @@ impl Db {
                 _ => continue,
             };
             // The 4th field is a comma-separated flag list, and "cs" is the only flag this database uses.
-            let cs = parts.next().is_some_and(|f| f.split(',').any(|flag| flag == "cs"));
+            let cs = parts
+                .next()
+                .is_some_and(|f| f.split(',').any(|flag| flag == "cs"));
 
             // corner: 10 of 1594 globs use a character class or a non-leading star; see AGENTS.md "MIME globs".
             if glob.contains('[') || glob.contains('?') {
@@ -67,7 +69,12 @@ impl Db {
                 insert_heaviest(map, key, weight, mime);
             }
         }
-        Db { by_suffix_cs, by_suffix, by_name_cs, by_name }
+        Db {
+            by_suffix_cs,
+            by_suffix,
+            by_name_cs,
+            by_name,
+        }
     }
 
     // Takes a file name, never a path: a directory component must not be read as an extension.
@@ -140,7 +147,10 @@ mod tests {
     #[test]
     fn the_longer_extension_wins() {
         let d = db();
-        assert_eq!(d.lookup("archive.tar.gz"), Some("application/x-compressed-tar"));
+        assert_eq!(
+            d.lookup("archive.tar.gz"),
+            Some("application/x-compressed-tar")
+        );
         assert_ne!(d.lookup("archive.tar.gz"), d.lookup("blob.gz"));
     }
 

@@ -1,11 +1,11 @@
 // Dispatch for the five write operations: one runs at a time, because the status bar has one sticky slot for it.
+use crate::backend::listing::Listing;
 use crate::backend::ops;
 use crate::backend::opsreq::{
-    duplicated_line, made_line, op_err, renamed_line, run_duplicate, run_transfer, run_trash, trashed_line,
-    transferdone_line, transferitem_line, transferprogress_line, transferstarted_line, undone_line, usable_dest,
-    OpMsg,
+    duplicated_line, made_line, op_err, renamed_line, run_duplicate, run_transfer, run_trash,
+    transferdone_line, transferitem_line, transferprogress_line, transferstarted_line,
+    trashed_line, undone_line, usable_dest, OpMsg,
 };
-use crate::backend::listing::Listing;
 use crate::backend::proto::error_line;
 use crate::backend::undo::{Entry, Journal};
 use std::io::Write;
@@ -27,7 +27,13 @@ pub(crate) struct Ops {
 
 impl Ops {
     pub fn new(tx: Sender<OpMsg>) -> Ops {
-        Ops { journal: Journal::new(), next_id: 1, running: None, cancel: Arc::new(AtomicBool::new(false)), tx }
+        Ops {
+            journal: Journal::new(),
+            next_id: 1,
+            running: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            tx,
+        }
     }
 
     // An id with no slot claimed: archive and convert are id-keyed and run concurrently by design,
@@ -58,7 +64,12 @@ fn busy(out: &mut impl Write, where_: &str) -> bool {
 
 // Explicit paths win; a rows form is resolved against the listing here, at request time, so the
 // operation still owns a snapshot that outlives whatever the listing does next.
-pub(crate) fn resolve_rows(paths: Vec<String>, rows: &[usize], base: &Path, listing: &Listing) -> Vec<String> {
+pub(crate) fn resolve_rows(
+    paths: Vec<String>,
+    rows: &[usize],
+    base: &Path,
+    listing: &Listing,
+) -> Vec<String> {
     if !paths.is_empty() {
         return paths;
     }
@@ -68,7 +79,13 @@ pub(crate) fn resolve_rows(paths: Vec<String>, rows: &[usize], base: &Path, list
         .collect()
 }
 
-pub(crate) fn start_transfer(out: &mut impl Write, ops: &mut Ops, op: &str, paths: Vec<String>, dest: &str) {
+pub(crate) fn start_transfer(
+    out: &mut impl Write,
+    ops: &mut Ops,
+    op: &str,
+    paths: Vec<String>,
+    dest: &str,
+) {
     if ops.running.is_some() {
         busy(out, "transfer");
         return;
@@ -123,7 +140,10 @@ pub(crate) fn start_duplicate(out: &mut impl Write, ops: &mut Ops, path: &str) {
 pub(crate) fn do_rename(out: &mut impl Write, ops: &mut Ops, path: &str, to: &str) {
     match ops::rename(Path::new(path), to) {
         Ok((dst, steps)) => {
-            ops.journal.push(Entry { op: "rename".to_string(), steps });
+            ops.journal.push(Entry {
+                op: "rename".to_string(),
+                steps,
+            });
             writeln!(out, "{}", renamed_line(true, &dst.to_string_lossy())).ok();
         }
         Err(e) => {
@@ -137,7 +157,10 @@ pub(crate) fn do_rename(out: &mut impl Write, ops: &mut Ops, path: &str, to: &st
 pub(crate) fn do_mkdir(out: &mut impl Write, ops: &mut Ops, parent: &str, name: &str) {
     match ops::mkdir(Path::new(parent), name) {
         Ok((dir, steps)) => {
-            ops.journal.push(Entry { op: "mkdir".to_string(), steps });
+            ops.journal.push(Entry {
+                op: "mkdir".to_string(),
+                steps,
+            });
             writeln!(out, "{}", made_line(true, &dir.to_string_lossy())).ok();
         }
         Err(e) => {
@@ -158,16 +181,45 @@ pub(crate) fn do_undo(out: &mut impl Write, ops: &mut Ops) {
 // Every message an operation thread sends, written out and, when terminal, recorded in the journal.
 pub(crate) fn report_op(out: &mut impl Write, ops: &mut Ops, msg: OpMsg) {
     match msg {
-        OpMsg::Progress { id, index, name, bytes, total } => {
-            writeln!(out, "{}", transferprogress_line(id, index, &name, bytes, total)).ok();
+        OpMsg::Progress {
+            id,
+            index,
+            name,
+            bytes,
+            total,
+        } => {
+            writeln!(
+                out,
+                "{}",
+                transferprogress_line(id, index, &name, bytes, total)
+            )
+            .ok();
         }
-        OpMsg::Item { id, index, name, ok, err } => {
+        OpMsg::Item {
+            id,
+            index,
+            name,
+            ok,
+            err,
+        } => {
             writeln!(out, "{}", transferitem_line(id, index, &name, ok, &err)).ok();
         }
-        OpMsg::TransferDone { id, ok, failed, skipped, cancelled, entry } => {
+        OpMsg::TransferDone {
+            id,
+            ok,
+            failed,
+            skipped,
+            cancelled,
+            entry,
+        } => {
             ops.journal.push(entry);
             ops.running = None;
-            writeln!(out, "{}", transferdone_line(id, ok, failed, skipped, cancelled)).ok();
+            writeln!(
+                out,
+                "{}",
+                transferdone_line(id, ok, failed, skipped, cancelled)
+            )
+            .ok();
         }
         OpMsg::Trashed { ok, failed, entry } => {
             ops.journal.push(entry);
@@ -178,7 +230,12 @@ pub(crate) fn report_op(out: &mut impl Write, ops: &mut Ops, msg: OpMsg) {
         OpMsg::Meta { line } => {
             writeln!(out, "{}", line).ok();
         }
-        OpMsg::Duplicated { ok, path, err, entry } => {
+        OpMsg::Duplicated {
+            ok,
+            path,
+            err,
+            entry,
+        } => {
             ops.journal.push(entry);
             ops.running = None;
             if ok {
@@ -230,7 +287,10 @@ mod tests {
         let mut o = ops();
         let (id, flag) = o.claim();
         cancel_transfer(&o, id + 99);
-        assert!(!flag.load(Ordering::Relaxed), "a stale id must not cancel the live operation");
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "a stale id must not cancel the live operation"
+        );
         cancel_transfer(&o, id);
         assert!(flag.load(Ordering::Relaxed));
     }
@@ -260,8 +320,14 @@ mod tests {
         d.file("b.txt", "b");
         let mut buf = out();
         do_rename(&mut buf, &mut o, &from.to_string_lossy(), "b.txt");
-        assert!(text(&buf).contains(r#""t":"error","where":"rename""#), "the refusal is an error line, not a silent no-op");
-        assert!(o.journal.is_empty(), "a rename that did not happen must not be undoable");
+        assert!(
+            text(&buf).contains(r#""t":"error","where":"rename""#),
+            "the refusal is an error line, not a silent no-op"
+        );
+        assert!(
+            o.journal.is_empty(),
+            "a rename that did not happen must not be undoable"
+        );
         assert_eq!(std::fs::read_to_string(d.join("b.txt")).unwrap(), "b");
     }
 
@@ -278,13 +344,19 @@ mod tests {
             vec!["/home/gm/a.txt".to_string(), "/home/gm/b.txt".to_string()]
         );
         // A row past the end is dropped rather than panicking or naming the base directory itself.
-        assert_eq!(resolve_rows(Vec::new(), &[99], base, &l), Vec::<String>::new());
+        assert_eq!(
+            resolve_rows(Vec::new(), &[99], base, &l),
+            Vec::<String>::new()
+        );
         // Explicit paths are never second-guessed against the listing.
         assert_eq!(
             resolve_rows(vec!["/elsewhere/c.txt".to_string()], &[0, 1, 2], base, &l),
             vec!["/elsewhere/c.txt".to_string()]
         );
-        assert_eq!(resolve_rows(Vec::new(), &[], base, &l), Vec::<String>::new());
+        assert_eq!(
+            resolve_rows(Vec::new(), &[], base, &l),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -293,9 +365,16 @@ mod tests {
         let mut o = ops();
         o.claim();
         let mut buf = out();
-        start_trash(&mut buf, &mut o, vec![d.file("a.txt", "a").to_string_lossy().to_string()]);
+        start_trash(
+            &mut buf,
+            &mut o,
+            vec![d.file("a.txt", "a").to_string_lossy().to_string()],
+        );
         assert!(text(&buf).contains("an operation is already running"));
-        assert!(d.join("a.txt").exists(), "the refused operation touched nothing");
+        assert!(
+            d.join("a.txt").exists(),
+            "the refused operation touched nothing"
+        );
     }
 
     #[test]
@@ -307,9 +386,19 @@ mod tests {
         report_op(
             &mut buf,
             &mut o,
-            OpMsg::Trashed { ok: 1, failed: 0, entry: Entry { op: "trash".to_string(), steps: vec![Step::Created { path: "/x".into() }] } },
+            OpMsg::Trashed {
+                ok: 1,
+                failed: 0,
+                entry: Entry {
+                    op: "trash".to_string(),
+                    steps: vec![Step::Created { path: "/x".into() }],
+                },
+            },
         );
-        assert!(o.running.is_none(), "the cap would otherwise refuse every operation for the rest of the session");
+        assert!(
+            o.running.is_none(),
+            "the cap would otherwise refuse every operation for the rest of the session"
+        );
         assert_eq!(o.journal.len(), 1);
         assert_eq!(text(&buf).trim(), r#"{"t":"trashed","ok":1,"failed":0}"#);
     }
@@ -321,12 +410,21 @@ mod tests {
         let mut buf = out();
         do_mkdir(&mut buf, &mut o, &d.path().to_string_lossy(), "photos");
         assert!(d.join("photos").is_dir());
-        assert_eq!(text(&buf).trim(), format!(r#"{{"t":"made","ok":true,"path":"{}"}}"#, d.join("photos").display()));
+        assert_eq!(
+            text(&buf).trim(),
+            format!(
+                r#"{{"t":"made","ok":true,"path":"{}"}}"#,
+                d.join("photos").display()
+            )
+        );
         assert_eq!(o.journal.len(), 1);
         let mut buf = out();
         do_undo(&mut buf, &mut o);
         assert!(text(&buf).contains(r#"{"t":"undone","op":"mkdir","ok":true}"#));
-        assert!(!d.join("photos").exists(), "undo removed the folder it made");
+        assert!(
+            !d.join("photos").exists(),
+            "undo removed the folder it made"
+        );
         assert!(o.journal.is_empty());
     }
 
@@ -337,8 +435,14 @@ mod tests {
         d.file("taken", "t");
         let mut buf = out();
         do_mkdir(&mut buf, &mut o, &d.path().to_string_lossy(), "taken");
-        assert!(text(&buf).contains(r#""t":"error","where":"mkdir""#), "the refusal is an error line, not a silent no-op");
-        assert!(o.journal.is_empty(), "a folder that was not made must not be undoable");
+        assert!(
+            text(&buf).contains(r#""t":"error","where":"mkdir""#),
+            "the refusal is an error line, not a silent no-op"
+        );
+        assert!(
+            o.journal.is_empty(),
+            "a folder that was not made must not be undoable"
+        );
         assert_eq!(std::fs::read_to_string(d.join("taken")).unwrap(), "t");
     }
 }

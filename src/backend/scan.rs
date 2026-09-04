@@ -100,10 +100,23 @@ mod tests {
         // Write and enter, never read: opendir is refused while stat still answers.
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o300)).unwrap();
 
-        assert!(scan(&locked, false).is_err(), "a directory with no read bit cannot be listed");
+        assert!(
+            scan(&locked, false).is_err(),
+            "a directory with no read bit cannot be listed"
+        );
         let mode = mode_of(&locked);
-        assert_eq!(mode & 0o777, 0o300, "the stat answered the permission bits, got {:o}", mode);
-        assert_eq!(mode & 0o170000, 0o040000, "and the file-type bits say directory, got {:o}", mode);
+        assert_eq!(
+            mode & 0o777,
+            0o300,
+            "the stat answered the permission bits, got {:o}",
+            mode
+        );
+        assert_eq!(
+            mode & 0o170000,
+            0o040000,
+            "and the file-type bits say directory, got {:o}",
+            mode
+        );
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
         fs::remove_dir_all(&d).unwrap();

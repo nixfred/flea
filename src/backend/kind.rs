@@ -11,13 +11,19 @@ pub struct Kinds {
 
 impl Kinds {
     pub fn new() -> Kinds {
-        Kinds { cache: HashMap::new(), reads: 0 }
+        Kinds {
+            cache: HashMap::new(),
+            reads: 0,
+        }
     }
 
     // Test-only: pre-seeds the cache so a test never depends on the box's own /usr/share/mime, the same reason rows.rs's dbs() uses literal strings.
     #[cfg(test)]
     pub fn from_pairs(pairs: &[(&str, Option<&str>)]) -> Kinds {
-        let cache = pairs.iter().map(|(k, v)| (k.to_string(), v.map(str::to_string))).collect();
+        let cache = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.map(str::to_string)))
+            .collect();
         Kinds { cache, reads: 0 }
     }
 
@@ -79,7 +85,10 @@ mod tests {
 
     #[test]
     fn a_translated_comment_first_does_not_win() {
-        assert_eq!(first_untranslated_comment(MSWORD_SHAPED).as_deref(), Some("Word document"));
+        assert_eq!(
+            first_untranslated_comment(MSWORD_SHAPED).as_deref(),
+            Some("Word document")
+        );
     }
 
     #[test]
@@ -98,10 +107,14 @@ mod tests {
     #[test]
     fn the_live_database_answers_a_real_type_in_ascii() {
         let mut db = Kinds::new();
-        let jpeg = db.comment("image/jpeg").expect("shared-mime-info is a hard dependency and ships image/jpeg");
+        let jpeg = db
+            .comment("image/jpeg")
+            .expect("shared-mime-info is a hard dependency and ships image/jpeg");
         assert!(!jpeg.is_empty() && !jpeg.contains('<'), "got {jpeg}");
         // msword.xml opens with zh-Hant-TW, so a reader that took the first comment of any kind would answer non-ASCII here.
-        let msword = db.comment("application/msword").expect("shared-mime-info ships application/msword");
+        let msword = db
+            .comment("application/msword")
+            .expect("shared-mime-info ships application/msword");
         assert!(msword.is_ascii(), "got a translated comment: {msword}");
         // corner: a type with no XML answers None and the caller falls back to the icon name.
         assert_eq!(db.comment("application/x-nonexistent-type"), None);
@@ -118,7 +131,10 @@ mod tests {
     #[test]
     fn from_pairs_never_touches_disk() {
         let mut db = Kinds::from_pairs(&[("text/plain", Some("Plain Text Document"))]);
-        assert_eq!(db.comment("text/plain").as_deref(), Some("Plain Text Document"));
+        assert_eq!(
+            db.comment("text/plain").as_deref(),
+            Some("Plain Text Document")
+        );
         // A pre-seeded entry is answered straight from the cache, so it costs no read.
         assert_eq!(db.reads(), 0);
     }

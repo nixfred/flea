@@ -78,7 +78,12 @@ fn queue_row(
     st.asked.push((path.clone(), row));
     st.outstanding += 1;
     // A job the pool dropped to make room will never report, so its row is unmapped and answered here rather than at shutdown.
-    for job in pool.submit(Job { path, mtime, mime, trace: trace(row) }) {
+    for job in pool.submit(Job {
+        path,
+        mtime,
+        mime,
+        trace: trace(row),
+    }) {
         st.outstanding = st.outstanding.saturating_sub(1);
         if let Some(at) = st.asked.iter().position(|(p, _)| *p == job.path) {
             let dropped_row = st.asked.remove(at).1;
@@ -123,12 +128,21 @@ pub(crate) fn report_done(out: &mut BufWriter<io::Stdout>, st: &mut State, done:
 fn trace_line(t: &Trace) {
     let whole = t.at.elapsed();
     // A job that failed before any child has no spawn and no exit mark, so its whole life after the pop is charged to setup.
-    let spawned = if t.spawned.is_zero() { whole } else { t.spawned };
+    let spawned = if t.spawned.is_zero() {
+        whole
+    } else {
+        t.spawned
+    };
     let exited = if t.exited.is_zero() { whole } else { t.exited };
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     eprintln!(
         "flea: trace row={} depth={} queued={:.2} setup={:.2} child={:.2} after={:.2} total={:.2}",
-        t.row, t.depth, ms(t.popped), ms(spawned.saturating_sub(t.popped)),
-        ms(exited.saturating_sub(spawned)), ms(whole.saturating_sub(exited)), ms(whole)
+        t.row,
+        t.depth,
+        ms(t.popped),
+        ms(spawned.saturating_sub(t.popped)),
+        ms(exited.saturating_sub(spawned)),
+        ms(whole.saturating_sub(exited)),
+        ms(whole)
     );
 }

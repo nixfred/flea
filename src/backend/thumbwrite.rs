@@ -37,7 +37,11 @@ pub fn exclusive_temp(dir: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
     for _ in 0..TEMP_TRIES {
         let candidate = dir.join(format!("{}{}.png", temp_prefix(), random_suffix()?));
-        let opened = std::fs::OpenOptions::new().write(true).create_new(true).mode(TEMP_MODE).open(&candidate);
+        let opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(TEMP_MODE)
+            .open(&candidate);
         if opened.is_ok() {
             return Some(candidate);
         }
@@ -77,7 +81,11 @@ fn crc32(bytes: &[u8]) -> u32 {
         for (i, entry) in built.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { CRC32_POLYNOMIAL ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    CRC32_POLYNOMIAL ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *entry = c;
         }
@@ -106,10 +114,13 @@ fn text_chunk(key: &str, value: &str) -> Vec<u8> {
 // Sample input, the head of a PNG: 8 signature bytes, then IHDR as 4 length bytes, "IHDR", 13 data bytes and 4 CRC bytes.
 fn insert_after_ihdr(png: &[u8], chunks: &[Vec<u8>]) -> Option<Vec<u8>> {
     let sig = PNG_SIGNATURE_BYTES;
-    if png.len() < sig + CHUNK_HEADER_BYTES || &png[sig + CHUNK_LENGTH_BYTES..sig + CHUNK_HEADER_BYTES] != b"IHDR" {
+    if png.len() < sig + CHUNK_HEADER_BYTES
+        || &png[sig + CHUNK_LENGTH_BYTES..sig + CHUNK_HEADER_BYTES] != b"IHDR"
+    {
         return None;
     }
-    let ihdr_len = u32::from_be_bytes([png[sig], png[sig + 1], png[sig + 2], png[sig + 3]]) as usize;
+    let ihdr_len =
+        u32::from_be_bytes([png[sig], png[sig + 1], png[sig + 2], png[sig + 3]]) as usize;
     let after = sig + CHUNK_HEADER_BYTES + ihdr_len + CHUNK_CRC_BYTES;
     if after > png.len() {
         return None;
@@ -130,7 +141,10 @@ fn without_text_keys(png: &[u8], keys: &[&str]) -> Vec<u8> {
     out.extend_from_slice(&png[..at]);
     while at + CHUNK_HEADER_BYTES <= png.len() {
         let len = u32::from_be_bytes([png[at], png[at + 1], png[at + 2], png[at + 3]]) as usize;
-        let end = match at.checked_add(CHUNK_HEADER_BYTES + CHUNK_CRC_BYTES).and_then(|e| e.checked_add(len)) {
+        let end = match at
+            .checked_add(CHUNK_HEADER_BYTES + CHUNK_CRC_BYTES)
+            .and_then(|e| e.checked_add(len))
+        {
             Some(e) if e <= png.len() => e,
             // corner: bytes that do not parse as a chunk are copied through, because this rewrites an entry and does not validate one.
             _ => break,
@@ -194,13 +208,16 @@ mod tests {
         let mut at = PNG_SIGNATURE_BYTES;
         let mut found = None;
         while at + CHUNK_HEADER_BYTES <= bytes.len() {
-            let len = u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize;
+            let len = u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+                as usize;
             let end = at + CHUNK_HEADER_BYTES + len;
             if end + CHUNK_CRC_BYTES > bytes.len() {
                 break;
             }
             let payload = &bytes[at + CHUNK_HEADER_BYTES..end];
-            if &bytes[at + CHUNK_LENGTH_BYTES..at + CHUNK_HEADER_BYTES] == b"tEXt" && has_key(payload, &[key]) {
+            if &bytes[at + CHUNK_LENGTH_BYTES..at + CHUNK_HEADER_BYTES] == b"tEXt"
+                && has_key(payload, &[key])
+            {
                 let nul = payload.iter().position(|b| *b == 0).unwrap();
                 found = String::from_utf8(payload[nul + 1..].to_vec()).ok();
             }
@@ -211,7 +228,10 @@ mod tests {
 
     // A byte search rather than a chunk walk, because the question is whether the key appears twice anywhere in the file.
     fn occurrences(bytes: &[u8], needle: &str) -> usize {
-        bytes.windows(needle.len()).filter(|w| *w == needle.as_bytes()).count()
+        bytes
+            .windows(needle.len())
+            .filter(|w| *w == needle.as_bytes())
+            .count()
     }
 
     #[test]
@@ -233,14 +253,27 @@ mod tests {
         stamp(&p, "file:///ours.mp4", FIXTURE_MTIME).unwrap();
         let bytes = std::fs::read(&p).unwrap();
         std::fs::remove_dir_all(&dir).ok();
-        assert_eq!(occurrences(&bytes, "Thumb::URI"), 1, "two Thumb::URI survived one stamp");
+        assert_eq!(
+            occurrences(&bytes, "Thumb::URI"),
+            1,
+            "two Thumb::URI survived one stamp"
+        );
         assert_eq!(occurrences(&bytes, "Thumb::MTime"), 1);
         assert_eq!(occurrences(&bytes, "Software"), 1);
         assert_eq!(occurrences(&bytes, "/theirs/clip.mp4"), 0);
         // A first-match reader and a last-match reader must agree, which is the whole point of there being one chunk.
-        assert_eq!(png_text(&bytes, "Thumb::URI"), Some("file:///ours.mp4".to_string()));
-        assert_eq!(last_text(&bytes, "Thumb::URI"), Some("file:///ours.mp4".to_string()));
-        assert_eq!(last_text(&bytes, "Thumb::MTime"), Some(FIXTURE_MTIME.to_string()));
+        assert_eq!(
+            png_text(&bytes, "Thumb::URI"),
+            Some("file:///ours.mp4".to_string())
+        );
+        assert_eq!(
+            last_text(&bytes, "Thumb::URI"),
+            Some("file:///ours.mp4".to_string())
+        );
+        assert_eq!(
+            last_text(&bytes, "Thumb::MTime"),
+            Some(FIXTURE_MTIME.to_string())
+        );
         // A key this application does not own is left exactly where the thumbnailer put it.
         assert_eq!(png_text(&bytes, "Thumb::Movie"), Some("clip".to_string()));
     }
@@ -273,8 +306,14 @@ mod tests {
         write_marker(&p, "file:///tmp/a%20b.jpg", FIXTURE_MTIME).unwrap();
         let bytes = std::fs::read(&p).unwrap();
         std::fs::remove_dir_all(&dir).ok();
-        assert_eq!(png_text(&bytes, "Thumb::URI"), Some("file:///tmp/a%20b.jpg".to_string()));
-        assert_eq!(png_text(&bytes, "Thumb::MTime"), Some(FIXTURE_MTIME.to_string()));
+        assert_eq!(
+            png_text(&bytes, "Thumb::URI"),
+            Some("file:///tmp/a%20b.jpg".to_string())
+        );
+        assert_eq!(
+            png_text(&bytes, "Thumb::MTime"),
+            Some(FIXTURE_MTIME.to_string())
+        );
         assert_eq!(png_text(&bytes, "Software"), Some(SOFTWARE.to_string()));
     }
 }

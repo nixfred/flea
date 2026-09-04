@@ -12,10 +12,9 @@ const BIT_LENGTH_BYTES: usize = 8;
 const LENGTH_OFFSET: usize = BLOCK_BYTES - BIT_LENGTH_BYTES;
 
 const S: [u32; ROUNDS] = [
-    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
-    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9,
+    14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15,
+    21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
 ];
 
 // K[i] is floor(abs(sin(i + 1)) * 2^32), tabulated because this build has no float math at runtime.
@@ -68,10 +67,7 @@ fn digest(bytes: &[u8]) -> [u8; DIGEST_BYTES] {
                 2 => (b ^ c ^ d, (3 * i + 5) % BLOCK_WORDS),
                 _ => (c ^ (b | !d), (7 * i) % BLOCK_WORDS),
             };
-            let f = f
-                .wrapping_add(a)
-                .wrapping_add(K[i])
-                .wrapping_add(m[g]);
+            let f = f.wrapping_add(a).wrapping_add(K[i]).wrapping_add(m[g]);
             a = d;
             d = c;
             c = b;

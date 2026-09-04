@@ -50,7 +50,11 @@ gm:x:1000:1000::/home/gm:/usr/bin/bash\n";
         assert_eq!(name_in(SAMPLE, 0), "root");
         assert_eq!(name_in(SAMPLE, 1000), "gm");
         assert_eq!(name_in(SAMPLE, 1), "bin");
-        assert_eq!(name_in(SAMPLE, 4242), "", "an unknown uid is empty, never a number");
+        assert_eq!(
+            name_in(SAMPLE, 4242),
+            "",
+            "an unknown uid is empty, never a number"
+        );
         assert_eq!(name_in("", 0), "");
     }
 
@@ -68,8 +72,15 @@ gm:x:1000:1000::/home/gm:/usr/bin/bash\n";
         let p = d.file("mine.txt", "body");
         let uid = p.symlink_metadata().unwrap().uid();
         let passwd = std::fs::read_to_string(PASSWD).unwrap();
-        assert_eq!(of(&p), name_in(&passwd, uid), "the path answer is the pure parser over the same inputs");
-        assert!(!of(&p).is_empty(), "the test runner's uid is a local account on this box");
+        assert_eq!(
+            of(&p),
+            name_in(&passwd, uid),
+            "the path answer is the pure parser over the same inputs"
+        );
+        assert!(
+            !of(&p).is_empty(),
+            "the test runner's uid is a local account on this box"
+        );
         assert_eq!(of(&d.join("never-existed")), "");
     }
 }

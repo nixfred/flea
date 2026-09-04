@@ -51,7 +51,8 @@ impl Cache {
     }
 
     pub fn large_path(&self, uri: &str) -> PathBuf {
-        self.large_dir().join(format!("{}.png", md5::hex(uri.as_bytes())))
+        self.large_dir()
+            .join(format!("{}.png", md5::hex(uri.as_bytes())))
     }
 
     pub fn fail_path(&self, uri: &str) -> PathBuf {
@@ -105,12 +106,8 @@ pub fn png_text(bytes: &[u8], key: &str) -> Option<String> {
     }
     let mut at = PNG_SIGNATURE.len();
     while at + CHUNK_HEADER_BYTES <= bytes.len() {
-        let len = u32::from_be_bytes([
-            bytes[at],
-            bytes[at + 1],
-            bytes[at + 2],
-            bytes[at + 3],
-        ]) as usize;
+        let len =
+            u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize;
         let kind = &bytes[at + CHUNK_LENGTH_BYTES..at + CHUNK_HEADER_BYTES];
         let start = at + CHUNK_HEADER_BYTES;
         let end = match start.checked_add(len) {
@@ -154,7 +151,10 @@ mod tests {
         assert_eq!(uri_for(Path::new("/a/b/c.jpg")), "file:///a/b/c.jpg");
         assert_eq!(uri_for(Path::new("/tmp/~a.jpg")), "file:///tmp/~a.jpg");
         // A non-ASCII name is escaped one UTF-8 byte at a time, which is what GLib does.
-        assert_eq!(uri_for(Path::new("/tmp/caf\u{e9}.jpg")), "file:///tmp/caf%C3%A9.jpg");
+        assert_eq!(
+            uri_for(Path::new("/tmp/caf\u{e9}.jpg")),
+            "file:///tmp/caf%C3%A9.jpg"
+        );
     }
 
     #[test]
@@ -167,10 +167,17 @@ mod tests {
             "file:///home/gm/Downloads/CleanShot%202026-08-17%20at%2018.25.25@2x.png"
         );
         assert_eq!(
-            Cache::new().large_path(&uri).file_name().unwrap().to_string_lossy(),
+            Cache::new()
+                .large_path(&uri)
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
             "67471ae1929105f9f387addc0af2eb20.png"
         );
-        assert_eq!(uri_for(Path::new("/tmp/a (1).jpg")), "file:///tmp/a%20(1).jpg");
+        assert_eq!(
+            uri_for(Path::new("/tmp/a (1).jpg")),
+            "file:///tmp/a%20(1).jpg"
+        );
     }
 
     #[test]
@@ -182,7 +189,9 @@ mod tests {
             p.file_name().unwrap().to_string_lossy(),
             "4b971187c53a6a6ff1925d1147d8dacf.png"
         );
-        assert!(p.to_string_lossy().ends_with("/thumbnails/large/4b971187c53a6a6ff1925d1147d8dacf.png"));
+        assert!(p
+            .to_string_lossy()
+            .ends_with("/thumbnails/large/4b971187c53a6a6ff1925d1147d8dacf.png"));
     }
 
     #[test]
@@ -271,8 +280,14 @@ mod tests {
     }
 
     // Returns the root alongside the result so the caller deletes it before asserting, which frees it on the failing path too.
-    fn lookup_fixture(tag: &str, fail_at: Option<i64>, large_at: Option<i64>, ask: i64) -> (PathBuf, Hit) {
-        let root = std::env::temp_dir().join(format!("flea-thumbcache-{}-{}", tag, std::process::id()));
+    fn lookup_fixture(
+        tag: &str,
+        fail_at: Option<i64>,
+        large_at: Option<i64>,
+        ask: i64,
+    ) -> (PathBuf, Hit) {
+        let root =
+            std::env::temp_dir().join(format!("flea-thumbcache-{}-{}", tag, std::process::id()));
         let c = Cache::at(root.clone());
         let uri = uri_for(Path::new(FIXTURE_SRC));
         for (entry, stamp) in [(c.fail_path(&uri), fail_at), (c.large_path(&uri), large_at)] {
