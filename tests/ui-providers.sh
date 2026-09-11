@@ -262,6 +262,14 @@ providers_selection() {
     marked=$(row_index_of a-marked.txt)
     cursor=$(row_index_of b-cursor.txt)
     click_row "$marked" left
+    # The mark has to be observed BEFORE the cursor moves. Without this the case pressed
+    # Down into whatever state it found, and a re-list landing between the two clears the
+    # selection and resets the cursor to row 0; Down then lands on row 1, which is
+    # b-cursor.txt by arithmetic, so the cursor half of the assertion below passed and only
+    # the selection half failed. That reported a selection defect that was really a listing
+    # the case had never waited for.
+    providers_expect ".selected == [$marked] and .refreshing == false" \
+        'the click marked the row, and nothing is refreshing, before the cursor moves'
     key -k Down >/dev/null || fail 'providers: cursor movement failed'
     providers_expect ".cursor == $cursor and .selected == [$marked] and .cursorPath == \"$path/b-cursor.txt\" and .selectedPaths == [\"$path/a-marked.txt\"]" 'cursor remains outside the marked selection'
     key -k Menu >/dev/null || fail 'providers: native Menu delivery failed'
