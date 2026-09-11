@@ -24,9 +24,10 @@ Item {
 
     implicitHeight: ask.height + where.height
 
-    // The picker's chrome control: a mark, or a word. GM's 2026-09-11 rule replaced the hairline box
-    // the board drew around each one with a wash behind it, because eight boxes in two strips go
-    // muddy the moment the scale drops. The ink carries the role and never moves; only the wash does.
+    // The picker's chrome control: a mark, or a word. GM's 2026-09-11 ruling moved its frame off the
+    // divider's ink, which ui/picker.qml's own comment says the board drew both in: a frame and a
+    // rule in one ink are one line, and the controls dissolved into the chrome as the scale dropped.
+    // The frame carries the role, muted or accent, and the wash inside it carries the state.
     component Framed: Item {
         id: control
 
@@ -61,6 +62,12 @@ Item {
             NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
         }
 
+        // Muted is the resting frame of a neutral control, the role ThemeRoles.html gives an inactive
+        // one, and an unavailable control stays there: a frame may recede only when the control is
+        // inert. ui/DialogButton.qml has drawn its own frames this way all along.
+        readonly property color frame: control.available && control.primary
+            ? Theme.color.accent : Theme.color.muted
+
         // The primary control carries its wash at rest, because it is the one action the request is
         // asking for; every other control earns one under the pointer or the keyboard.
         readonly property real wash: !control.available ? 0
@@ -69,10 +76,10 @@ Item {
             : control.primary ? Theme.washActive : 0
 
         Rectangle {
-            anchors.centerIn: parent
-            width: parent.width
-            height: Theme.chromeControlHeight
+            anchors.fill: parent
             color: Qt.alpha(control.ink, control.wash)
+            border.width: Theme.spacing.hairline
+            border.color: control.frame
         }
 
         Flea.Glyph {

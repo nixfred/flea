@@ -2,10 +2,11 @@ import QtQuick
 import qs.Commons
 import "." as Flea
 
-// A control in a chrome strip, drawn under GM's 2026-09-11 rule: ink carries the role and never
-// changes with state, and a wash behind the control carries the state. No frame: a hairline box
-// costs two rules that go muddy as the scale drops, and Settings already said so with the segmented
-// chooser's accent fill and no box around the group.
+// A control in a chrome strip, drawn under GM's 2026-09-11 ruling. Two inks: a STRUCTURAL RULE
+// recedes at the hairline, and a CONTROL FRAME advances in the control's own role. Drawing both in
+// one ink, which is what ui/picker.qml's comment admits the boards did, makes a control's edge and a
+// strip's edge the same line, and the control dissolves into the chrome as the scale drops. The
+// frame carries the role, the wash inside it carries the state. ui/DialogButton.qml always did this.
 Item {
     id: root
 
@@ -25,6 +26,10 @@ Item {
         : root.role === "accent" ? Theme.color.accent
         : root.role === "error" ? Theme.color.error
         : Theme.color.foreground
+    // A neutral control rests in muted, which is the role ThemeRoles.html gives an inactive control,
+    // and an unavailable one stays there: the single case where a frame may recede, because an inert
+    // control should. Everything else frames in the ink it is already written in.
+    readonly property color frame: !root.available || root.role === "plain" ? Theme.color.muted : root.ink
     readonly property real wash: !root.available ? 0
         : (activeFocus || tap.pressed) ? Theme.washActive
         : hover.hovered ? Theme.washHover
@@ -42,13 +47,16 @@ Item {
     Keys.onEnterPressed: if (root.available) root.activated()
     Keys.onSpacePressed: if (root.available) root.activated()
 
-    // The wash, not the hit box: the item fills the strip so the press clears hitMin, while what is
-    // drawn is the control's own caption line box centred in it.
+    // The item fills the strip so the press clears hitMin, while what is DRAWN is the control's own
+    // caption line box centred in it. That inset is what keeps this frame off the strip's own rule:
+    // two lines that touch read as one line whatever colour they are.
     Rectangle {
         anchors.centerIn: parent
         width: parent.width
         height: Theme.chromeControlHeight
         color: Qt.alpha(root.ink, root.wash)
+        border.width: Theme.spacing.hairline
+        border.color: root.frame
     }
 
     Row {

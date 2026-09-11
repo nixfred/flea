@@ -157,18 +157,18 @@ Item {
         Keys.onSpacePressed: control.pressed()
         Keys.onTabPressed: function(event) { root.picker.stepFocus(control, (event.modifiers & Qt.ShiftModifier) !== 0) }
         Keys.onBacktabPressed: root.picker.stepFocus(control, true)
-        // GM's 2026-09-11 fill rule, the same one ui/PickerChrome.qml's controls now carry: the ink
-        // says what the control is and a wash says what state it is in. The collision pair sits over
-        // the dialog's own plane, so the wash is the control's own ink at the two steps.
+        // GM's 2026-09-11 ruling, the same one ui/PickerChrome.qml's controls carry: the frame is the
+        // control's own role and never the divider's ink, and the wash inside it is the state.
         readonly property color ink: control.danger ? Theme.color.error : Theme.color.foreground
+        readonly property color frame: control.danger ? Theme.color.error : Theme.color.muted
         readonly property real wash: (control.activeFocus || collisionPress.pressed) ? Theme.washActive
             : collisionHover.hovered ? Theme.washHover : 0
 
         Rectangle {
-            anchors.centerIn: parent
-            width: parent.width
-            height: Theme.chromeControlHeight
+            anchors.fill: parent
             color: Qt.alpha(control.ink, control.wash)
+            border.width: Theme.spacing.hairline
+            border.color: control.frame
         }
         Text {
             id: caption
