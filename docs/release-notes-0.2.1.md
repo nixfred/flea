@@ -19,3 +19,7 @@
   changes the most.
 - Fix three tests that reached the sandbox without the guard the others use, which is what made
   the 0.2.0 check() fail on the Omarchy build container.
+- Close the preview with a second press of space, on every kind including media, the way Finder
+  does. Playback moves to p, so a media preview still plays and pauses from the keyboard.
+- Add a network place with a from the list as well as the rail, which is what the key table has
+  always said it did.
