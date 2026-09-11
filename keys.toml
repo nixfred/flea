@@ -327,8 +327,8 @@ key = "Tab"
 action = "focusNext"
 
 # Space already owns "open preview" in the browsing state ui/js/Focus.js act handles, and
-# ui/js/PreviewKeys.js act reuses the same action name to mean "close" or "play/pause" once a
-# preview is open, so there is no free context left for a third meaning; v toggles selection.
+# ui/js/PreviewKeys.js act reuses the same action name to mean "close" once a preview is open, on
+# every kind including media, so there is no free context left for a third meaning; v toggles selection.
 [[code]]
 key = "Space"
 action = "preview"

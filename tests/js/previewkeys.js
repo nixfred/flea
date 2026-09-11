@@ -25,4 +25,28 @@ function run(check) {
     check("forward wrap skips disabled Previous", viewer.pdfControlIndex, 1)
     PreviewKeys.pdfAction("trash", viewer)
     check("listing actions do nothing in PDF context", activated.join(","), "1,5")
+
+    // GM, 2026-09-11: "pressing space a second time should close the preview, just like Finder
+    // does". It closes on every kind, media included, which reverses Task 22's play/pause on space.
+    function previewPane(kind) {
+        var pane = { closed: 0, played: 0 }
+        pane.preview = {
+            isMedia: kind === "audio" || kind === "video",
+            isPdf: kind === "pdf",
+            revealStrip: function () {},
+            close: function () { pane.closed += 1 },
+            togglePlay: function () { pane.played += 1 }
+        }
+        return pane
+    }
+    for (var kind of ["text", "image", "pdf", "archive", "audio", "video"]) {
+        var open = previewPane(kind)
+        PreviewKeys.act("preview", open)
+        check("space closes a " + kind + " preview", open.closed, 1)
+        check("and plays nothing on a " + kind + " preview", open.played, 0)
+    }
+    // Escape still closes, because a preview must never need a particular key to leave it.
+    var escaped = previewPane("video")
+    PreviewKeys.act("escape", escaped)
+    check("escape still closes a media preview", escaped.closed, 1)
 }

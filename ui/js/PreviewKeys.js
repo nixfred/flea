@@ -39,9 +39,10 @@ function open(root) {
         root.preview.open(root.join(root.path, row.n), row.i, row.s)
 }
 
-// Preview open: j/k move the cursor and the preview follows; escape always closes. Space closes
-// a text or unsupported preview as before, but toggles play/pause on a MEDIA one instead
-// (Task 22's operator ruling: "the idea is our preview is as good or better than Showtime").
+// Preview open: j/k move the cursor and the preview follows; escape always closes, and so does a
+// second space, on every kind including media (GM, 2026-09-11: "pressing space a second time should
+// close the preview, just like Finder does"). That reverses Task 22, which had space toggle
+// play/pause on a media preview; the strip's own play control still does that with the pointer.
 // Any key reveals the media strip, even one that does nothing else, matching "move the mouse or
 // press anything" from the same ruling.
 function act(action, root) {
@@ -49,10 +50,7 @@ function act(action, root) {
     switch (action) {
     case "cursorDown": Filter.moveCursor(root, 1); follow(root); return
     case "cursorUp": Filter.moveCursor(root, -1); follow(root); return
-    case "preview":
-        if (root.preview.isMedia) root.preview.togglePlay()
-        else root.preview.close()
-        return
+    case "preview": root.preview.close(); return
     case "escape": root.preview.close(); return
     case "seekBack":
         if (root.preview.isPdf) root.preview.turnPage(-1)
