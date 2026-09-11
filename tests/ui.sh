@@ -5840,8 +5840,9 @@ case_eject() {
 
     local gio_log="$dir/gio.log"
     : > "$gio_log"
-    # Every state this case needs, at zero privilege: one internal disk and one removable volume,
-    # whose mountpoint goes away only once the gio stub has been told to really eject it.
+    # Every state this case needs, at zero privilege: one internal disk carrying /, and one removable
+    # volume whose mountpoint goes away only once the gio stub has been told to really eject it.
+    # The columns are the ones ui/DeviceMounts.qml asks for, MOUNTPOINTS and PATH included.
     cat > "$dir/bin/lsblk" <<EOS
 #!/bin/sh
 if [ -f "$dir/ejected" ]; then
@@ -5851,9 +5852,10 @@ else
 fi
 cat <<JSON
 {"blockdevices":[
-{"name":"nvme0n1","label":null,"mountpoint":null,"rm":false,"size":"238.5G","type":"disk","model":"KBG40ZNS256G"},
-{"name":"sda","label":null,"mountpoint":null,"rm":true,"size":"116.1G","type":"disk","model":"USB Flash Disk",
-"children":[{"name":"sda1","label":"FLEASTICK","mountpoint":\$mp,"rm":true,"size":"116.1G","type":"part","model":null}]}]}
+{"name":"nvme0n1","path":"/dev/nvme0n1","label":null,"mountpoints":[null],"rm":false,"size":"238.5G","type":"disk","model":"KBG40ZNS256G",
+"children":[{"name":"nvme0n1p1","path":"/dev/nvme0n1p1","label":null,"mountpoints":["/"],"rm":false,"size":"238.5G","type":"part","model":null}]},
+{"name":"sda","path":"/dev/sda","label":null,"mountpoints":[null],"rm":true,"size":"116.1G","type":"disk","model":"USB Flash Disk",
+"children":[{"name":"sda1","path":"/dev/sda1","label":"FLEASTICK","mountpoints":[\$mp],"rm":true,"size":"116.1G","type":"part","model":null}]}]}
 JSON
 EOS
     chmod +x "$dir/bin/lsblk"

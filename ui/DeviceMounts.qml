@@ -107,7 +107,8 @@ Item {
             var r = rows[i]
             var label = r.kind === "disk" ? root.hostLabel(r.label) : r.label
             out.push({ path: r.path, label: label, group: "device", kind: r.kind,
-                       device: r.device, mounted: r.mounted, size: r.size, glyph: "drive" })
+                       device: r.device, mounted: r.mounted, removable: r.removable, size: r.size,
+                       glyph: "drive" })
         }
         // Same rule as ui/NetworkMounts.qml's: an unchanged poll assigns nothing, see Mounts.sameEntries.
         if (!Mounts.sameEntries(root.entries, out))
@@ -222,7 +223,10 @@ Item {
 
     Process {
         id: listProcess
-        command: ["lsblk", "--bytes", "--json", "-o", "NAME,LABEL,MOUNTPOINT,RM,SIZE,TYPE,MODEL"]
+        // PATH because a device-mapper leaf is not "/dev/" plus its kernel name, and MOUNTPOINTS
+        // because one btrfs device carries several and the plain column shows whichever it likes,
+        // which hid / behind /home here and left the system disk unidentifiable.
+        command: ["lsblk", "--bytes", "--json", "-o", "NAME,PATH,LABEL,MOUNTPOINTS,RM,SIZE,TYPE,MODEL"]
         stdout: StdioCollector {
             id: listOut
             waitForEnd: true
