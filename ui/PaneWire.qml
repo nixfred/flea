@@ -2,6 +2,7 @@ import QtQuick
 import "." as Flea
 import "js/DirSizes.js" as DirSizes
 import "js/Errors.js" as Errors
+import "js/Anchor.js" as Anchor
 import "js/Nav.js" as Nav
 import "js/Ops.js" as Ops
 import "js/Search.js" as Search
@@ -37,7 +38,7 @@ Item {
     property string renameOnArrival: ""
     // A watched change landed while one of the states below owned the rows, so the re-read is owed.
     property bool stale: false
-    // What the cursor sat on across a watched re-read, or null; ui/js/Nav.js owns both ends of it.
+    // What the cursor sat on across a re-read, or null; ui/js/Anchor.js owns both ends of it.
     property var anchor: null
     property int retryId: 0
     property var retryPaths: []
@@ -86,7 +87,7 @@ Item {
         if (root.watchBusy)
             return
         root.stale = false
-        root.anchor = Nav.refreshWatched(pane)
+        root.anchor = Anchor.watched(pane)
     }
 
     // The owed re-read goes through the timer rather than straight out of this handler: reading
@@ -178,7 +179,7 @@ Item {
             if (pane.rowsAt === 0 && pane.inputAt > 0 && pane.rowFor(pane.cursorIndex))
                 pane.rowsAt = Date.now()
             pane.applyPendingSelect()
-            root.anchor = Nav.applyAnchor(pane, root.anchor)
+            root.anchor = Anchor.apply(pane, root.anchor)
             Tabs.applyPending(pane)
             pane.listArea.restartSettle()
             if (pane.listInFlight) {
@@ -324,7 +325,7 @@ Item {
             pane.sticky("")
             pane.message(Ops.trashed(ok, failed), ok === 0)
             pane.clearSelection()
-            root.anchor = Nav.refreshAfterDelete(pane)
+            root.anchor = Anchor.afterDelete(pane)
         }
 
         // The listing is re-read with the new name selected, so the row the operator was on stays

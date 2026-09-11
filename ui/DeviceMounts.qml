@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell.Io
+import "js/Devices.js" as Devices
 import "js/Mounts.js" as Mounts
 import "js/Eject.js" as Eject
 
@@ -101,7 +102,7 @@ Item {
     }
 
     function rebuild() {
-        var rows = Mounts.parseDevices(root._listing)
+        var rows = Devices.parseDevices(root._listing)
         var out = []
         for (var i = 0; i < rows.length; i++) {
             var r = rows[i]

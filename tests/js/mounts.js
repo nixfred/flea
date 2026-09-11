@@ -1,3 +1,4 @@
+.import "../../ui/js/Devices.js" as Devices
 .import "../../ui/js/Mounts.js" as Mounts
 .import "../../ui/js/Eject.js" as Eject
 .import "../../ui/js/Icons.js" as Icons
@@ -69,7 +70,7 @@ function run(check) {
              + '{"name":"nvme0n1p2","path":"/dev/nvme0n1p2","label":null,"mountpoints":[null],"rm":false,"size":253910581248,"type":"part","model":null,'
              + '"children":[{"name":"root","path":"/dev/mapper/root","label":null,"mountpoints":["/home","/var/log","/"],"rm":false,"size":253893804032,"type":"crypt","model":null}]}]}'
              + ']}'
-    var d = Mounts.parseDevices(live)
+    var d = Devices.parseDevices(live)
     check("the live box has one internal disk and one removable volume", d.length, 2)
     check("the internal disk sorts first", d[0].kind, "disk")
     check("the internal disk is named by its kernel name", d[0].label, "nvme0n1")
@@ -96,7 +97,7 @@ function run(check) {
                  + '{"name":"sdb","path":"/dev/sdb","label":null,"mountpoints":[null],"rm":false,"size":2000398934016,"type":"disk","model":"Samsung SSD 870",'
                  + '"children":[{"name":"sdb1","path":"/dev/sdb1","label":"Vault","mountpoints":["/mnt/vault"],"rm":false,"size":2000398934016,"type":"part","model":null}]}'
                  + ']}'
-    var two = Mounts.parseDevices(twoDisks)
+    var two = Devices.parseDevices(twoDisks)
     check("a second internal drive is a row, which it was not before 0.2.1", two.length, 2)
     check("and it is the mounted volume, not the whole disk", two[1].label, "Vault")
     check("it opens where it is mounted", two[1].path, "/mnt/vault")
@@ -113,7 +114,7 @@ function run(check) {
                   + '{"name":"nvme0n1","path":"/dev/nvme0n1","label":null,"mountpoints":[null],"rm":false,"size":256060514304,"type":"disk","model":"KBG40ZNS256G",'
                   + '"children":[{"name":"nvme0n1p1","path":"/dev/nvme0n1p1","label":null,"mountpoints":["/"],"rm":false,"size":256060514304,"type":"part","model":null}]}'
                   + ']}'
-    var order = Mounts.parseDevices(reordered)
+    var order = Devices.parseDevices(reordered)
     check("the disk row is the one that carries /, not the one lsblk listed first", order[0].device, "/dev/nvme0n1")
     check("and the other internal drive is a volume row beside it", order[1].path, "/mnt/data")
 
@@ -125,7 +126,7 @@ function run(check) {
               + '{"name":"sdb","path":"/dev/sdb","label":null,"mountpoints":[null],"rm":false,"size":2000398934016,"type":"disk","model":"Spare",'
               + '"children":[{"name":"sdb1","path":"/dev/sdb1","label":"RECOVERY","mountpoints":[null],"rm":false,"size":2000398934016,"type":"part","model":null}]}'
               + ']}'
-    check("an unmounted internal partition is not a row", Mounts.parseDevices(spare).length, 1)
+    check("an unmounted internal partition is not a row", Devices.parseDevices(spare).length, 1)
 
     // Swap is not a mountpoint anyone can open, so a swap partition on a second drive is not a row
     // either, even though lsblk lists "[SWAP]" in the same column as a real path.
@@ -135,33 +136,33 @@ function run(check) {
                  + '{"name":"sdb","path":"/dev/sdb","label":null,"mountpoints":[null],"rm":false,"size":17179869184,"type":"disk","model":"Swap",'
                  + '"children":[{"name":"sdb1","path":"/dev/sdb1","label":null,"mountpoints":["[SWAP]"],"rm":false,"size":17179869184,"type":"part","model":null}]}'
                  + ']}'
-    check("a swap partition on another drive is not a row", Mounts.parseDevices(swapDisk).length, 1)
+    check("a swap partition on another drive is not a row", Devices.parseDevices(swapDisk).length, 1)
 
     // Only a leaf is a volume. An encrypted stick lists the partition and the unlocked crypt under
     // it, and emitting both would put one drive in the rail twice.
     var lockedOpen = '{"blockdevices":[{"name":"sda","path":"/dev/sda","label":null,"mountpoints":[null],"rm":true,"size":8589934592,"type":"disk","model":"Stick",'
                    + '"children":[{"name":"sda1","path":"/dev/sda1","label":null,"mountpoints":[null],"rm":true,"size":8589934592,"type":"part","model":null,'
                    + '"children":[{"name":"luks-vault","path":"/dev/mapper/luks-vault","label":"vault","mountpoints":["/run/media/gm/vault"],"rm":false,"size":8589934592,"type":"crypt","model":null}]}]}]}'
-    var opened = Mounts.parseDevices(lockedOpen)
+    var opened = Devices.parseDevices(lockedOpen)
     check("an unlocked encrypted stick is one row, not two", opened.length, 1)
     check("and the row is the crypt, which is the thing that mounted", opened[0].label, "vault")
     check("a device-mapper volume carries the path gio can actually act on", opened[0].device, "/dev/mapper/luks-vault")
 
     // No devices at all: the rail self-hides on this, so it must be an empty list and never a throw.
-    check("empty lsblk output parses to nothing", Mounts.parseDevices("").length, 0)
-    check("garbage lsblk output parses to nothing", Mounts.parseDevices("not json at all\n").length, 0)
-    check("valid json with no blockdevices key parses to nothing", Mounts.parseDevices("{}").length, 0)
-    check("an empty blockdevices array parses to nothing", Mounts.parseDevices('{"blockdevices":[]}').length, 0)
+    check("empty lsblk output parses to nothing", Devices.parseDevices("").length, 0)
+    check("garbage lsblk output parses to nothing", Devices.parseDevices("not json at all\n").length, 0)
+    check("valid json with no blockdevices key parses to nothing", Devices.parseDevices("{}").length, 0)
+    check("an empty blockdevices array parses to nothing", Devices.parseDevices('{"blockdevices":[]}').length, 0)
     var badSizes = [undefined, null, "", "116.1G", "256060514304", -1, 1.5, Infinity, NaN, 9007199254740992]
     check("invalid capacity values stay absent rather than becoming display text", badSizes.every(function (value) {
-        return Mounts.deviceBytes(value) === null
+        return Devices.deviceBytes(value) === null
     }), true)
-    check("zero-byte devices retain their real numeric size", Mounts.deviceBytes(0), 0)
+    check("zero-byte devices retain their real numeric size", Devices.deviceBytes(0), 0)
 
     // Present and unmounted: the state a stick sits in on this box, which automounts nothing.
     var unmounted = '{"blockdevices":[{"name":"sda","path":"/dev/sda","label":null,"mountpoints":[null],"rm":true,"size":124656812032,"type":"disk","model":"USB Flash Disk",'
                   + '"children":[{"name":"sda1","path":"/dev/sda1","label":"128GB","mountpoints":[null],"rm":true,"size":124656812032,"type":"part","model":null}]}]}'
-    var u = Mounts.parseDevices(unmounted)
+    var u = Devices.parseDevices(unmounted)
     check("an unmounted stick is still a row", u.length, 1)
     check("an unmounted volume reads as unmounted", u[0].mounted, false)
     check("an unmounted volume has no path to open yet", u[0].path, "")
@@ -178,7 +179,7 @@ function run(check) {
              + '{"name":"sda2","path":"/dev/sda2","label":"second","mountpoints":[null],"rm":true,"size":62277025792,"type":"part","model":null}]},'
              + '{"name":"sdb","path":"/dev/sdb","label":"CARD","mountpoints":[null],"rm":true,"size":34359738368,"type":"disk","model":"SD Reader"}'
              + ']}'
-    var m = Mounts.parseDevices(many)
+    var m = Devices.parseDevices(many)
     check("four rows come out of two sticks, the system disk and one bare internal drive", m.length, 4)
     check("only one internal disk row is ever emitted", m[0].label, "nvme0n1")
     check("an internal drive nothing mounted adds no row of its own",
@@ -191,32 +192,32 @@ function run(check) {
     // The label ladder: filesystem label, then the drive's product name, then the kernel name.
     var noLabel = '{"blockdevices":[{"name":"sda","path":"/dev/sda","label":null,"mountpoints":[null],"rm":true,"size":124656812032,"type":"disk","model":"USB Flash Disk",'
                 + '"children":[{"name":"sda1","path":"/dev/sda1","label":null,"mountpoints":[null],"rm":true,"size":124656812032,"type":"part","model":null}]}]}'
-    check("an unlabelled volume falls back to the drive's product name", Mounts.parseDevices(noLabel)[0].label, "USB Flash Disk")
+    check("an unlabelled volume falls back to the drive's product name", Devices.parseDevices(noLabel)[0].label, "USB Flash Disk")
     var noModel = '{"blockdevices":[{"name":"sdb","path":"/dev/sdb","label":null,"mountpoints":[null],"rm":true,"size":34359738368,"type":"disk","model":null,'
                 + '"children":[{"name":"sdb1","path":"/dev/sdb1","label":null,"mountpoints":[null],"rm":true,"size":34359738368,"type":"part","model":null}]}]}'
-    check("a volume with neither label nor model falls back to the kernel name", Mounts.parseDevices(noModel)[0].label, "sdb1")
+    check("a volume with neither label nor model falls back to the kernel name", Devices.parseDevices(noModel)[0].label, "sdb1")
 
     // A label is a name off somebody else's filesystem, so it is data: the parser never rewrites it
     // and ui/SidebarRow.qml draws it through Text.PlainText.
     var awkward = '{"blockdevices":[{"name":"sda","path":"/dev/sda","label":null,"mountpoints":[null],"rm":true,"size":8589934592,"type":"disk","model":null,'
                 + '"children":[{"name":"sda1","path":"/dev/sda1","label":"Sauvegarde & Co \\"2026\\" <b>","mountpoints":[null],"rm":true,"size":8589934592,"type":"part","model":null}]}]}'
-    check("an awkward label survives the parse verbatim", Mounts.parseDevices(awkward)[0].label, 'Sauvegarde & Co "2026" <b>')
+    check("an awkward label survives the parse verbatim", Devices.parseDevices(awkward)[0].label, 'Sauvegarde & Co "2026" <b>')
 
     var longName = "Photographs and scans of every receipt from two thousand and twenty six, quarter one through quarter four"
     var longLabel = '{"blockdevices":[{"name":"sda","path":"/dev/sda","label":null,"mountpoints":[null],"rm":true,"size":8589934592,"type":"disk","model":null,'
                   + '"children":[{"name":"sda1","path":"/dev/sda1","label":"' + longName + '","mountpoints":[null],"rm":true,"size":8589934592,"type":"part","model":null}]}]}'
-    check("a very long label is elided by the row, never truncated by the parser", Mounts.parseDevices(longLabel)[0].label, longName)
+    check("a very long label is elided by the row, never truncated by the parser", Devices.parseDevices(longLabel)[0].label, longName)
 
     // A mountpoint with a space needs no decoding here, and that is measured rather than assumed:
     // the kernel writes /tmp/.../USB\040Drive in /proc/self/mountinfo, and lsblk --json was run
     // against a real vfat mount at that path and printed "/tmp/.../USB Drive" with a literal space.
     var spaced = '{"blockdevices":[{"name":"sda","path":"/dev/sda","label":null,"mountpoints":[null],"rm":true,"size":8589934592,"type":"disk","model":null,'
                + '"children":[{"name":"sda1","path":"/dev/sda1","label":"USB Drive","mountpoints":["/run/media/gm/USB Drive"],"rm":true,"size":8589934592,"type":"part","model":null}]}]}'
-    check("a mountpoint with a space is opened verbatim", Mounts.parseDevices(spaced)[0].path, "/run/media/gm/USB Drive")
+    check("a mountpoint with a space is opened verbatim", Devices.parseDevices(spaced)[0].path, "/run/media/gm/USB Drive")
 
     // A trust boundary: a node with no name would build "/dev/undefined" and hand it to gio.
     var noName = '{"blockdevices":[{"label":"nameless","mountpoints":[null],"rm":true,"size":8589934592,"type":"part","model":null}]}'
-    check("a node with no name is not a row", Mounts.parseDevices(noName).length, 0)
+    check("a node with no name is not a row", Devices.parseDevices(noName).length, 0)
 
     // The two listings share the rail but never the parser, so a device body must not read as a
     // network mount: parseMounts anchors Mount() at column zero and lsblk emits no such line.
