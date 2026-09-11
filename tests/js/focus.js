@@ -243,11 +243,9 @@ function run(check) {
     check("m raises the menu while the rail has focus", Focus.lookup(m, railPane()), "menu")
     check("m raises the menu in the list too, so the row menu has a key", Focus.lookup(m, pane(closed())), "menu")
 
-    // Finder's Cmd+K with Cmd read as Ctrl opens the dialog from either view, and so does the bare a
-    // (GM, 2026-09-11): keys.toml has promised "works from either the list or the rail" since the
-    // first commit while ui/js/Focus.js made it rail-only, and the operator pressed it in the list
-    // and got nothing. Ctrl+K is the Mac preset's own chord, so the preset is named here rather than
-    // assumed: the map opens on Default, which claims none.
+    // Ctrl+K opens the dialog from either view, and so does the bare a: keys.toml promised "either the
+    // list or the rail" from the first commit while Focus.js made it rail-only (GM, 2026-09-11).
+    // Ctrl+K is the Mac preset's chord, so the preset is named rather than assumed.
     var ctrl = Qt.ControlModifier
     Keymap.setPreset("mac")
     check("ctrl k connects to a server from the list", Focus.lookup(key(Qt.Key_K, "\u000b", ctrl), pane(closed())), "addNetwork")
