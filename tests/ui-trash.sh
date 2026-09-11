@@ -279,6 +279,7 @@ trash_move() {
     trash_guard_store "$((previous_count + 1))"
 }
 
+case_trashsweep() { case_trash sweep; }
 case_trashbasic() { case_trash basic; }
 case_raildetails() { case_trash raildetails; }
 case_trashcontrols() { case_trash controls; }
@@ -604,6 +605,48 @@ trash_stale_confirmations() {
     trash_empty_confirmed 1
 }
 
+# The 30 day sweep, GM's ruling of 2026-09-11. It runs once, at startup, before the Trash window has
+# ever existed, so this is its own launch with the setting already on and the fixture already holding
+# items older than the threshold. Everything here is inside the marked fixture the caller made, and
+# trash_guard refuses any path outside it.
+trash_sweep_case() {
+    local info recent old_one old_two swept day
+    for name in keep.txt stale-one.txt stale-two.txt; do
+        printf '%s\n' "$name" > "$payload/$name"
+        /usr/bin/gio trash -- "$payload/$name" || fail "trash: sweep fixture could not be trashed"
+    done
+    trash_guard "$XDG_DATA_HOME/Trash/info"
+    # gio writes DeletionDate into the .trashinfo beside each item, and it is the same field the
+    # sweep reads back through trash::deletion-date, so backdating it here is backdating the item.
+    for name in stale-one.txt stale-two.txt; do
+        info="$XDG_DATA_HOME/Trash/info/$name.trashinfo"
+        trash_guard "$info"
+        [[ -f "$info" ]] || fail "trash: sweep fixture has no trashinfo for $name"
+        sed -i "s/^DeletionDate=.*/DeletionDate=$(date -d '40 days ago' +%Y-%m-%dT%H:%M:%S)/" "$info" \
+            || fail "trash: sweep fixture could not be backdated"
+    done
+    [[ "$(/usr/bin/gio trash --list | wc -l)" == 3 ]] || fail "trash: sweep fixture is not three items"
+    "$flea_bin" --ui-state '{"trashAutoEmpty":true}' >/dev/null \
+        || fail "trash: the sweep could not be switched on inside the fixture"
+    launch "$payload"
+    wait_listing 0
+    # The two backdated items go and the recent one stays. This is the whole product promise, and it
+    # is asserted against the provider rather than against Flea's own count alone.
+    trash_wait '.count == 1' 'the sweep took the two items older than 30 days'
+    [[ "$(/usr/bin/gio trash --list | wc -l)" == 1 ]] || fail "trash: the sweep left the wrong number of items"
+    [[ "$(/usr/bin/gio trash --list | cut -f2)" == *keep.txt ]] || fail "trash: the sweep took the recent item"
+    trash_guard_store 1
+    trash_shot trash-sweep-done
+    # The once-a-day guard: the day it ran is recorded, so a second launch today sweeps nothing.
+    swept=$("$flea_bin" --ui-state 2>/dev/null | jq -er '.trashSweptOn') \
+        || fail "trash: the sweep day could not be read back"
+    # The same number ui/js/TrashDates.js dayNumber computes: whole days since the epoch at LOCAL
+    # midnight, so a run either side of UTC midnight cannot disagree with the product.
+    day=$(( $(date -d 'today 00:00:00' +%s) / 86400 ))
+    [[ "$swept" == "$day" ]] || fail "trash: the sweep recorded day $swept, expected $day"
+    trash_cleanup 1
+}
+
 case_trash() {
     local trash_box payload row uri backing root trash_checks=0
     local trash_case_label="${1:-full}"
@@ -626,6 +669,7 @@ case_trash() {
     [[ ! -e "$payload" ]] || fail "trash: refusing to reuse a prior payload"
     mkdir "$payload" || fail "trash: fixture creation failed"
     trash_start_bus
+    if [[ "$trash_case_label" == sweep ]]; then trash_sweep_case; return; fi
     launch "$payload"
     wait_listing 0
     trash_guard_store 0
