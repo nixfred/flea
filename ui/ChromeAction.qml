@@ -1,6 +1,5 @@
 import QtQuick
 import qs.Commons
-import "." as Flea
 
 // A control in a chrome strip, drawn under GM's 2026-09-11 ruling. Two inks: a STRUCTURAL RULE
 // recedes at the hairline, and a CONTROL FRAME advances in the control's own role. Drawing both in
@@ -10,11 +9,10 @@ import "." as Flea
 Item {
     id: root
 
+    // A chrome strip's own controls are marks alone; a control with a LABEL is a word in a text
+    // region and stays one. There is deliberately no mark here: one beside the word was a third
+    // species, and at the chrome mark size it outweighed the caption it stood next to.
     property string label: ""
-    // A chrome strip's own controls are marks alone; a control with a label is a word in a text
-    // region and stays one. A mark beside it would be a third species, and at the chrome mark size
-    // it outweighed the caption it sat next to.
-    property string glyph: ""
     // plain is the neutral control, accent the one action a surface is asking for, error a permanent
     // deletion. The role is the ink, at every state; only the wash under it moves.
     property string role: "plain"
@@ -50,7 +48,7 @@ Item {
     implicitHeight: Theme.chromeHeight
 
     Accessible.role: Accessible.Button
-    Accessible.name: root.label.length > 0 ? root.label : root.glyph
+    Accessible.name: root.label
     Accessible.onPressAction: if (root.available) root.activated()
     Keys.onReturnPressed: if (root.available) root.activated()
     Keys.onEnterPressed: if (root.available) root.activated()
@@ -71,29 +69,14 @@ Item {
 
         // Centred in the FRAME rather than in the strip, so the word sits where the box is and not
         // half a rule below it.
-        Row {
+        Text {
             id: content
             anchors.centerIn: parent
-            spacing: Theme.spacing.gap / 2
-
-            Flea.Glyph {
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.glyph.length > 0
-                width: Theme.font.caption
-                height: Theme.font.caption
-                name: root.glyph
-                color: root.ink
-            }
-
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.label.length > 0
-                text: root.label
-                color: root.ink
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.caption
-                textFormat: Text.PlainText
-            }
+            text: root.label
+            color: root.ink
+            font.family: Theme.font.family
+            font.pixelSize: Theme.font.caption
+            textFormat: Text.PlainText
         }
     }
 
