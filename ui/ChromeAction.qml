@@ -56,40 +56,44 @@ Item {
     Keys.onEnterPressed: if (root.available) root.activated()
     Keys.onSpacePressed: if (root.available) root.activated()
 
-    // The item fills the strip so the press clears hitMin, while what is DRAWN is the control's own
-    // caption line box centred in it. That inset is what keeps this frame off the strip's own rule:
-    // two lines that touch read as one line whatever colour they are.
+    // The item fills the strip so the press clears hitMin, while what is DRAWN is the frame, centred
+    // in the strip LESS its own rule: centring in the whole strip leaves the margin above the frame
+    // and the margin below it unequal by exactly the rule's width, which is what it looked like.
     Rectangle {
-        anchors.centerIn: parent
+        id: box
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: Math.round((parent.height - Theme.spacing.hairline - height) / 2)
         width: parent.width
         height: Theme.chromeControlHeight
         color: Qt.alpha(root.ink, root.wash)
         border.width: Theme.spacing.hairline
         border.color: root.frame
-    }
 
-    Row {
-        id: content
-        anchors.centerIn: parent
-        spacing: Theme.spacing.gap / 2
+        // Centred in the FRAME rather than in the strip, so the word sits where the box is and not
+        // half a rule below it.
+        Row {
+            id: content
+            anchors.centerIn: parent
+            spacing: Theme.spacing.gap / 2
 
-        Flea.Glyph {
-            anchors.verticalCenter: parent.verticalCenter
-            visible: root.glyph.length > 0
-            width: Theme.chromeMarkSize
-            height: Theme.chromeMarkSize
-            name: root.glyph
-            color: root.ink
-        }
+            Flea.Glyph {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.glyph.length > 0
+                width: Theme.font.caption
+                height: Theme.font.caption
+                name: root.glyph
+                color: root.ink
+            }
 
-        Text {
-            anchors.verticalCenter: parent.verticalCenter
-            visible: root.label.length > 0
-            text: root.label
-            color: root.ink
-            font.family: Theme.font.family
-            font.pixelSize: Theme.font.caption
-            textFormat: Text.PlainText
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.label.length > 0
+                text: root.label
+                color: root.ink
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.caption
+                textFormat: Text.PlainText
+            }
         }
     }
 
