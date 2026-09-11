@@ -418,8 +418,11 @@ function placesRows(state) {
     // a fresh install and off on every box that upgrades, because permanent deletion is outside the
     // undo journal and nobody opted into it by installing an update (GM, 2026-09-11).
     rows.push({ kind: "group", label: "Trash" })
-    rows.push({ kind: "check", id: "trashAutoEmpty", label: "Empty Trash after 30 days",
-        caption: "permanently, once a day", glyph: "history",
+    // The eyebrow above already says TRASH, so the label does not repeat it, and the caption says the
+    // one thing that matters rather than the cadence: at the fuller label the caption elided to
+    // "permanently, once a..." on the real panel, which is a warning cut in half.
+    rows.push({ kind: "check", id: "trashAutoEmpty", label: "Empty after 30 days",
+        caption: "permanently", glyph: "history",
         on: (state.data || {}).trashAutoEmpty === true })
     return rows
 }

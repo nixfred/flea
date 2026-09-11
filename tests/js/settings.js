@@ -281,9 +281,9 @@ function runCompletionRows(check) {
     // says otherwise, which is the whole of GM's opt-in ruling as the panel sees it.
     check("Places ends with the Trash group and its one row",
           places.slice(-2).map(function (row) { return row.label }).join("|"),
-          "Trash|Empty Trash after 30 days")
+          "Trash|Empty after 30 days")
     check("the sweep is off on a fresh install", find(places, "trashAutoEmpty").on, false)
-    check("and says what it does and how often", find(places, "trashAutoEmpty").caption, "permanently, once a day")
+    check("and says what it does and how often", find(places, "trashAutoEmpty").caption, "permanently")
     check("a ui.json that switched it on reads back on",
           find(Settings.rows("places", { data: { trashAutoEmpty: true } }), "trashAutoEmpty").on, true)
     var detailedPlaces = Settings.rows("places", { data: { places: { driveSize: true, trashCount: true } } })
