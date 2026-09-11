@@ -47,7 +47,10 @@ Item {
                     implicitHeight: Math.max(Theme.hitMin, field.implicitHeight + 2 * Theme.spacing.rowPaddingY)
                     color: Theme.color.background
                     border.width: Theme.spacing.hairline
-                    border.color: field.activeFocus ? Theme.color.accent : root.picker.edge
+                    // Muted at rest, accent on focus: what DialogField, MenuActionDialog, OpenWithDialog
+                    // and PermissionsDialog all draw. This was the last control in the product still
+                    // framed in the divider's own ink.
+                    border.color: field.activeFocus ? Theme.color.accent : Theme.color.muted
                     TextInput {
                         id: field
                         anchors.fill: parent

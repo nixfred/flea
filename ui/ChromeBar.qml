@@ -202,6 +202,10 @@ Item {
         anchors.rightMargin: Theme.spacing.gap
         anchors.top: parent.top
         anchors.bottom: parent.bottom
+        // The strip draws its own rule along that bottom edge, so the content stops above it: without
+        // this the rename editor's frame sat two pixels clear of the strip's top and one of its rule,
+        // which is the same unequal margin the Trash chrome's control had.
+        anchors.bottomMargin: Theme.spacing.hairline
 
         // The tail identifies the directory, so a path too long for the bar loses its head: the row
         // slides left inside a clipped slot, which is the left elision the single Text drew, made of
