@@ -42,4 +42,10 @@ function run(check) {
           - Trash.dayNumber(new Date(2026, 8, 11, 9, 0, 0).getTime()), 1)
     check("a fresh ui.json has never swept, and today is never day zero",
           Trash.dayNumber(sweepNow) > 0, true)
+
+    // The same defect in the label above the sweep: new Date(null) is the epoch, so an item with no
+    // date read as a day in 1970 rather than as Unknown.
+    check("a null date has no label either", Trash.deleted(null, sweepNow), "Unknown")
+    check("an absent date has no label", Trash.deleted(undefined, sweepNow), "Unknown")
+    check("an empty date has no label", Trash.deleted("", sweepNow), "Unknown")
 }
