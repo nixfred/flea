@@ -39,9 +39,6 @@ function lookup(event, root) {
     var action = Keymap.lookup(event.key, event.text, event.modifiers, context)
     // The share listing borrows the menu context for j/k/enter, but it has no submenu to step into.
     if (action === "menuRight" && shareBrowserHere(root)) return "open"
-    // Only the bare a is rail-only; Ctrl+K is scoped to neither view and opens the dialog anywhere.
-    if (action === "addNetwork" && root.focusView !== RAIL && !(event.modifiers & Qt.ControlModifier))
-        return ""
     // List and Grid filter held rows; search owns the header while its results are active.
     if (action === "filter")
         return (root.viewMode !== "columns" && root.searchMode.length === 0) ? action : ""

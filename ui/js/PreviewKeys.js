@@ -51,6 +51,11 @@ function act(action, root) {
     case "cursorDown": Filter.moveCursor(root, 1); follow(root); return
     case "cursorUp": Filter.moveCursor(root, -1); follow(root); return
     case "preview": root.preview.close(); return
+    // Space closes every kind now, so playback has its own key; it self-guards, because p reaches
+    // this only in the media context and a still image has nothing to play.
+    case "playPause":
+        if (root.preview.isMedia) root.preview.togglePlay()
+        return
     case "escape": root.preview.close(); return
     case "seekBack":
         if (root.preview.isPdf) root.preview.turnPage(-1)

@@ -49,4 +49,13 @@ function run(check) {
     var escaped = previewPane("video")
     PreviewKeys.act("escape", escaped)
     check("escape still closes a media preview", escaped.closed, 1)
+
+    // Space no longer plays, so p does, and only where there is something to play.
+    var tune = previewPane("audio")
+    PreviewKeys.act("playPause", tune)
+    check("p plays and pauses a media preview", tune.played, 1)
+    check("and closes nothing", tune.closed, 0)
+    var still = previewPane("image")
+    PreviewKeys.act("playPause", still)
+    check("p does nothing to a still preview", still.played + still.closed, 0)
 }

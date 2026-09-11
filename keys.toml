@@ -1448,6 +1448,18 @@ label = "cursorDown"
 frontend = "all"
 context = "rail,menu,panel,preview,media"
 
+# Space closes every preview now (GM, 2026-09-11), so the media strip's play control needed a key of
+# its own: without one a keyboard-first file manager could only play and pause with the pointer.
+[[preset]]
+name = "all"
+mods = "text"
+key = "p"
+keys = "p"
+action = "playPause"
+label = "playPause"
+frontend = "all"
+context = "media"
+
 [[preset]]
 name = "all"
 mods = "text"
