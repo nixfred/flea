@@ -330,7 +330,7 @@ function viewRows(state) {
                ["Home", "Last folder", "Chosen folder"], data.startIn || "home"),
         // The action writes the folder the panel was opened over and selects the mode with it, so the
         // row above never names a chosen folder that was never chosen. The value is the path itself.
-        { kind: "action", id: "startFolder", label: "Chosen folder", glyph: "folder",
+        { kind: "action", id: "startFolder", label: "Chosen folder", glyph: "folder", indented: true,
           value: data.startFolder || "Use this folder" },
         choice("newTab", "New tabs open in", "columns", ["current", "home", "start"],
                ["Current folder", "Home", "Start folder"], data.newTab || "current"),
