@@ -124,6 +124,16 @@ QtObject {
     // them, so the panel and the two openers can never disagree about where a window or a tab begins.
     readonly property string startFolder: root.state.startFolder || ""
 
+    // Settings > Places > Trash. The sweep reads both; ui/TrashHost.qml is its only driver.
+    readonly property bool trashAutoEmpty: root.state.trashAutoEmpty === true
+    readonly property int trashSweptOn: root.state.trashSweptOn || 0
+
+    // Written by the sweep when it finishes, so the next launch on the same day does not run it
+    // again. A sweep that failed records nothing and is retried on the next launch.
+    function recordTrashSweep(day) {
+        root.changeKey("trashSweptOn", day)
+    }
+
     // The chosen folder is set from the folder the panel was opened over, which is the same idiom the
     // Places section's "Add current folder" uses; choosing one is also what selects that mode.
     function setStartFolder(path) {

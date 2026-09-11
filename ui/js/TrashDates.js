@@ -22,3 +22,24 @@ function deleted(text, nowMs) {
     var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     return months[date.getMonth()] + " " + date.getDate() + (date.getFullYear() === now.getFullYear() ? "" : " " + date.getFullYear())
 }
+
+// The 30 day sweep's own two questions. GM's ruling of 2026-09-11: the sweep is off by default and
+// opt in, because permanent deletion is outside the undo journal and nobody opted into it by
+// installing an update.
+var DAY_MS = 24 * 60 * 60 * 1000
+
+// Sample input is deleted()'s own: gio's trash::deletion-date, "2026-09-08T10:00:00" in local time.
+// An item whose date cannot be read is NEVER swept: this is the one direction a wrong answer here
+// can be taken in, and "leave it alone" is that direction.
+function expired(text, nowMs, days) {
+    var date = new Date(text)
+    if (!isFinite(date.getTime())) return false
+    return nowMs - date.getTime() >= days * DAY_MS
+}
+
+// Which day it is, in whole days since the epoch at local midnight, which is what the sweep records
+// so that it runs once a day rather than once per launch.
+function dayNumber(nowMs) {
+    var now = new Date(nowMs)
+    return Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / DAY_MS)
+}

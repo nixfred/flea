@@ -496,8 +496,20 @@ ShellRoot {
                 primaryPane.open(view.dualMode && paths.length === 2 ? paths[0] : start)
                 view.initialized = true
                 if (view.dualMode) view.focusPane(view.focusSide)
+                trashSweep.start()
             }
         }
+    }
+
+    // The 30 day sweep runs off the startup path, not on it: a Trash listing costs one gio call per
+    // item and first paint is measured. Late enough that the window is up and the backend is
+    // answering, long before anyone reaches the Trash rail row. ui/TrashHost.qml refuses it when the
+    // setting is off, when it has already run today, and when the Trash window exists at all.
+    Timer {
+        id: trashSweep
+        interval: 2000
+        repeat: false
+        onTriggered: primaryPane.trash.sweep()
     }
 
     // The seam the tests drive, see AGENTS.md "Testing". Every reader lives in ui/Ipc.qml.

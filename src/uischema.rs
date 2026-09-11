@@ -18,6 +18,8 @@ pub const DEFAULTS: &str = r#"{
   "startFolder": "",
   "lastPath": "",
   "newTab": "current",
+  "trashAutoEmpty": false,
+  "trashSweptOn": 0,
   "places": {
     "favourites": [],
     "showHome": true, "showNetwork": true,
@@ -118,6 +120,10 @@ pub const SCHEMA: &[(&str, Rule)] = &[
     ("startFolder", Rule::Place),
     ("lastPath", Rule::Place),
     ("newTab", Rule::Word(&["current", "home", "start"])),
+    // Settings > Places > Trash. The sweep is off until the operator switches it on, and the day it
+    // last ran is whole days since the epoch, which is what keeps it to once a day across launches.
+    ("trashAutoEmpty", Rule::Bool),
+    ("trashSweptOn", Rule::Count(0.0, 4000000.0)),
     ("places", Rule::Group(PLACES)),
     ("preview", Rule::Group(PREVIEW)),
     // SettingsKeys.html's four-value chooser over ui/js/Keymap.js's shared tables. A stored name
@@ -177,7 +183,8 @@ mod tests {
             [
                 "view", "density", "columns", "addressBar", "sort", "dual", "foldersFirst",
                 "groupByKind", "hidden", "wrapAtEnds", "keyHints", "startIn", "startFolder",
-                "lastPath", "newTab", "places", "preview", "keys", "display", "menu"
+                "lastPath", "newTab", "trashAutoEmpty", "trashSweptOn", "places", "preview", "keys",
+                "display", "menu"
             ]
         );
         assert_eq!(d.get("view").and_then(Json::as_str), Some("list"));
@@ -193,6 +200,8 @@ mod tests {
         assert_eq!(d.get("startFolder").and_then(Json::as_str), Some(""));
         assert_eq!(d.get("lastPath").and_then(Json::as_str), Some(""));
         assert_eq!(d.get("newTab").and_then(Json::as_str), Some("current"));
+        assert_eq!(d.get("trashAutoEmpty").and_then(Json::as_bool), Some(false));
+        assert_eq!(d.get("trashSweptOn").and_then(Json::as_f64), Some(0.0));
         let cols: Vec<&str> = d.get("columns").and_then(Json::as_array).expect("columns").iter().filter_map(Json::as_str).collect();
         assert_eq!(cols, ["name", "size", "date"]);
         assert_eq!(d.get("sort").and_then(|s| s.get("key")).and_then(Json::as_str), Some("name"));

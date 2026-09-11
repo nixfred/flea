@@ -413,5 +413,13 @@ function placesRows(state) {
     rows.push({ kind: "check", id: "places.trashCount", label: "Show Trash count", glyph: "trash", on: data.trashCount === true })
     rows.push(choice("places.sidebarWidth", "Sidebar width", "maximize", Places.WIDTH_STOPS,
         ["160 px", "192 px", "224 px", "256 px"], Places.sidebarWidth(data.sidebarWidth)))
+    // Places is where Trash already lives: Built in decides whether it is in the rail and Rail
+    // decides whether it carries a count, so what it does with old items belongs beside them. Off on
+    // a fresh install and off on every box that upgrades, because permanent deletion is outside the
+    // undo journal and nobody opted into it by installing an update (GM, 2026-09-11).
+    rows.push({ kind: "group", label: "Trash" })
+    rows.push({ kind: "check", id: "trashAutoEmpty", label: "Empty Trash after 30 days",
+        caption: "permanently, once a day", glyph: "history",
+        on: (state.data || {}).trashAutoEmpty === true })
     return rows
 }
