@@ -94,6 +94,19 @@ for format in $round_trip_formats; do
   stop_backend
 done
 
+# Flea reads rar and writes none, so this direction alone is exercised, and the fixture is built by
+# hand because nothing in the Arch repositories writes a rar. tools/flea-rar-fixture is that builder.
+echo "--- a rar extracts, through whichever reader this box has ---"
+start_backend
+./tools/flea-rar-fixture "$D/holiday.rar" "hello.txt" "hello from a rar" \
+  || { echo "FAIL the rar fixture could not be built"; fail=1; }
+send "{\"c\":\"archive\",\"op\":\"extract\",\"path\":\"$D/holiday.rar\",\"dest\":\"$D/back-rar\"}"
+await '"t":"archivedone"' || fail=1
+check "a rar extracted without error" "1" "$(seen '"t":"archivedone","id":1,"ok":true')"
+check "and its index was readable, so the extract was verified" "1" "$(seen '"id":1,"ok":true,"verified":true')"
+check "the rar round trip kept the file" "hello from a rar" "$(cat "$D/back-rar/hello.txt" 2>/dev/null)"
+stop_backend
+
 echo "--- a destination already there is refused, both directions ---"
 start_backend
 printf 'already here' > "$D/taken.zip"
