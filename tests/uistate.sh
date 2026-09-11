@@ -95,7 +95,9 @@ out=$(flea_ui '{"view":"grid","places":{"sidebarWidth":240}}' 2>&1); rc=$?
 check "a patch exits 0" "0" "$rc"
 check "a patch prints the stored view" "1" "$(echo "$out" | grep -c '"view": "grid"')"
 check "a patch writes the file" "1" "$([ -f "$UI" ] && echo 1 || echo 0)"
-check "the stored file carries the patched width" "1" "$(grep -c '"sidebarWidth": 240' "$UI")"
+# 240 is not a stop, so src/uistate.rs Rule::SidebarWidth snaps it down to 224: this asserted the
+# raw number and had been failing since the snap was written, which is why it pins the snap now.
+check "the stored file carries the patched width, snapped to a stop" "1" "$(grep -c '"sidebarWidth": 224' "$UI")"
 check "the stored file keeps every other key" "22" "$(grep -c '^  "' "$UI")"
 check "the state file is owner only" "600" "$(stat -c '%a' "$UI")"
 check "the state directory is owner only" "700" "$(stat -c '%a' "$STATE/flea")"
