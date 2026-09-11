@@ -644,7 +644,7 @@ trash_sweep_case() {
     # midnight, so a run either side of UTC midnight cannot disagree with the product.
     day=$(( $(date -d 'today 00:00:00' +%s) / 86400 ))
     [[ "$swept" == "$day" ]] || fail "trash: the sweep recorded day $swept, expected $day"
-    trash_cleanup 1
+    trash_cleanup 0
 }
 
 case_trash() {
