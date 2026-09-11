@@ -232,7 +232,7 @@ Item {
             // Only this column's rows are the pane's own, so only it can paint the pane's selection.
             pane: root.pane
             // The list's and the grid's own two routes, reached from the one column whose rows are the pane's listing, so a click means the same thing in all three views.
-            onPicked: function (index, tapCount, modifiers) { Tap.tapped(index, tapCount, modifiers, root.pane) }
+            onPicked: function (index, tapCount, modifiers) { Tap.tappedMiddle(index, tapCount, modifiers, root.pane) }
             onMenuRequested: function (index, eventPoint) { Tap.tappedMenu(index, eventPoint, root.pane, root.menu) }
             onBackgroundMenuRequested: function (eventPoint) { root.menu.openBackground(eventPoint.scenePosition) }
             onThumbsApplied: function (work) { root.thumbsApplied(work) }

@@ -682,6 +682,8 @@ label = "this sheet"
 # would put a key on that checklist that nobody can press. Do not rename it back.
 #
 # where  listing    the list view, the grid view, and the columns view's own middle column
+#        column     the columns view's middle column alone, which answers every listing row above
+#                   and then the one row of its own that the other two views do not carry
 #        neighbour  the columns view's parent and child columns, which are peeks with no cursor
 #        rail       ui/SidebarRow.qml: favourites, mounts and network places
 #        window     a press that belongs to no row at all, taken by ui/shell.qml
@@ -709,15 +711,24 @@ does = "open"
 label = "open the row"
 
 # The operator's ruling on a search result: clicking one takes you to the file rather than launching
-# it, so the second tap reveals into the containing directory with the row selected. ui/js/Search.js
-# activateAction is what decides, and it answers "open" everywhere else, which is why the row above
-# still stands. Enter still opens and o still reveals, so only the pointer reads the search this way.
+# it, and one tap is what does it (2026-09-11), because a result you clicked is a result you are done
+# reading. ui/js/Search.js activateAction is what decides, and it answers "open" everywhere else,
+# which is why the row above still stands. Enter still opens and o still reveals, so only the pointer
+# reads the search this way. The reveal moves the pane, so the second tap of a double click lands on
+# another directory's row: it is declared below as doing nothing, the neighbour columns' own rule.
+[[pointer]]
+where = "listing"
+press = "left"
+row = "result"
+does = "reveal"
+label = "go to the file in its own directory, selected"
+
 [[pointer]]
 where = "listing"
 press = "left x2"
 row = "result"
 does = "reveal"
-label = "go to the file in its own directory, selected"
+label = "still the one reveal the first tap made"
 
 [[pointer]]
 where = "listing"
@@ -771,6 +782,18 @@ press = "right"
 row = "any"
 does = "menu"
 label = "open the context menu at the pointer, on the selection the row is in"
+
+# The operator's ruling, 2026-09-11: the columns view goes into a directory on one tap, the way both
+# of its own neighbour columns already do and the way Finder's column view does. Only a directory and
+# only here: a file in this column still waits for the second tap, and one tap in the list and the
+# grid still only selects. ui/ColumnsArea.qml is the sole caller of ui/js/Tap.js tappedMiddle, which
+# is what scopes this to the middle column; a modifier still selects, because it never opens anywhere.
+[[pointer]]
+where = "column"
+press = "left"
+row = "dir"
+does = "open"
+label = "go into that directory on one tap, as its neighbours do"
 
 # A neighbour column has no cursor, so one tap on a directory makes it the pane's own listing: that is
 # the column view's reveal, the gesture Finder's own column view answers a single click with, and not
