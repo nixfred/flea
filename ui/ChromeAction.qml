@@ -11,6 +11,9 @@ Item {
     id: root
 
     property string label: ""
+    // A chrome strip's own controls are marks alone; a control with a label is a word in a text
+    // region and stays one. A mark beside it would be a third species, and at the chrome mark size
+    // it outweighed the caption it sat next to.
     property string glyph: ""
     // plain is the neutral control, accent the one action a surface is asking for, error a permanent
     // deletion. The role is the ink, at every state; only the wash under it moves.
@@ -26,10 +29,16 @@ Item {
         : root.role === "accent" ? Theme.color.accent
         : root.role === "error" ? Theme.color.error
         : Theme.color.foreground
-    // A neutral control rests in muted, which is the role ThemeRoles.html gives an inactive control,
-    // and an unavailable one stays there: the single case where a frame may recede, because an inert
-    // control should. Everything else frames in the ink it is already written in.
-    readonly property color frame: !root.available || root.role === "plain" ? Theme.color.muted : root.ink
+    // Every control rests in a muted frame, the role ThemeRoles.html gives an inactive control, and
+    // the frame rises to the control's own ink under the pointer or the keyboard. The exception is
+    // the primary control, which frames in accent at rest because it is the one action a surface is
+    // asking for. A destructive control therefore rests exactly as the confirm dialog draws it, a
+    // plain frame carrying error text, and earns the error frame only when it is reached for: an
+    // error frame at rest is louder than anything else Flea draws, and it was.
+    readonly property color frame: !root.available ? Theme.color.muted
+        : root.role === "accent" ? Theme.color.accent
+        : (root.activeFocus || hover.hovered || tap.pressed) ? root.ink
+        : Theme.color.muted
     readonly property real wash: !root.available ? 0
         : (activeFocus || tap.pressed) ? Theme.washActive
         : hover.hovered ? Theme.washHover

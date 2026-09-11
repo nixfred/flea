@@ -356,7 +356,6 @@ FocusScope {
                     id: emptyAction
                     anchors.verticalCenter: parent.verticalCenter
                     label: "Empty Trash"
-                    glyph: "trash"
                     role: "error"
                     available: root.total > 0 && !root.busy
                     onActivated: root.prepare(true)
