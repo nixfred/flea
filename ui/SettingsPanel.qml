@@ -106,6 +106,12 @@ Item {
         }
         if (row.kind === "favouriteActions") { root.favouriteAction(root.favouriteActionIndex); return }
         if (row.id === "columns") { root.showSection("columns"); return }
+        // The folder the panel was opened over, which is the pane behind it: the same folder the
+        // Places section's own "Add current folder" row takes, and the only one on screen to mean.
+        if (row.id === "startFolder") {
+            if (root.focusHolder) ViewState.setStartFolder(root.focusHolder.path)
+            return
+        }
         if (row.id === "backView") { root.showSection("view"); return }
         if (row.id === "keyboardSheet") {
             var holder = root.focusHolder

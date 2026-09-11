@@ -120,6 +120,25 @@ QtObject {
     readonly property bool hyprlandIcons: root.display.hyprlandIcons === true
     property string saveStatus: "Saved · applied in this process"
 
+    // Settings > View > Opening. ui/js/Startup.js is what turns these into a path; nothing else reads
+    // them, so the panel and the two openers can never disagree about where a window or a tab begins.
+    readonly property string startFolder: root.state.startFolder || ""
+
+    // The chosen folder is set from the folder the panel was opened over, which is the same idiom the
+    // Places section's "Add current folder" uses; choosing one is also what selects that mode.
+    function setStartFolder(path) {
+        root.changeKey("startIn", "folder")
+        root.changeKey("startFolder", String(path || ""))
+    }
+
+    // Written as the pane moves, never by a control. "Last folder" would otherwise have nothing to
+    // return to, and the pair ui/shell.qml already remembers for the dual view covers only that view.
+    function rememberLastPath(path) {
+        if (root.state.lastPath === path)
+            return
+        root.changeKey("lastPath", String(path || ""))
+    }
+
     // Setting ids name either one top-level key or one leaf of an existing group.
     function changeSetting(id, value) {
         var parts = id.split(".")

@@ -290,6 +290,22 @@ function runCompletionRows(check) {
     check("grouping explains the categories before it is enabled", find(view, "groupByKind").caption, "folders, photos, files")
     check("wrapping explains the boundary before it is enabled", find(view, "wrapAtEnds").caption, "arrow-up at the top")
     check("save feedback is a separate footer", view[view.length - 1].footer, true)
+
+    // Settings > View > Opening, which is where a window and a new tab begin. ui/js/Startup.js turns
+    // the values into a path and tests/js/startup.js drives that; this is only what the panel draws.
+    var opening = Settings.rows("view", {})
+    check("Opening defaults to home", find(opening, "startIn").selected, "home")
+    check("and its three values are the ones the schema allows",
+          find(opening, "startIn").values.join(","), "home,last,folder")
+    check("a chosen folder that was never chosen invites the operator to pick one",
+          find(opening, "startFolder").value, "Use this folder")
+    check("new tabs default to the folder the pane is on", find(opening, "newTab").selected, "current")
+    check("and the tab values are the schema's own",
+          find(opening, "newTab").values.join(","), "current,home,start")
+    var opened = Settings.rows("view", { data: { startIn: "folder", startFolder: "/home/gm/Work", newTab: "home" } })
+    check("a chosen folder is named by its own path", find(opened, "startFolder").value, "/home/gm/Work")
+    check("and the mode beside it reads back", find(opened, "startIn").selected, "folder")
+    check("the tab setting reads back too", find(opened, "newTab").selected, "home")
     check("the save failure keeps its message and error role",
           Settings.rows("view", { saveStatus: "Could not save settings" }).slice(-1).map(function (row) {
               return row.label + "|" + row.role + "|" + row.footer

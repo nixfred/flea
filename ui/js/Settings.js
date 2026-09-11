@@ -325,6 +325,15 @@ function viewRows(state) {
         { kind: "check", id: "hidden", label: "Show hidden files", glyph: "eye", on: data.hidden === true },
         { kind: "group", label: "Cursor" },
         { kind: "check", id: "wrapAtEnds", label: "Wrap at list ends", caption: "arrow-up at the top", glyph: "arrow-up", on: data.wrapAtEnds === true },
+        { kind: "group", label: "Opening" },
+        choice("startIn", "Flea opens in", "house", ["home", "last", "folder"],
+               ["Home", "Last folder", "Chosen folder"], data.startIn || "home"),
+        // The action writes the folder the panel was opened over and selects the mode with it, so the
+        // row above never names a chosen folder that was never chosen. The value is the path itself.
+        { kind: "action", id: "startFolder", label: "Chosen folder", glyph: "folder",
+          value: data.startFolder || "Use this folder" },
+        choice("newTab", "New tabs open in", "columns", ["current", "home", "start"],
+               ["Current folder", "Home", "Start folder"], data.newTab || "current"),
         { kind: "hint", footer: true, label: state.saveStatus || "Saved · applied in this process",
           role: (state.saveStatus || "").indexOf("Could not") === 0 ? "error" : "accent" }
     ]

@@ -33,6 +33,9 @@ FocusScope {
     property bool showHidden: ViewState.state.hidden === true
     // Issue 27's state-file key: with it on a cursor step past an end comes round; ui/js/Focus.js step is the only reader.
     readonly property bool wrapAtEnds: ViewState.state.wrapAtEnds === true
+    // ui/js/Tabs.js is a .pragma library and cannot reach a QML singleton, so the state it asks
+    // ui/js/Startup.js about rides in through the pane, the way every other setting it reads does.
+    readonly property var uiState: ViewState.state
     // When the first d of the dd pair landed; ui/js/Focus.js reads it and Nav's reset clears it.
     property double trashArmedAt: 0
     property string keySequence: ""

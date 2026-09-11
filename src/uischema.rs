@@ -14,6 +14,10 @@ pub const DEFAULTS: &str = r#"{
   "hidden": false,
   "wrapAtEnds": false,
   "keyHints": false,
+  "startIn": "home",
+  "startFolder": "",
+  "lastPath": "",
+  "newTab": "current",
   "places": {
     "favourites": [],
     "showHome": true, "showNetwork": true,
@@ -46,6 +50,8 @@ pub enum Rule {
     // columns names what the list row SHOWS, so it holds each column key at most once and name always.
     Columns,
     Favourites,
+    // One place, or "" for a folder the operator has not chosen and a path nothing has recorded yet.
+    Place,
     SidebarWidth,
     // dual.paths is the pair handoff 5a specifies, or the empty array that means nothing remembered.
     Pair,
@@ -106,6 +112,12 @@ pub const SCHEMA: &[(&str, Rule)] = &[
     // The Menus section's "Show keyboard hints" row: every menu's key column and the empty
     // directory's own tip, off until it is switched on.
     ("keyHints", Rule::Bool),
+    // Where a window opens, and where a new tab opens. "folder" reads startFolder, "last" reads
+    // lastPath, which ui/shell.qml writes as the pane moves and no panel control ever touches.
+    ("startIn", Rule::Word(&["home", "last", "folder"])),
+    ("startFolder", Rule::Place),
+    ("lastPath", Rule::Place),
+    ("newTab", Rule::Word(&["current", "home", "start"])),
     ("places", Rule::Group(PLACES)),
     ("preview", Rule::Group(PREVIEW)),
     // SettingsKeys.html's four-value chooser over ui/js/Keymap.js's shared tables. A stored name
@@ -164,8 +176,8 @@ mod tests {
             keys,
             [
                 "view", "density", "columns", "addressBar", "sort", "dual", "foldersFirst",
-                "groupByKind", "hidden", "wrapAtEnds", "keyHints", "places", "preview", "keys",
-                "display", "menu"
+                "groupByKind", "hidden", "wrapAtEnds", "keyHints", "startIn", "startFolder",
+                "lastPath", "newTab", "places", "preview", "keys", "display", "menu"
             ]
         );
         assert_eq!(d.get("view").and_then(Json::as_str), Some("list"));
@@ -177,6 +189,10 @@ mod tests {
         assert_eq!(d.get("hidden").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("wrapAtEnds").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("keyHints").and_then(Json::as_bool), Some(false));
+        assert_eq!(d.get("startIn").and_then(Json::as_str), Some("home"));
+        assert_eq!(d.get("startFolder").and_then(Json::as_str), Some(""));
+        assert_eq!(d.get("lastPath").and_then(Json::as_str), Some(""));
+        assert_eq!(d.get("newTab").and_then(Json::as_str), Some("current"));
         let cols: Vec<&str> = d.get("columns").and_then(Json::as_array).expect("columns").iter().filter_map(Json::as_str).collect();
         assert_eq!(cols, ["name", "size", "date"]);
         assert_eq!(d.get("sort").and_then(|s| s.get("key")).and_then(Json::as_str), Some("name"));
