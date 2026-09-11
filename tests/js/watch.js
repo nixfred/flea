@@ -182,6 +182,8 @@ function run(check) {
     // selection both go back exactly where they were.
     var refused = watched(0, [{ n: "a" }, { n: "b" }, { n: "c" }], 1)
     var refusedAnchor = Nav.refreshAfterDelete(refused)
+    refused.rows = [{ n: "a" }, { n: "b" }, { n: "c" }]
+    refused.total = 3
     check("a delete nothing removed puts the cursor back on the same file",
           Nav.applyAnchor(refused, refusedAnchor) + "|" + refused.selectedAt, "null|1")
 

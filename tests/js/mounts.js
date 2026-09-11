@@ -355,8 +355,8 @@ function run(check) {
 
     // What Ctrl+E releases from a listing: the mounted removable volume the directory is inside,
     // and nothing else, so the key can never release a volume the operator is not looking at.
-    var stick = { label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", path: "/run/media/user/128GB", mounted: true }
-    var pulled = { label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", path: "", mounted: false }
+    var stick = { label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", path: "/run/media/user/128GB", mounted: true, removable: true }
+    var pulled = { label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", path: "", mounted: false, removable: true }
     var disk = { label: "nvme0n1", group: "device", kind: "disk", device: "/dev/nvme0n1", path: "/", mounted: true }
     var houses = [disk, stick]
     check("a directory inside the volume names it", Mounts.holding(houses, "/run/media/user/128GB/photos"), stick)
