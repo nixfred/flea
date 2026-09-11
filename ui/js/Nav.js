@@ -128,13 +128,28 @@ function refresh(pane, selectPath) {
 // because a create above it renumbers every row below and a listing that jumped back to the top
 // would move the user while they were reading it. Returns the anchor applyAnchor() resolves, or null.
 function refreshWatched(pane) {
+    return anchoredRefresh(pane, false)
+}
+
+// Flea's own delete. The rows that were marked are gone, so there is usually no name to return to:
+// the anchor is the cursor row that was deleted and applyAnchor's own fallback then lands on
+// whatever took its place, which is Finder's rule. It selects that row as well, so the next delete
+// follows without reaching for the mouse; reported 2026-09-11, "deleting one refreshes the entire
+// file list and loses my selection, so I have to start over". A delete that failed leaves the row
+// standing, and then the name matches and the cursor goes back exactly where it was.
+function refreshAfterDelete(pane) {
+    return anchoredRefresh(pane, true)
+}
+
+function anchoredRefresh(pane, select) {
     if (pane.listInFlight) {
         return null
     }
     var row = pane.rowFor(pane.cursorIndex)
     // The path rides along because the anchor can outlive one rows reply: a navigation between the
     // two below would otherwise put this directory's cursor row onto the next directory's listing.
-    var anchor = { name: row ? String(row.n) : "", index: pane.cursorIndex, start: pane.held, path: pane.path }
+    var anchor = { name: row ? String(row.n) : "", index: pane.cursorIndex, start: pane.held,
+                   path: pane.path, select: select === true }
     var query = pane.filterQuery
     pane.openWithoutHistory(pane.path)
     // A filter narrows the rows the pane holds rather than choosing which directory it holds, so it
@@ -160,7 +175,7 @@ function applyAnchor(pane, anchor) {
     }
     for (var i = 0; i < pane.rows.length; i++) {
         if (String(pane.rows[i].n) === anchor.name) {
-            pane.setCursor(pane.held + i)
+            landOn(pane, pane.held + i, anchor)
             return null
         }
     }
@@ -170,9 +185,19 @@ function applyAnchor(pane, anchor) {
         return anchor
     }
     if (pane.total > 0) {
-        pane.setCursor(Math.min(anchor.index, pane.total - 1))
+        landOn(pane, Math.min(anchor.index, pane.total - 1), anchor)
     }
     return null
+}
+
+// A watch's anchor only moves the cursor, because the operator's own selection belongs to them and a
+// change another program made must not rewrite it. A delete's anchor selects, because the rows that
+// were selected no longer exist and a cursor with nothing marked is a keyboard that has to start over.
+function landOn(pane, index, anchor) {
+    if (anchor.select)
+        pane.selectOnly(index)
+    else
+        pane.setCursor(index)
 }
 
 // Only the first rows response looks for the target, then it is forgotten either way, so a later

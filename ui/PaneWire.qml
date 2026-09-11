@@ -317,11 +317,14 @@ Item {
             } else pane.refresh("")
         }
 
+        // The listing is read again with the cursor left where the deleted rows were, and the row
+        // that took their place selected, so the next delete needs no mouse. The whole selection is
+        // gone from disk, so there is nothing to carry over but the position.
         function onTrashed(ok, failed) {
             pane.sticky("")
             pane.message(Ops.trashed(ok, failed), ok === 0)
             pane.clearSelection()
-            pane.refresh("")
+            root.anchor = Nav.refreshAfterDelete(pane)
         }
 
         // The listing is re-read with the new name selected, so the row the operator was on stays

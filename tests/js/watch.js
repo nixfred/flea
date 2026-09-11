@@ -54,6 +54,9 @@ function watched(held, rows, cursorIndex, total) {
         return offset < 0 || offset >= p.rows.length ? null : p.rows[offset]
     }
     p.setCursor = function (index) { p.cursorSetTo = index }
+    // Only a delete's own anchor selects; a watched re-read must never touch the operator's marks.
+    p.selectedAt = -1
+    p.selectOnly = function (index) { p.selectedAt = index; p.cursorSetTo = index }
     // The same wrapper ui/Pane.qml carries, so the re-read takes the one route that can refuse.
     p.openWithoutHistory = function (target) { Nav.openWithoutHistory(p, target) }
     return p
@@ -154,4 +157,53 @@ function run(check) {
           Nav.refreshWatched(loading) === null && loading.sent.length === 0, true)
     check("and an absent anchor resolves to nothing", Nav.applyAnchor(loading, null), null)
 
+    // Reported 2026-09-11: "deleting one refreshes the entire file list and loses my selection, so I
+    // have to start over". The rows that were marked are gone, so the anchor is the deleted cursor
+    // row and applyAnchor's own fallback lands on whatever took its place, selected.
+    var deleted2 = watched(0, [{ n: "a" }, { n: "b" }, { n: "c" }], 1)
+    var deleteAnchor = Nav.refreshAfterDelete(deleted2)
+    check("a delete re-reads the same directory", deleted2.sent.join(","), "list /home/gm,fsinfo")
+    check("and anchors on the row that was deleted", deleteAnchor.name, "b")
+    deleted2.rows = [{ n: "a" }, { n: "c" }]
+    deleted2.total = 2
+    check("the row that took its place takes the cursor",
+          Nav.applyAnchor(deleted2, deleteAnchor) + "|" + deleted2.cursorSetTo, "null|1")
+    check("and it is selected, so the next delete needs no mouse", deleted2.selectedAt, 1)
+
+    // The last row deleted has nothing below it, so the cursor lands on the new last row.
+    var lastGone = watched(0, [{ n: "a" }, { n: "b" }, { n: "c" }], 2)
+    var lastAnchor = Nav.refreshAfterDelete(lastGone)
+    lastGone.rows = [{ n: "a" }, { n: "b" }]
+    lastGone.total = 2
+    check("deleting the last row selects the new last row",
+          Nav.applyAnchor(lastGone, lastAnchor) + "|" + lastGone.selectedAt, "null|1")
+
+    // A delete that failed leaves the row standing, and then the name matches and the cursor and the
+    // selection both go back exactly where they were.
+    var refused = watched(0, [{ n: "a" }, { n: "b" }, { n: "c" }], 1)
+    var refusedAnchor = Nav.refreshAfterDelete(refused)
+    check("a delete nothing removed puts the cursor back on the same file",
+          Nav.applyAnchor(refused, refusedAnchor) + "|" + refused.selectedAt, "null|1")
+
+    // Emptying a directory leaves nothing to select, and selecting row -1 would be a mark on nothing.
+    var emptied2 = watched(0, [{ n: "a" }], 0)
+    var emptyAnchor = Nav.refreshAfterDelete(emptied2)
+    emptied2.rows = []
+    emptied2.total = 0
+    check("deleting the only row selects nothing rather than a row that is not there",
+          Nav.applyAnchor(emptied2, emptyAnchor) + "|" + emptied2.selectedAt, "null|-1")
+
+    // The watch's own anchor must not have grown a selection with it: a change another program made
+    // is not a reason to rewrite what the operator had marked.
+    var untouched = watched(0, [{ n: "a" }, { n: "b" }], 1)
+    var untouchedAnchor = Nav.refreshWatched(untouched)
+    untouched.rows = [{ n: "a" }, { n: "b" }]
+    check("a watched re-read still only moves the cursor",
+          Nav.applyAnchor(untouched, untouchedAnchor) + "|" + untouched.selectedAt, "null|-1")
+
+    // The same refusal the watched re-read carries, for the same reason.
+    var busy = watched(0, [{ n: "a" }], 0)
+    busy.listInFlight = true
+    check("a delete re-read is refused while a list is in flight",
+          Nav.refreshAfterDelete(busy) === null && busy.sent.length === 0, true)
 }
