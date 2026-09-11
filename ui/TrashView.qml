@@ -330,7 +330,7 @@ FocusScope {
                     enabled: false
                 }
                 Text {
-                    width: Math.max(0, parent.width - 2 * Theme.hitMin - countLabel.width - 3 * parent.spacing)
+                    width: Math.max(0, parent.width - 2 * Theme.hitMin - countLabel.width - emptyAction.width - 4 * parent.spacing)
                     anchors.verticalCenter: parent.verticalCenter
                     text: "Trash"
                     textFormat: Text.PlainText
@@ -347,6 +347,19 @@ FocusScope {
                     elide: Text.ElideRight
                     color: Theme.color.foreground
                     font { family: Theme.font.family; pixelSize: Theme.font.caption }
+                }
+                // Emptying the Trash was reachable only by right-clicking the rail row. It addresses
+                // the whole Trash, which is what the count beside it describes, so it belongs here.
+                // It opens the confirmation the menu row opens: the boundary is unchanged and no key
+                // is bound to it. Disabled exactly where ui/js/Menu.js disables the row.
+                Flea.ChromeAction {
+                    id: emptyAction
+                    anchors.verticalCenter: parent.verticalCenter
+                    label: "Empty Trash"
+                    glyph: "trash"
+                    role: "error"
+                    available: root.total > 0 && !root.busy
+                    onActivated: root.prepare(true)
                 }
             }
             Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: Theme.spacing.hairline; color: Theme.color.foreground; opacity: 0.12 }

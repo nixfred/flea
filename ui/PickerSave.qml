@@ -157,22 +157,32 @@ Item {
         Keys.onSpacePressed: control.pressed()
         Keys.onTabPressed: function(event) { root.picker.stepFocus(control, (event.modifiers & Qt.ShiftModifier) !== 0) }
         Keys.onBacktabPressed: root.picker.stepFocus(control, true)
+        // GM's 2026-09-11 fill rule, the same one ui/PickerChrome.qml's controls now carry: the ink
+        // says what the control is and a wash says what state it is in. The collision pair sits over
+        // the dialog's own plane, so the wash is the control's own ink at the two steps.
+        readonly property color ink: control.danger ? Theme.color.error : Theme.color.foreground
+        readonly property real wash: (control.activeFocus || collisionPress.pressed) ? Theme.washActive
+            : collisionHover.hovered ? Theme.washHover : 0
+
         Rectangle {
-            anchors.fill: parent
-            color: control.activeFocus ? Qt.alpha(Theme.color.accent, 0.14) : "transparent"
-            border.width: Theme.spacing.hairline
-            border.color: control.danger ? Theme.color.error : root.picker.edge
+            anchors.centerIn: parent
+            width: parent.width
+            height: Theme.chromeControlHeight
+            color: Qt.alpha(control.ink, control.wash)
         }
         Text {
             id: caption
             anchors.centerIn: parent
             text: control.label
             textFormat: Text.PlainText
-            color: control.danger ? Theme.color.error : Theme.color.foreground
+            color: control.ink
             font { family: Theme.font.family; pixelSize: Theme.font.caption }
         }
-        HoverHandler { cursorShape: Qt.PointingHandCursor }
-        TapHandler { onTapped: { control.forceActiveFocus(Qt.MouseFocusReason); control.pressed() } }
+        HoverHandler { id: collisionHover; cursorShape: Qt.PointingHandCursor }
+        TapHandler {
+            id: collisionPress
+            onTapped: { control.forceActiveFocus(Qt.MouseFocusReason); control.pressed() }
+        }
     }
     function focusCancel() { cancelButton.forceActiveFocus(Qt.TabFocusReason) }
     function focusItems() { return root.visible ? [field, outputUri].concat(root.picker.saveCollision ? [cancelButton, useButton] : []) : [] }

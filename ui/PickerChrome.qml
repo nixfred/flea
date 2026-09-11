@@ -24,8 +24,9 @@ Item {
 
     implicitHeight: ask.height + where.height
 
-    // The board's framed chrome control: a hairline square around a mark, or a hairline box around
-    // a word. Only the accent frame, the recessed ground and which of the two it holds ever differ.
+    // The picker's chrome control: a mark, or a word. GM's 2026-09-11 rule replaced the hairline box
+    // the board drew around each one with a wash behind it, because eight boxes in two strips go
+    // muddy the moment the scale drops. The ink carries the role and never moves; only the wash does.
     component Framed: Item {
         id: control
 
@@ -33,7 +34,6 @@ Item {
         property string label: ""
         property string name: control.label
         property bool primary: false
-        property bool recessed: false
         property bool available: true
         enabled: available
         activeFocusOnTab: available
@@ -61,11 +61,18 @@ Item {
             NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
         }
 
+        // The primary control carries its wash at rest, because it is the one action the request is
+        // asking for; every other control earns one under the pointer or the keyboard.
+        readonly property real wash: !control.available ? 0
+            : (control.activeFocus || press.pressed) ? Theme.washActive
+            : hover.hovered ? Theme.washHover
+            : control.primary ? Theme.washActive : 0
+
         Rectangle {
-            anchors.fill: parent
-            color: control.recessed ? Theme.color.surface : "transparent"
-            border.width: Theme.spacing.hairline
-            border.color: control.available && (control.primary || control.activeFocus) ? Theme.color.accent : root.edge
+            anchors.centerIn: parent
+            width: parent.width
+            height: Theme.chromeControlHeight
+            color: Qt.alpha(control.ink, control.wash)
         }
 
         Flea.Glyph {
@@ -88,7 +95,10 @@ Item {
             textFormat: Text.PlainText
         }
 
-        HoverHandler { cursorShape: control.available ? Qt.PointingHandCursor : Qt.ArrowCursor }
+        HoverHandler {
+            id: hover
+            cursorShape: control.available ? Qt.PointingHandCursor : Qt.ArrowCursor
+        }
 
         TapHandler {
             id: press
@@ -265,8 +275,9 @@ Item {
                         primary: modelData.index === root.picker.filterIndex
                         available: !root.picker.backendUnavailable && !root.picker.submitting
                         onActiveFocusChanged: if (activeFocus) types.reveal(this)
-                        // The board sets the active chip on the recessed plane, so it reads as pressed in.
-                        recessed: modelData.index === root.picker.filterIndex
+                        // The chosen chip is accent ink over the accent wash, which makes it the same
+                        // control the Settings segmented chooser already draws; its recessed plane
+                        // went with the frames.
                         onPressed: root.chipChosen(modelData.index)
                     }
                 }

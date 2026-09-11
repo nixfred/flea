@@ -135,6 +135,16 @@ Singleton {
     // well under its row height); this keeps both denser than a list row without a pixel constant.
     readonly property real chromeRowRatio: 0.72
     readonly property int chromeHeight: Math.round(root.rowHeight * root.chromeRowRatio)
+    // GM's 2026-09-11 rule: a control's state is a fill behind it, never a frame around it, because a
+    // hairline box costs two rules that go muddy as the scale drops. This is the fill's own height in
+    // a chrome strip: the control's caption line box, which is what makes it a label with a ground
+    // rather than a box with a label in it. The hit box stays the whole strip, so it clears hitMin.
+    readonly property int chromeControlHeight: Math.round(root.font.caption * root.lineBoxRatio)
+    // The two steps of that fill, in whichever role the control carries: the pointer's and the
+    // keyboard's. The second is the weight the rail's own active row and the segmented chooser's
+    // active segment already take, so a control under the keyboard reads at the same strength.
+    readonly property real washHover: 0.08
+    readonly property real washActive: 0.14
     // "rwxrwxrwx", Format.permissions is always exactly this wide.
     readonly property int modeChars: 9
     // "1000.0 kB": the SI ladder's tier-boundary rounding is one char wider than "999.9 kB".
