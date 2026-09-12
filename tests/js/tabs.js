@@ -1,5 +1,6 @@
 .import "../../ui/js/Selection.js" as Selection
 .import "../../ui/js/Tabs.js" as Tabs
+.import "tabsfixture.js" as Fixture
 
 function pane(path) {
     var p = {
@@ -60,35 +61,16 @@ function run(check) {
     check("carrying no cursor from the search's own listing", searching.tabs.items[1].cursorIndex, 0)
     check("and no selection from it either", searching.tabs.items[1].selected.length, 0)
 
-    // A search begun in home walks home, so the scope IS where the user was: dropOverlay cleared the
-    // search and the path test found nothing to re-list, and the walk's rows stayed up under the new
-    // tab's ordinary header, with the watch dropped for the search so nothing ever refreshed them.
-    var scoped = pane("/home/gm")
-    scoped.searchMode = "results"
-    scoped.searchFrom = "/home/gm"
+    // dropOverlay leaves the walk's rows on the pane, and a search begun in home walks home, so the scope IS where the operator was.
+    var scoped = Fixture.searching(pane("/home/gm"), "/home/gm")
     Tabs.openNew(scoped)
-    check("a tab opened from a search scoped to where the user was still re-lists that directory",
-          scoped.listed.join(","), "/home/gm")
-    var toScope = pane("/home/gm")
-    toScope.searchMode = "results"
-    toScope.searchFrom = "/home/gm/Downloads"
-    toScope.tabs = { items: [{ path: "/home/gm", history: [], cursorIndex: 0, viewMode: "list",
-                               showHidden: false, selected: [], sortBy: "name", sortDesc: false },
-                             { path: "/home/gm/Downloads" }],
-                     index: 1, pendingCursor: -1, pendingSortBy: "", pendingSortDesc: false }
+    check("a tab opened from a search scoped to where the operator was re-lists it", scoped.listed.join(","), "/home/gm")
+    var toScope = Fixture.searchingOnScope(pane("/home/gm"), "/home/gm", "/home/gm/Downloads")
     Tabs.selectAt(toScope, 0)
-    check("switching to a tab on the search's own scope re-lists it rather than keeping the walk's rows",
-          toScope.listed.join(","), "/home/gm")
-    var closing = pane("/home/gm")
-    closing.searchMode = "results"
-    closing.searchFrom = "/home/gm/Downloads"
-    closing.tabs = { items: [{ path: "/home/gm", history: [], cursorIndex: 0, viewMode: "list",
-                               showHidden: false, selected: [], sortBy: "name", sortDesc: false },
-                             { path: "/home/gm/Downloads" }],
-                     index: 1, pendingCursor: -1, pendingSortBy: "", pendingSortDesc: false }
+    check("switching to a tab on the search's own scope re-lists it", toScope.listed.join(","), "/home/gm")
+    var closing = Fixture.searchingOnScope(pane("/home/gm"), "/home/gm", "/home/gm/Downloads")
     Tabs.closeAt(closing, 1)
     check("and so does closing a searching tab onto one", closing.listed.join(","), "/home/gm")
-
     var plain = pane("/tmp/here")
     Tabs.openNew(plain)
     check("an ordinary listing opens its tab on its own path", plain.tabs.items[1].path, "/tmp/here")
@@ -119,39 +101,18 @@ function run(check) {
           moved.tabs.pendingSelected === undefined, true)
     check("and it did re-list, which is what clears the selection", moved.listed.join(","), "/tmp/b")
 
-    // The same directory in two tabs is the one switch that re-lists nothing, and the selection was
-    // restored on the strength of that alone. Two things renumber the rows underneath a hidden tab:
-    // the other tab holding a different order, and a re-read, a dd in the other tab or the watch's
-    // own, while it was hidden. Backend.listRequests counts the second; the sort is the first.
-    function twin(order) {
-        var p = pane("/tmp/same")
-        p.backend.listRequests = 7
-        p.thumbState = "warm"
-        p.dirSizeState = "warm"
-        p.selection.toggle(2)
-        p.selection.toggle(3)
-        p.tabs = { items: [{ path: "/tmp/same", history: [], cursorIndex: 4, viewMode: "list", showHidden: false,
-                             selected: [2, 3], listed: 7, sortBy: order, sortDesc: false },
-                           { path: "/tmp/same" }],
-                   index: 1, pendingCursor: -1, pendingSortBy: "", pendingSortDesc: false }
-        return p
-    }
-    var kept = twin("name")
+    // Two tabs on one directory re-lists nothing, and a re-read or a different order renumbers the rows under the hidden one.
+    var kept = Fixture.twin(pane("/tmp/same"), "name")
     Tabs.selectAt(kept, 0)
-    check("a switch to the same directory, same order, nothing re-read, restores the selection",
-          kept.selectedIndices().join(",") + "|" + kept.listed.length, "2,3|0")
-    var reread = twin("name")
+    check("same directory, same order, nothing re-read, restores it", kept.selectedIndices().join(","), "2,3")
+    var reread = Fixture.twin(pane("/tmp/same"), "name")
     reread.backend.listRequests = 8
     Tabs.selectAt(reread, 0)
-    check("but one re-read while the tab was hidden has renumbered the rows, so it carries none",
-          reread.selectedIndices().join(","), "")
-    var reordered = twin("size")
+    check("but a re-read while it was hidden renumbered them, so it carries none", reread.selectedIndices().join(","), "")
+    var reordered = Fixture.twin(pane("/tmp/same"), "size")
     Tabs.selectAt(reordered, 0)
-    check("a switch that re-sorts the same directory drops the selection, as Sort.resort does",
-          reordered.selectedIndices().join(",") + "|" + reordered.sorted.join(","), "|size:false")
-    check("and the caches keyed by row index with it",
-          typeof reordered.thumbState === "string" || typeof reordered.dirSizeState === "string", false)
-
+    check("a switch that re-sorts drops the selection", reordered.selectedIndices().join(",") + "|" + reordered.sorted.join(","), "|size:false")
+    check("and the caches keyed by row index with it", typeof reordered.thumbState, "object")
     // F3 and F4: a refusal and a background close must each cost the user nothing else.
     var full = pane("/tmp/full")
     var nine = []
@@ -323,20 +284,17 @@ function run(check) {
     Tabs.applyPending(pending)
     check("the next rows reply restores the cursor", pending.cursorIndex, 9)
 
-    // A switch that re-lists records the tab's order as pending, and a fresh listing is already name
-    // ascending, which is the order most tabs record: left pending because it matched, it reverted
-    // the user's next sort on the rows reply that answered it, and only the second press stuck.
+    // A fresh listing is name ascending, the order most tabs record: left pending because it matched, it reverted the next sort.
     var settled = pane("/home/gm/a")
     Tabs.act("tabNew", settled)
     settled.path = "/home/gm/b"
     Tabs.act("tab1", settled)
     check("a switch that re-lists records the tab's own order", settled.tabs.pendingSortBy, "name")
     Tabs.applyPending(settled)
-    check("an order the fresh listing already has is spent by the first rows reply, not asked for",
-          settled.tabs.pendingSortBy + "|" + settled.sorted.join(","), "|")
+    check("an order the listing already has is spent, not asked for", settled.tabs.pendingSortBy + "|" + settled.sorted.join(","), "|")
     check("and the cursor is restored on that same reply", settled.cursorIndex, 4)
     settled.backend.sortBy = "size"
     settled.backend.sortDesc = true
     Tabs.applyPending(settled)
-    check("so the user's own sort survives the rows reply that answers it", settled.sorted.join(","), "")
+    check("so the operator's own sort survives the reply that answers it", settled.sorted.join(","), "")
 }

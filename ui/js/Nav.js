@@ -156,7 +156,8 @@ function openCursor(pane, opener) {
         pane.message("A directory is already loading.", false)
         return
     }
-    if (!Filter.cursorShown(pane)) {
+    // -1 from viewOf is a row the filter hides; a null list is no filter and answers the row itself.
+    if (Filter.viewOf(pane.shown === undefined ? null : pane.shown, pane.cursorIndex) < 0) {
         pane.message("That row is hidden by the filter.", false)
         return
     }

@@ -32,8 +32,7 @@ function snapshot(pane, path) {
         viewMode: pane.viewMode,
         showHidden: pane.showHidden,
         selected: elsewhere ? [] : pane.selectedIndices().slice(),
-        // Which listing those indices were made on: a re-read while the tab is hidden renumbers them.
-        listed: Number(pane.backend.listRequests) || 0,
+        listed: Number(pane.backend.listRequests) || 0,  // the listing those indices were made on
         sortBy: pane.backend.sortBy,
         sortDesc: pane.backend.sortDesc,
         // The directory's filesystem, so a drop on this tab while another shows decides move against copy.
@@ -96,9 +95,7 @@ function currentIndex(pane) {
     return pane.tabs ? pane.tabs.index : 0
 }
 
-// Answers whether the rows on screen were a search's results, because clearing the search leaves
-// them there: every caller that then lands on the very directory the walk was scoped to has to
-// re-list it, or the walk's rows stay up under an ordinary header with nothing to ever refresh them.
+// Answers whether it dropped a results listing: the walk's rows stay on the pane, so a caller landing on the scope itself must re-list.
 function dropOverlay(pane) {
     var results = pane.searchMode === "results"
     if (pane.searchMode.length > 0) {
@@ -145,8 +142,7 @@ function restoreSelection(pane, selected) {
         pane.selectionVersion++
 }
 
-// relist forces the listing even when the tab names the path the pane is on, for a pane whose rows
-// are a search's and not that directory's.
+// relist re-lists even when the tab names the path the pane is already on.
 function apply(pane, item, relist) {
     var same = !relist && pane.path === item.path && pane.showHidden === item.showHidden
     pane.history = item.history.slice()
@@ -158,8 +154,7 @@ function apply(pane, item, relist) {
             pane.backend.sort(item.sortBy, item.sortDesc)
             pane.backend.sortBy = item.sortBy
             pane.backend.sortDesc = item.sortDesc
-            // The reset Sort.resort runs for the same reorder: every row moves, so the caches keyed by
-            // a row index are stale and a selection of row indices would come to name other files.
+            // Sort.resort's own reset: every row moves, so caches and a selection keyed by row index go stale.
             pane.thumbState = Thumbs.empty()
             pane.dirSizeState = DirSizes.empty()
             pane.clearSelection()
@@ -168,13 +163,10 @@ function apply(pane, item, relist) {
             return
         }
         pane.setCursor(item.cursorIndex)
-        // The rows behind these indices are the rows the selection was made on only while nothing has
-        // re-read the directory since: a delete in the other tab, or the watch's own re-read, shifts
-        // every index below the change, and a selection restored over that names other files.
-        if ((Number(pane.backend.listRequests) || 0) === (Number(item.listed) || 0))
-            restoreSelection(pane, item.selected)
-        else
-            pane.clearSelection()
+        // Only while nothing re-read the directory meanwhile: a dd in the other tab, or the watch's
+        // own re-read, shifts every index below it and a restored selection then names other files.
+        if ((Number(pane.backend.listRequests) || 0) === (Number(item.listed) || 0)) restoreSelection(pane, item.selected)
+        else pane.clearSelection()
         return
     }
     pane.tabs.pendingCursor = item.cursorIndex
@@ -187,9 +179,8 @@ function applyPending(pane) {
     if (!pane.tabs)
         return
     var t = pane.tabs
-    // The pending order is spent on the first rows reply whether or not it has to be asked for: a
-    // fresh listing is name ascending, so a tab recorded in that order was left pending for the life
-    // of the tab, and the user's next sort was reverted to name by the rows reply that answered it.
+    // Spent on the first rows reply asked for or not: a fresh listing is name ascending, so a tab
+    // recorded that way stayed pending and reverted the operator's next sort.
     if (t.pendingSortBy && t.pendingSortBy.length > 0 && pane.backend) {
         var by = t.pendingSortBy
         var desc = t.pendingSortDesc
@@ -235,7 +226,7 @@ function openNew(pane) {
     items.push(snapshot(pane, target))
     pane.tabs = pack(items, items.length - 1)
     // dropOverlay clears the search but leaves the pane on the scope it walked, so the new tab has
-    // to land on the path it just recorded; this is what Escape out of a search already does. A
+    // to land on the path it just recorded; this is what Escape out of a search already does, and a
     // walk scoped to that same path leaves its rows on the pane, so it is re-listed as well.
     if (pane.path !== target || searched)
         pane.openWithoutHistory(target)
