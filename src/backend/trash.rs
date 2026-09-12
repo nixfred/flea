@@ -46,15 +46,23 @@ pub fn list() -> Vec<Entry> {
 // The URI is captured here rather than looked up later, because gio trash --restore refuses an original
 // path outright and two files trashed from one path both list that same path, so a later lookup is ambiguous.
 pub fn trash(paths: &[PathBuf]) -> (Vec<Entry>, usize) {
-    // A path that is not on disk before the call is nothing this call trashed, so it is counted failed and
-    // never journaled: read as "gone, so it went" it became a Trashed step with no URI, and undo stopped
-    // on that step and left the rest of the batch in the trash. A stale listing is where such a path
-    // comes from, and the changed line is what refreshes it.
+    match trash_checked(paths, None) {
+        Ok(result) => result,
+        Err(error) => { eprintln!("flea: {}", error); (Vec::new(), paths.len()) }
+    }
+}
+
+pub(crate) fn trash_checked(paths: &[PathBuf], selection: Option<&[super::menu_actions::Selected]>) -> Result<(Vec<Entry>, usize), String> {
+    super::menu_actions::validate_sources(selection, paths)?;
+    // A path that is not on disk before the call is nothing this call trashed, so it is counted failed
+    // and never journaled: read as "gone, so it went" it became a Trashed step with no URI, and undo
+    // stopped on that step and left the rest of the batch in the trash. A stale listing is where such
+    // a path comes from, and the changed line is what refreshes it.
     let (present, missing): (Vec<&PathBuf>, Vec<&PathBuf>) =
         paths.iter().partition(|p| p.symlink_metadata().is_ok());
     let mut failed = missing.len();
     if present.is_empty() {
-        return (Vec::new(), failed);
+        return Ok((Vec::new(), failed));
     }
     let before = list();
     let mut argv: Vec<String> = vec!["trash".to_string(), "--".to_string()];
@@ -62,6 +70,7 @@ pub fn trash(paths: &[PathBuf]) -> (Vec<Entry>, usize) {
         argv.push(p.to_string_lossy().to_string());
     }
     let refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    super::menu_actions::validate_sources(selection, paths)?;
     // The exit status covers the whole batch, so which paths actually went is read off the filesystem instead.
     let _ = gio(&refs);
     let after = list();
@@ -77,7 +86,7 @@ pub fn trash(paths: &[PathBuf]) -> (Vec<Entry>, usize) {
             None => ok.push(Entry { original: p.clone(), uri: String::new() }),
         }
     }
-    (ok, failed)
+    Ok((ok, failed))
 }
 
 // Only an entry that was not already in the trash before this call can be one this call put there.

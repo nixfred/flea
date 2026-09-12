@@ -1,6 +1,7 @@
 .pragma library
 
 .import "Match.js" as Match
+.import "Thumbs.js" as Thumbs
 
 // The filter narrows the listing already on screen: no walk, no round trip, and every row it keeps
 // is one the backend has already sent. ui/js/Search.js is its bigger sibling, which walks the
@@ -43,11 +44,15 @@ function viewOf(list, row) {
     return list === null ? row : list.indexOf(row)
 }
 
-// Whether the cursor is on a row the filter draws. A query that matches nothing leaves the cursor
-// where it stood, on a row nobody can see, and the operations that fall back to the cursor row read
-// this first: a dd over "Nothing matches" trashed the file under it, the accident prune() exists for.
+// Whether the filter draws a given listing row. A query that matches nothing leaves the cursor where
+// it stood, on a row nobody can see, and the operations that fall back to the cursor row read this
+// first: a dd over "Nothing matches" trashed the file under it, the accident prune() exists for.
+function rowShown(pane, row) {
+    return viewOf(pane.shown === undefined ? null : pane.shown, row) >= 0
+}
+
 function cursorShown(pane) {
-    return viewOf(pane.shown === undefined ? null : pane.shown, pane.cursorIndex) >= 0
+    return rowShown(pane, pane.cursorIndex)
 }
 
 // The canvas's own line under the last row it left standing, States.dc.html "Filter active".
@@ -106,10 +111,21 @@ function keep(asked, list) {
     return out
 }
 
-// A thumbnail plan's asks cut the same way. The drops are left whole: a row asked for before the
-// filter hid it is one the backend should stop working on, not one to keep.
-function cut(work, list) {
-    return { ask: keep(work.ask, list), drop: work.drop }
+// A pending thumbnail can be hidden inside the planner's span as well as outside its viewport.
+function cut(work, list, state) {
+    var drop = work.drop.slice()
+    if (list !== null) {
+        var drawn = {}
+        for (var i = 0; i < list.length; i++) drawn[list[i]] = true
+        var dropping = {}
+        for (var j = 0; j < drop.length; j++) dropping[drop[j]] = true
+        for (var key in state.file) {
+            var row = Number(key)
+            if (state.file[key] === Thumbs.ASKED && drawn[row] !== true && dropping[row] !== true)
+                drop.push(row)
+        }
+    }
+    return { ask: keep(work.ask, list), drop: drop }
 }
 
 // The listing rows a view range covers, for the two planners that take a first and a last.
