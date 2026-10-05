@@ -8,6 +8,8 @@ Item {
 
     required property var pane
     property var dragRows: []
+    // The numbering dragRows were read in, fixed at the lift so a drop after a re-list is refused rather than resolved anew.
+    property real dragListing: 0
     property int dropIndex: -1
     property bool dragCopy: false
     property var dragMime: ({})
@@ -23,6 +25,7 @@ Item {
     function liftBegan(index, centroid) {
         if (!root.pane || root.pane.listInFlight || index < 0 || !root.pane.rowFor(index)) return
         root.dragRows = DragOps.carried(root.pane, index)
+        root.dragListing = root.pane.backend ? root.pane.backend.heldListing : 0
         root.dropIndex = -1
         root.liftMoved(centroid)
         root.dragMime = DragOps.mimeFor(root.pane, root.dragRows, root.dragCopy)
@@ -45,6 +48,7 @@ Item {
     function liftEnded() {
         root.Drag.active = false
         root.dragRows = []
+        root.dragListing = 0
         root.dragMime = ({})
         root.dropIndex = -1
         root.dragCopy = false
@@ -71,14 +75,14 @@ Item {
         bar.setActivity(root, text, Ops.emptyTransfer())
     }
 
-    function enterTarget(marker, urls, name, destDev) {
-        root.feedback = DragOps.feedbackFor(marker, urls)
+    function enterTarget(marker, urls, name, destDev, shelf) {
+        root.feedback = DragOps.feedbackFor(marker, urls, shelf)
         root.showTarget(name, destDev)
     }
 
     function showTarget(name, destDev) {
         if (!root.feedback) return
-        root.dragCopy = DragOps.verbFor(root.feedback.own, root.feedback.copy, root.feedback.dev, destDev) === "copy"
+        root.dragCopy = DragOps.copyingFor(root.feedback, destDev)
         root.say(DragOps.feedbackLine(root.feedback, name, destDev))
     }
 

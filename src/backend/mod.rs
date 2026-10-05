@@ -8,6 +8,9 @@ pub mod archivereq;
 pub mod archivework;
 pub mod mime;
 pub mod fsinfo;
+pub mod fsinforeq;
+pub mod extclass;
+pub mod durable;
 pub mod icons;
 pub mod regfile;
 pub mod imagesize;
@@ -18,7 +21,10 @@ pub mod dirsizereq;
 pub mod listpaths;
 pub mod events;
 pub mod scan;
+pub mod gvfslist;
 pub mod fuzzy;
+// The path bar's folder jump; see docs/protocol.md "jump".
+pub mod jump;
 pub mod search;
 pub mod searchreq;
 pub mod sort;
@@ -32,6 +38,10 @@ pub mod owner;
 pub mod peek;
 pub mod proto;
 mod providers;
+// Directive 71: the LocalSend row's peers and its send, driven against localsend-cli on a pty.
+pub mod localsend;
+// The same CLI's own drawing, read back into rows and sentences.
+pub mod localsendtext;
 pub mod permissions;
 pub mod picker;
 pub mod menu_actions;
@@ -41,23 +51,36 @@ pub mod trashbrowse;
 pub mod trashdelete;
 pub mod trashmanifest;
 pub mod rows;
+pub mod rowguard;
 pub mod run;
+pub mod shelfdrop;
+pub mod timing;
 pub mod md5;
 pub mod thumbspec;
 pub mod thumbargv;
 pub mod thumbcache;
 pub mod sandbox;
+pub mod jail;
 pub mod child;
 pub mod thumbs;
 pub mod thumbreq;
 pub mod thumbwrite;
+// The pre-linked video thumbnailer and the backend's link to it; see AGENTS.md "Thumbnail worker".
+pub mod fdpass;
+pub mod thumbworker;
+pub mod workerlink;
 // File operations and the undo journal they record into.
+pub mod collide;
 pub mod convert;
 pub mod copyfile;
+pub mod copymanifest;
+pub mod manifestdir;
 pub mod copynode;
 pub mod ops;
+pub mod opscancel;
 pub mod opsdispatch;
 pub mod opsreq;
+pub mod movebatch;
 mod mountinfo;
 mod renamecompat;
 pub mod trash;
@@ -65,6 +88,12 @@ pub mod undo;
 pub mod redo;
 // The open listing's directory, watched so an outside change reaches the client; see docs/protocol.md "changed".
 pub mod watch;
+// Test-only: the failing-first manifest behaviour for undo of a failed tree copy.
+#[cfg(test)]
+mod undomanifest_tests;
+// Test-only: the copy manifest under a failing filesystem, each cap in a re-executed child.
+#[cfg(test)]
+mod manifestfsize_tests;
 // Test-only: hard rule 9's sandbox root, so no destructive test names a path outside one.
 #[cfg(test)]
 pub mod testdir;
@@ -74,3 +103,5 @@ pub mod fifotest;
 // Test-only: the one probe that says whether this box can actually run the bwrap jail.
 #[cfg(test)]
 pub mod sandboxprobe;
+
+pub mod dirsizeworker;

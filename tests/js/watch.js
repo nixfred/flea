@@ -32,6 +32,8 @@ function pane() {
     p.clearSelection = function () { p.cleared += 1 }
     p.message = function (text, isError) { p.said.push(text) }
     p.listArea = { primeSettle: function () {} }
+    // ui/PaneSwap.qml with nothing held, so the reset and the query it hands back both run at the request.
+    p.swap = { hold: function () { return false } }
     p.backend = {
         list: function (path, first, hidden) { p.sent.push("list " + path) },
         askFsInfo: function () { p.sent.push("fsinfo") },
@@ -59,7 +61,7 @@ function watched(held, rows, cursorIndex, total) {
     p.selectedAt = -1
     p.selectOnly = function (index) { p.selectedAt = index; p.cursorSetTo = index }
     // The same wrapper ui/Pane.qml carries, so the re-read takes the one route that can refuse.
-    p.openWithoutHistory = function (target) { Nav.openWithoutHistory(p, target) }
+    p.openWithoutHistory = function (target, options) { Nav.openWithoutHistory(p, target, options) }
     return p
 }
 
@@ -95,13 +97,24 @@ function run(check) {
     check("a directory that emptied moves no cursor at all",
           Anchor.apply(emptied, { name: "gone", index: 3, start: 0, path: "/home/gm" }) + "|" + emptied.cursorSetTo, "null|-1")
 
+    // PR 53's own guard: a delete that landed anchors on the row the request went out with, which
+    // for a block is the row the block left; one that failed anchors on the row the cursor was on.
+    var landed = watched(0, [{ n: "a" }, { n: "b" }, { n: "c" }], 2, 3)
+    landed.trashedFirst = 1
+    check("a delete that landed anchors where the block was",
+          Anchor.afterDelete(landed, true).index + "|" + landed.trashedFirst, "1|-1")
+    var refused = watched(0, [{ n: "a" }, { n: "b" }, { n: "c" }], 2, 3)
+    refused.trashedFirst = 1
+    check("and one that failed anchors on the row the cursor was already on",
+          Anchor.afterDelete(refused, false).index + "|" + refused.trashedFirst, "2|-1")
+
     // A cursor deep in a large directory: the re-read answers from row 0, so its own window is asked
     // for and the anchor stands until that window arrives rather than giving up on the first reply.
     var deep = watched(4000, [{ n: "m" }, { n: "n" }], 4001, 100000)
     var deepAnchor = Anchor.watched(deep)
     check("a re-read below the first window asks for the window the cursor was in",
           deep.sent.join(","), "list /home/gm,fsinfo,window 4000")
-    // onRows returns until onListed has run, so a reply always carries its total; see ui/PaneWire.qml.
+    // A rows reply waits until its listed line has run, so it always carries its total; see ui/PaneSwap.qml.
     deep.held = 0
     deep.rows = [{ n: "a" }, { n: "b" }]
     deep.total = 100000

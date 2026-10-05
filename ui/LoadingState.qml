@@ -9,6 +9,8 @@ Item {
 
     readonly property int holdOffMs: 150
     property bool armed: false
+    // Set when the listing swap already held the old rows for its own cap, which spent this hold-off.
+    property bool heldOff: false
 
     // running binds to visibility rather than an onVisibleChanged handler: the pane starts life
     // in "loading", so visible is true at creation and a change handler would never fire.
@@ -21,11 +23,26 @@ Item {
 
     onVisibleChanged: if (!root.visible) root.armed = false
 
-    Spinner {
+    Column {
         anchors.centerIn: parent
-        // The same brand mark as EmptyState's hero, which States.dc.html draws at 48; two row heights was 74.
-        width: Theme.heroMarkSize
-        height: Theme.heroMarkSize
-        visible: root.armed
+        spacing: Theme.spacing.gap
+        visible: root.armed || root.heldOff
+
+        Spinner {
+            anchors.horizontalCenter: parent.horizontalCenter
+            // The same brand mark as EmptyState's hero, which States.dc.html draws at 48; two row heights was 74.
+            width: Theme.heroMarkSize
+            height: Theme.heroMarkSize
+        }
+
+        // States draws the crawl with one word under it, and one word is the whole of what it knows.
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: "reading"
+            color: Theme.color.muted
+            font.family: Theme.font.family
+            font.pixelSize: Theme.font.caption
+            textFormat: Text.PlainText
+        }
     }
 }

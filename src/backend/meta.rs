@@ -26,50 +26,105 @@ pub fn thumbnailable(mode: u32) -> bool {
     mode & S_IFMT == S_IFREG || mode & S_IFMT == S_IFLNK
 }
 
+// The pass runs serially until it has spent SLOW_PASS_MS; see AGENTS.md "Two-phase listing".
+pub const SLOW_PASS_MS: f64 = 10.0;
+const STAT_THREADS: usize = 8;
+
 // Phase 2 stats only what a window asked for, see AGENTS.md "Two-phase listing".
 pub fn stat_range(base: &Path, l: &Listing, start: usize, count: usize) -> (Vec<Meta>, f64) {
+    stat_range_at(base, l, start, count, SLOW_PASS_MS)
+}
+
+// slow_ms is the pass cost above which the remainder goes to threads; tests pass 0 or infinity.
+fn stat_range_at(base: &Path, l: &Listing, start: usize, count: usize, slow_ms: f64) -> (Vec<Meta>, f64) {
+    stat_range_with(base, l, start, count, slow_ms, meta_one)
+}
+
+// The test seam: stat names the per-row function, so a counting or slow stub observes the trigger.
+fn stat_range_with(
+    base: &Path,
+    l: &Listing,
+    start: usize,
+    count: usize,
+    slow_ms: f64,
+    stat: impl Fn(&Path, &str) -> Meta + Sync,
+) -> (Vec<Meta>, f64) {
     let t = Instant::now();
     let end = start.saturating_add(count).min(l.len());
     let start = start.min(end);
     let mut out = Vec::with_capacity(end - start);
     for i in start..end {
-        // corner: a row that vanished between listing and stat reports zeroes, see AGENTS.md.
-        match base.join(l.name(i)).symlink_metadata() {
-            Ok(m) => {
-                // corner: only a symlink pays a second stat, and only so its icon can be a folder; see AGENTS.md "Icons in the row".
-                let is_link = m.file_type().is_symlink();
-                let target_is_dir = is_link
-                    && base.join(l.name(i)).metadata().map(|t| t.is_dir()).unwrap_or(false);
-                // corner: only a symlink pays the readlink, on the same row that already pays the second stat.
-                let target = if is_link {
-                    std::fs::read_link(base.join(l.name(i)))
-                        .map(|t| t.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                out.push(Meta {
-                    size: m.size(),
-                    mtime: m.mtime(),
-                    mode: m.mode(),
-                    target_is_dir,
-                    target,
-                    dev: m.dev(),
-                })
-            }
-            // mode 0 needs no flag beside it: a real st_mode always carries its file-type bits, so
-            // 0 is outside the domain and is itself the "I could not look" marker for the whole row.
-            Err(_) => out.push(Meta {
-                size: 0,
-                mtime: 0,
-                mode: 0,
-                target_is_dir: false,
-                target: String::new(),
-                dev: 0,
-            }),
+        out.push(cached_or(base, l, i, &stat));
+        let elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
+        if elapsed_ms >= slow_ms && end - (i + 1) > 1 && l.threaded_cached(base) {
+            out.extend(stat_parallel_with(base, l, i + 1, end, &stat));
+            break;
         }
     }
     (out, t.elapsed().as_secs_f64() * 1000.0)
+}
+
+// A prefetched gio row answers from its store, a symlink paying one follow-stat; anything else runs the injected stat.
+fn cached_or(base: &Path, l: &Listing, i: usize, stat: &(impl Fn(&Path, &str) -> Meta + Sync)) -> Meta {
+    if let Some(g) = l.gio_for(i) {
+        // corner: a cached symlink pays meta_one's one follow-stat so a linked folder draws as one.
+        let target_is_dir = l.spans.get(i).is_some_and(|s| s.is_symlink)
+            && base.join(l.name(i)).metadata().map(|t| t.is_dir()).unwrap_or(false);
+        return Meta { size: g.size, mtime: g.mtime, mode: g.mode, target_is_dir, target: l.gio_target(g.name_off).to_string(), dev: l.base_dev };
+    }
+    stat(base, l.name(i))
+}
+
+// Contiguous chunks, joined in order, so the rows come back exactly as the serial walk returns them.
+fn stat_parallel_with(
+    base: &Path,
+    l: &Listing,
+    start: usize,
+    end: usize,
+    stat: &(impl Fn(&Path, &str) -> Meta + Sync),
+) -> Vec<Meta> {
+    let threads = STAT_THREADS.min(end - start);
+    let chunk = (end - start).div_ceil(threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|k| {
+                let from = (start + k * chunk).min(end);
+                let to = (from + chunk).min(end);
+                (from, to, s.spawn(move || (from..to).map(|i| cached_or(base, l, i, stat)).collect::<Vec<Meta>>()))
+            })
+            .collect();
+        let mut out = Vec::with_capacity(end - start);
+        for (from, to, h) in handles {
+            // corner: a thread that panicked still owes its rows, so they report zeroes like a vanished row.
+            out.extend(h.join().unwrap_or_else(|_| (from..to).map(|_| zeroes()).collect()));
+        }
+        out
+    })
+}
+
+fn meta_one(base: &Path, name: &str) -> Meta {
+    // corner: a row that vanished between listing and stat reports zeroes, see AGENTS.md.
+    match base.join(name).symlink_metadata() {
+        Ok(m) => {
+            // corner: only a symlink pays a second stat, and only so its icon can be a folder; see AGENTS.md "Icons in the row".
+            let is_link = m.file_type().is_symlink();
+            let target_is_dir = is_link && base.join(name).metadata().map(|t| t.is_dir()).unwrap_or(false);
+            // corner: only a symlink pays the readlink, on the same row that already pays the second stat.
+            let target = if is_link {
+                std::fs::read_link(base.join(name)).map(|t| t.to_string_lossy().to_string()).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            Meta { size: m.size(), mtime: m.mtime(), mode: m.mode(), target_is_dir, target, dev: m.dev() }
+        }
+        Err(_) => zeroes(),
+    }
+}
+
+// mode 0 needs no flag beside it: a real st_mode always carries its file-type bits, so
+// 0 is outside the domain and is itself the "I could not look" marker for the whole row.
+fn zeroes() -> Meta {
+    Meta { size: 0, mtime: 0, mode: 0, target_is_dir: false, target: String::new(), dev: 0 }
 }
 
 // What a sort by size or date reads for every row: the same lstat stat_range makes, without the
@@ -85,18 +140,31 @@ pub struct Stat {
 // 282 ms on twelve threads at 100k rows; available_parallelism follows the affinity mask, so
 // `taskset -c 0` is how the serial figure is taken from the same binary.
 pub fn stat_all(base: &Path, l: &Listing) -> (Vec<Stat>, f64) {
+    stat_all_with(base, l, stat_one)
+}
+
+// The test seam: a prefetched gio listing answers from its store with no stat at all.
+fn stat_all_with(base: &Path, l: &Listing, stat: impl Fn(&Path, &str) -> Stat + Sync) -> (Vec<Stat>, f64) {
     let t = Instant::now();
     let n = l.len();
+    if !l.gio_meta.is_empty() {
+        let out: Vec<Stat> = (0..n).map(|i| match l.gio_for(i) {
+            Some(g) => Stat { size: g.size, mtime: g.mtime },
+            None => stat(base, l.name(i)),
+        }).collect();
+        return (out, t.elapsed().as_secs_f64() * 1000.0);
+    }
     let mut out = vec![Stat { size: 0, mtime: 0 }; n];
     let workers = std::thread::available_parallelism().map(|w| w.get()).unwrap_or(1);
     // Ceiling division, so every row lands in exactly one chunk; max(1) keeps chunks_mut off zero.
     let per_worker = n.div_ceil(workers).max(1);
+    let stat_ref = &stat;
     std::thread::scope(|s| {
         for (k, slots) in out.chunks_mut(per_worker).enumerate() {
             let first = k * per_worker;
             s.spawn(move || {
                 for (j, slot) in slots.iter_mut().enumerate() {
-                    *slot = stat_one(base, l.name(first + j));
+                    *slot = stat_ref(base, l.name(first + j));
                 }
             });
         }
@@ -118,6 +186,24 @@ mod tests {
     use crate::backend::listing::Listing;
     use crate::backend::testdir::TestDir;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn the_threaded_stat_returns_the_serial_rows_in_order() {
+        let d = TestDir::new("statparallel");
+        let mut l = Listing::new();
+        for n in 0..57 {
+            let name = format!("f{:02}", n);
+            std::fs::write(d.join(&name), vec![b'x'; n]).expect("fixture");
+            l.push(&name, false);
+        }
+        let (serial, _) = stat_range_at(d.path(), &l, 3, 50, f64::INFINITY);
+        let (threaded, _) = stat_range_at(d.path(), &l, 3, 50, 0.0);
+        assert_eq!(serial.len(), 50);
+        let sizes = |m: &[Meta]| m.iter().map(|x| (x.size, x.mode, x.mtime)).collect::<Vec<_>>();
+        assert_eq!(sizes(&threaded), sizes(&serial));
+        assert_eq!(threaded[0].size, 3, "row 3 first, in listing order");
+        assert_eq!(threaded[49].size, 52);
+    }
 
     fn fixture(tag: &str) -> (TestDir, Listing) {
         let d = TestDir::new(tag);
@@ -234,5 +320,117 @@ mod tests {
         assert_eq!((stats[1].size, stats[1].mtime), (0, 0), "the zeroes stat_range would send");
         let (none, _) = stat_all(d.path(), &Listing::new());
         assert!(none.is_empty(), "an empty listing spawns no work and answers nothing");
+    }
+
+    #[test]
+    fn a_slow_pass_goes_to_threads_while_a_fast_one_stays_serial() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+        let d = TestDir::new("statelapsed");
+        let mut l = Listing::new();
+        for n in 0..16 {
+            l.push(&format!("f{:02}", n), false);
+        }
+        // Fast: microseconds for all 16 rows, far under the 10 ms budget, so no thread spawns.
+        let seen_fast: Arc<Mutex<HashSet<std::thread::ThreadId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let seen = Arc::clone(&seen_fast);
+        let fast = move |_: &Path, name: &str| {
+            seen.lock().unwrap().insert(std::thread::current().id());
+            Meta { size: name[1..].parse().unwrap_or(0), mtime: 1, mode: 0o100644, target_is_dir: false, target: String::new(), dev: 0 }
+        };
+        let (metas, _) = stat_range_with(d.path(), &l, 0, 16, SLOW_PASS_MS, fast);
+        assert_eq!((metas.len(), metas[0].size, metas[15].size), (16, 0, 15));
+        assert_eq!(seen_fast.lock().unwrap().len(), 1, "a fast pass must not pay for threads");
+        // Slow: one 25 ms row already spends the budget, so the remainder goes across threads.
+        let seen_slow: Arc<Mutex<HashSet<std::thread::ThreadId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let seen = Arc::clone(&seen_slow);
+        let slow = move |_: &Path, name: &str| {
+            seen.lock().unwrap().insert(std::thread::current().id());
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            Meta { size: name[1..].parse().unwrap_or(0), mtime: 1, mode: 0o100644, target_is_dir: false, target: String::new(), dev: 0 }
+        };
+        let (metas, _) = stat_range_with(d.path(), &l, 0, 16, SLOW_PASS_MS, slow);
+        assert_eq!((metas.len(), metas[0].size, metas[15].size), (16, 0, 15));
+        assert!(seen_slow.lock().unwrap().len() > 1, "a slow pass must share the remainder across threads");
+    }
+
+    #[test]
+    fn a_slow_vfat_pass_stays_serial_while_a_slow_local_pass_threads() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+        let d = TestDir::new("statfatserial");
+        // Sample mountinfo: the stick is vfat on 8:17, the card exfat on 8:33, the nas nfs on 0:45.
+        let body = "1 0 8:1 / / rw - ext4 /dev/a rw\n30 1 8:17 / /media/stick rw - vfat /dev/sdb1 rw\n31 1 8:33 / /media/card rw - exfat /dev/sdc1 rw\n32 1 0:45 / /media/nas rw - nfs nas:/share rw\n";
+        let mk = |dev: u64| {
+            let mut l = Listing::new();
+            for n in 0..16 {
+                l.push(&format!("f{:02}", n), false);
+            }
+            l.base_dev = dev;
+            l.threaded_cached_with(body);
+            l
+        };
+        let run = |dev: u64| {
+            let seen: Arc<Mutex<HashSet<std::thread::ThreadId>>> = Arc::new(Mutex::new(HashSet::new()));
+            let slow = {
+                let seen = Arc::clone(&seen);
+                move |_: &Path, name: &str| {
+                    seen.lock().unwrap().insert(std::thread::current().id());
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    Meta { size: name[1..].parse().unwrap_or(0), mtime: 1, mode: 0o100644, target_is_dir: false, target: String::new(), dev: 0 }
+                }
+            };
+            let (metas, _) = stat_range_with(d.path(), &mk(dev), 0, 16, SLOW_PASS_MS, slow);
+            assert_eq!((metas.len(), metas[0].size, metas[15].size), (16, 0, 15));
+            let n = seen.lock().unwrap().len();
+            n
+        };
+        assert_eq!(run(0x811), 1, "a slow vfat pass must not pay for threads");
+        assert_eq!(run(0x821), 1, "a slow exfat pass must not pay for threads");
+        assert!(run(0x801) > 1, "a slow ext4 pass keeps today's threads");
+        assert!(run(45) > 1, "a slow nfs pass keeps today's threads");
+    }
+
+    #[test]
+    fn a_sorted_gio_listing_reads_cached_figures_with_no_stat() {
+        // Rows name files absent from the test dir, so any stat would answer zeroes.
+        let d = TestDir::new("gio-sort-cached");
+        let text = "smb://h/share/b.txt\t30\t(regular)\ttime::modified=300\nsmb://h/share/a.txt\t10\t(regular)\ttime::modified=100\nsmb://h/share/c.txt\t20\t(regular)\ttime::modified=200\n";
+        let build = || crate::backend::gvfslist::build_listing(text, false, d.path().to_str().unwrap()).unwrap();
+        let (stats, _) = stat_all_with(d.path(), &build(), |_: &Path, _: &str| panic!("a cached sort must not stat"));
+        assert_eq!(stats.iter().map(|s| (s.size, s.mtime)).collect::<Vec<_>>(), [(30, 300), (10, 100), (20, 200)]);
+        for by in [crate::backend::sort::SortBy::Size, crate::backend::sort::SortBy::Mtime] {
+            let mut l = build();
+            crate::backend::metasort::sort_by_stat(&mut l, d.path(), by, false, false);
+            assert_eq!((0..l.len()).map(|i| l.name(i)).collect::<Vec<_>>(), ["a.txt", "c.txt", "b.txt"]);
+            // The spans moved, so each row's figures must still be its own name's.
+            let figures: Vec<(u64, i64)> = (0..l.len()).map(|i| l.gio_for(i).map(|g| (g.size, g.mtime)).unwrap_or_default()).collect();
+            assert_eq!(figures, [(10, 100), (20, 200), (30, 300)], "the offset key follows its row through the sort");
+        }
+    }
+
+    #[test]
+    fn a_prefetched_listing_answers_without_any_stat() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let d = TestDir::new("statcached");
+        let text = "smb://h/share/a.txt\t10\t(regular)\ttime::modified=1790537811 unix::mode=33216\nsmb://h/share/sub\t4096\t(directory)\ttime::modified=1790537811 unix::mode=16832\nsmb://h/share/link\t5\t(symlink)\tstandard::is-symlink=TRUE standard::symlink-target=a.txt time::modified=1790537811 unix::mode=41471\n";
+        let l = crate::backend::gvfslist::build_listing(text, false, d.path().to_str().unwrap()).unwrap();
+        let calls = AtomicUsize::new(0);
+        let (metas, _) = stat_range_with(d.path(), &l, 0, 3, SLOW_PASS_MS, |_: &Path, _: &str| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            zeroes()
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no cached row may reach the stat function");
+        assert_eq!((metas[0].size, metas[0].mode), (10, 0o100700));
+        assert_eq!((metas[1].size, metas[1].mode), (4096, 0o40700));
+        let dev = std::os::unix::fs::MetadataExt::dev(&std::fs::metadata(d.path()).unwrap());
+        assert_eq!((metas[2].target.as_str(), metas[2].dev), ("a.txt", dev), "the directory's own device, stat'ed here");
+        let all_calls = AtomicUsize::new(0);
+        let (stats, _) = stat_all_with(d.path(), &l, |_: &Path, _: &str| {
+            all_calls.fetch_add(1, Ordering::SeqCst);
+            Stat { size: 0, mtime: 0 }
+        });
+        assert_eq!(all_calls.load(Ordering::SeqCst), 0, "the size/date pass must read the cache too");
+        assert_eq!((stats.len(), stats[0].size, stats[1].size), (3, 10, 4096));
     }
 }

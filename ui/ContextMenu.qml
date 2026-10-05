@@ -2,7 +2,9 @@ import QtQuick
 import qs.Commons
 import "." as Flea
 import "js/Keymap.js" as Keymap
+import "js/LockedMenu.js" as LockedMenu
 import "js/Menu.js" as Menu
+import "js/MenuRefresh.js" as MenuRefresh
 
 // A plain overlay, not a QQC Popup: the one Controls import cost 10 ms of warm startup.
 Item {
@@ -18,18 +20,20 @@ Item {
     property bool opened: false
     // Driven from ui/Pane.qml's own state, so this file owns no hidden-file logic itself.
     property bool showHidden: false
-    // The application name ui/Opener.qml resolved for the cursor row, shown muted beside "Open".
     // [{id, label}], the reachable Taildrop targets; installed providers keep their disabled reason.
     property var taildropPeers: []
     property bool taildropInstalled: false
+    property var localSend: ({ installed: false, peers: [], checking: false })
     property string taildropReason: ""
     property bool providersRefreshing: false
+    property var lastProviderAnswer: null
     // The archive formats this box actually probed, and whether a converter is installed at all.
     property var archiveFormats: []
     property bool canConvert: false
     property bool canExtract: false
     property bool clipboardAvailable: false
-    // Whether the cursor row is an archive, and whether it is an image; both decided client-side.
+    // Whether the cursor row is a file, an archive, an image; all decided client-side. Only a file row takes send peers.
+    property bool rowIsFile: false
     property bool rowIsArchive: false
     property bool rowIsImage: false
     property int rowMode: 0
@@ -46,6 +50,17 @@ Item {
     // False on a listing's empty space, where Menus.html's background column is what opens instead.
     // openBackground() is its only writer and openAt() puts it back, because one instance serves both.
     property bool hasRow: true
+    // ExtThumbs: src/backend/extclass.rs's word for the directory this opening answers for.
+    property string storageClass: ""
+    // The Locked tile's folder while one is drawn, "" while none is; bound by ui/Pane.qml. A right
+    // click landing on the tile reaches openBackground through the views, which routes it to the
+    // locked folder's own menu rather than the parent's background one.
+    property string tileTarget: ""
+    property int tileMode: 0
+    // The folder this opening answers for, captured at open and cleared at close, the rail's own pattern.
+    property string lockedPath: ""
+    property int lockedMode: 0
+    readonly property bool forLocked: root.lockedPath.length > 0
     property string selectionIdentity: ""
     property string openedIdentity: ""
     // The owner intersects the live monitor work area with this application's viewport.
@@ -60,6 +75,9 @@ Item {
     property string railKey: ""
     readonly property bool forRail: root.railEntries.length > 0
     signal railChosen(string action, string key)
+    // The Locked tile's folder with the row chosen on it, read before close() the way railKey
+    // is: close() clears lockedPath, so Pane.qml cannot read it after the menu is gone.
+    signal lockedChosen(string action, string path)
 
     // ui/Header.qml's own entrance, the third face of this one instance: openForHeader() flips the
     // entries to ui/js/Menu.js headerEntries (the column toggles and the hidden toggle, built from
@@ -104,10 +122,12 @@ Item {
 
     // The row list this menu currently offers; a test reads this back through shell.qml's IPC.
     property var entries: []
+    property bool canTrash: true
+    // Issue 179: the background menu's Sort by flyout offers its forget row only for this folder.
+    property bool hasFolderSort: false
 
     // The construction lives in ui/js/Menu.js now, so the rows are unit-testable without a window:
-    // listingEntries(p) builds the listing's rows from the pane's state, headerEntries() the column
-    // titles' own rows on a right click (see ui/Header.qml), and this file only routes between them.
+    // listingEntries(p) builds the listing's rows from the pane's state and headerEntries() the column titles' own on a right click (ui/Header.qml); this file only routes between them.
     function buildEntries() {
         // Which release a rail row offers is the rail's knowledge, not the listing's, so the rail
         // hands its rows in already built; see ui/js/Mounts.js "railMenu".
@@ -115,60 +135,51 @@ Item {
             return root.railEntries
         if (root.forHeader)
             return Menu.headerEntries(ViewState.hiddenCols, root.showHidden)
+        // The Locked tile's own rows, acting on the locked folder without listing it; never the
+        // background rows, which would create in or paste into the parent standing behind it.
+        if (root.forLocked)
+            return LockedMenu.lockedEntries({ lockedMode: root.lockedMode, hiddenActions: ViewState.menuHidden })
+        var view = MenuRefresh.providerView(root.lastProviderAnswer, MenuRefresh.live(root))
         return Menu.listingEntries({
             showHidden: root.showHidden,
             hasRow: root.hasRow,
             rowInDropbox: root.rowInDropbox,
-            dropboxPath: root.dropboxPath,
+            dropboxPath: view.dropboxPath,
             dropboxInstalled: root.dropboxInstalled,
             dropboxReason: root.dropboxReason,
-            taildropPeers: root.taildropPeers,
+            taildropPeers: root.rowIsFile ? view.taildropPeers : [],
             taildropInstalled: root.taildropInstalled,
             taildropReason: root.taildropReason,
-            providersRefreshing: root.providersRefreshing,
+            taildropRefreshing: view.taildropRefreshing, dropboxRefreshing: view.dropboxRefreshing,
             archiveFormats: root.archiveFormats,
             rowIsArchive: root.rowIsArchive,
             rowIsImage: root.rowIsImage,
             canConvert: root.canConvert,
             canExtract: root.canExtract,
             clipboardAvailable: root.clipboardAvailable,
+            canTrash: root.canTrash,
             openWithApps: root.openWithApps,
             openWithLoaded: root.openWithLoaded,
-            rowMode: root.rowMode,
-            selectionCount: root.selectionCount,
+            rowMode: root.rowMode, selectionCount: root.selectionCount,
+            scripts: Flea.Scripts.entries, localSendInstalled: root.localSend.installed, localSendPeers: root.localSend.peers, localSendChecking: view.localSendChecking,
             // The Menus settings section's stored set; ui/js/Menu.js applyHidden is what reads it.
-            hiddenActions: ViewState.menuHidden
+            hiddenActions: ViewState.menuHidden,
+            // ExtThumbs: the class row's presence and label read these, never "this drive".
+            storageClass: root.storageClass, thumbPreview: ViewState.preview,
+            updateVersion: UpdateCheck.menuVersion, hasFolderSort: root.hasFolderSort
         })
     }
 
-    // The row item at an index, for ui/Ipc.qml: a driven test clicks a menu row without deriving
-    // its geometry from a row count the Menus settings can now change under it.
+    // The row item at an index, for ui/Ipc.qml: a driven test clicks a menu row without deriving its geometry from a row count the Menus settings can now change under it.
     function itemFor(index) { return menuRows.itemAt(index) }
     function submenuItemFor(index) { return subRows.itemAt(index) }
     readonly property var frameItem: frame
     readonly property var submenuFrameItem: flyout
 
     // A separator is never the cursor, so both key steps and the opening cursor skip over one.
-    function stepCursor(from, delta) {
-        var i = from + delta
-        while (i >= 0 && i < root.entries.length) {
-            if (root.entries[i].separator !== true && root.entries[i].disabled !== true)
-                return i
-            i += delta
-        }
-        return from
-    }
-
-    // The same rule inside a flyout: OpenWith.html's tail row sits under its own separator, and a
-    // separator is not somewhere the cursor may rest.
-    function stepSubmenu(from, delta) {
-        var rows = root.submenuEntries, i = from + delta
-        while (i >= 0 && i < rows.length) {
-            if (rows[i].separator !== true && rows[i].disabled !== true) return i
-            i += delta
-        }
-        return from
-    }
+    function stepCursor(from, delta) { return Menu.stepRow(root.entries, from, delta) }
+    // The same rule inside a flyout: OpenWith.html's tail row sits under its own separator.
+    function stepSubmenu(from, delta) { return Menu.stepRow(root.submenuEntries, from, delta) }
 
     function firstRow() {
         return root.stepCursor(-1, 1)
@@ -188,11 +199,31 @@ Item {
 
     // The listing's other entrance, from a right click that landed on no row at all: ui/List.qml,
     // ui/GridArea.qml and ui/ColumnPane.qml each answer for their own empty space, and this one
-    // instance then draws ui/js/Menu.js backgroundEntries instead of the cursor row's.
+    // instance then draws ui/js/Menu.js backgroundEntries instead of the cursor row's. While a
+    // Locked tile is drawn the whole listing is that tile, so the click names the locked folder.
     function openBackground(scenePoint) {
+        if (root.tileTarget.length > 0) {
+            root.openLocked(root.tileTarget, root.tileMode, scenePoint)
+            return
+        }
         root.clearRail()
         root.forHeader = false
         root.hasRow = false
+        root.place(scenePoint)
+    }
+
+    // The Locked tile's own entrance, capturing the folder this opening answers for; every row
+    // below acts on that folder alone, through ui/Pane.qml's locked dispatch rather than the
+    // snapshot the cursor rows take.
+    function openLocked(path, mode, scenePoint) {
+        // An empty locked menu opens no frame and closes a stale one, so a refusal leaves no actionable frame standing.
+        var refusal = LockedMenu.lockedRefusal({ lockedMode: mode, hiddenActions: ViewState.menuHidden })
+        if (refusal.length > 0) { root.close(); root.refused(refusal); return }
+        root.clearRail()
+        root.forHeader = false
+        root.hasRow = false
+        root.lockedPath = path
+        root.lockedMode = mode
         root.place(scenePoint)
     }
 
@@ -206,10 +237,13 @@ Item {
         root.place(scenePoint)
     }
 
-    // Cleared on both ends: a rail entry left standing would put Eject on a listing row's menu.
+    // Cleared on both ends: a rail entry left standing would put Eject on a listing row's menu,
+    // and a locked path left standing would put the old folder's rows on another directory's tile.
     function clearRail() {
         root.railEntries = []
         root.railKey = ""
+        root.lockedPath = ""
+        root.lockedMode = 0
     }
 
     // Where the menu was asked to open, in this item's own coordinates; clampFrame runs twice on it.
@@ -226,14 +260,22 @@ Item {
                              frame.height, Math.max(0, root.workArea.height - 2 * root.workAreaInset))
     }
 
-    // Where any row last saw the pointer, so a row can tell a pointer moving onto it from a row
-    // arriving under a pointer that is standing still. Forgotten each time the menu is placed.
+    // The scene point any row or the ground last saw, so a row tells a moving pointer from one it arrived under.
     property point pointerGlobal: Qt.point(-1, -1)
+    // Placing to its first frame's afterAnimating: Qt hovers what that frame shows, kept rows too, so a "move" then is the rest point.
+    property bool pointerSettling: false
+    Connections {
+        target: root.pointerSettling ? root.Window.window : null
+        function onAfterAnimating() { root.pointerSettling = false }
+    }
 
     function place(scenePoint) {
         if (!root.opened)
             root.focusHolder = root.Window.window ? root.Window.window.activeFocusItem : null
         root.pointerGlobal = Qt.point(-1, -1)
+        root.pointerSettling = true
+        // A place that changes nothing drawn schedules no frame, so it asks for the one that ends the settle.
+        if (root.Window.window) root.Window.window.update()
         var point = root.mapFromItem(null, scenePoint)
         root.placeX = point.x
         root.placeY = point.y
@@ -267,12 +309,17 @@ Item {
     // The menu closes before the action runs, so it never hangs over the listing that action opened.
     function choose(action) {
         if (!root.validateChoice(action, "")) return
-        // Both read before close(), which is what clears them.
+        // Both read before close(), which is what clears the rail rows and the locked path.
         var key = root.railKey
         var rail = root.forRail
+        var locked = root.lockedPath
         root.close()
         if (rail) {
             root.railChosen(action, key)
+            return
+        }
+        if (locked.length > 0) {
+            root.lockedChosen(action, locked)
             return
         }
         root.chosen(action)
@@ -296,14 +343,21 @@ Item {
 
     // Fresh capabilities use the normal inventory; selection stays on its action and placement uses the existing clamp.
     function refreshProviderRows() {
-        if (!root.opened || root.forRail || root.forHeader) return
+        if (!root.opened || root.forRail || root.forHeader || root.forLocked) return
         var next = root.buildEntries()
-        var selection = Menu.refreshedCursor(root.entries, next, root.cursor, root.openSubmenuRow, root.submenuCursor)
+        // An answer that changed nothing drawn leaves every row standing: no model reset, no cursor move.
+        if (MenuRefresh.unchanged(root.entries, next)) return
+        var selection = MenuRefresh.refreshedCursor(root.entries, next, root.cursor, root.openSubmenuRow, root.submenuCursor)
         root.entries = next
         root.cursor = selection.cursor
         root.openSubmenuRow = selection.submenuRow
         root.submenuCursor = selection.submenuCursor
         Qt.callLater(function() { if (root.opened) scroll.reveal(menuRows.itemAt(root.cursor)) })
+    }
+    // A finished refresh: its answer is what later opens draw while their own refresh runs behind them, see ui/js/MenuRefresh.js.
+    function providersSettled() {
+        root.lastProviderAnswer = MenuRefresh.settle(MenuRefresh.live(root))
+        root.refreshProviderRows()
     }
 
     // Rebuild only to validate; rows stay fixed while the menu is open under the pointer.
@@ -342,9 +396,12 @@ Item {
 
     // The ground owns every pointer event outside the rows: hover stops here, the wheel is swallowed, and the click that closes is taken on release so the row beneath never sees a press the close would have handed it.
     MouseArea {
+        id: ground
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         hoverEnabled: true
+        onEntered: root.pointerGlobal = ground.mapToItem(null, ground.mouseX, ground.mouseY)
+        onPositionChanged: function (mouse) { root.pointerGlobal = ground.mapToItem(null, mouse.x, mouse.y) }
         onClicked: root.close()
         onWheel: function (wheel) { wheel.accepted = true }
     }
@@ -365,6 +422,7 @@ Item {
 
         Flea.CardScroll {
             id: scroll
+            gutter: 0 // Menus keep no scroll gutter; the bar overlays.
             anchors.fill: parent
             anchors.topMargin: Theme.spacing.rowPaddingY
             anchors.bottomMargin: Theme.spacing.rowPaddingY
@@ -381,11 +439,11 @@ Item {
                     required property int index
                     width: rows.width
                     entry: row.modelData
-                    compact: root.forRail && root.railKey !== "trash" && root.railKey !== "trashSelection"
                     current: !root.submenuOpen && root.cursor === row.index
                     lastPointerGlobal: root.pointerGlobal
                     onPointerSeen: function (at) { root.pointerGlobal = at }
                     onPointerMoved: {
+                        if (root.pointerSettling) return
                         root.cursor = row.index
                         if (Menu.hasSubmenu(row.modelData)) root.openSubmenu(row.index)
                         else root.openSubmenuRow = -1
@@ -400,26 +458,14 @@ Item {
             }
         }
         }
-        Rectangle {
+        Flea.MenuEdgeFade {
             anchors.top: parent.top
-            width: parent.width
-            height: Theme.spacing.gap
             visible: scroll.contentY > 0
-            gradient: Gradient {
-                GradientStop { position: 0; color: Theme.color.surface }
-                GradientStop { position: 1; color: Qt.rgba(Theme.color.surface.r, Theme.color.surface.g, Theme.color.surface.b, 0) }
-            }
         }
-        Rectangle {
+        Flea.MenuEdgeFade {
             anchors.bottom: parent.bottom
-            width: parent.width
-            height: Theme.spacing.gap
             visible: scroll.contentY + scroll.height < scroll.contentHeight
             rotation: 180
-            gradient: Gradient {
-                GradientStop { position: 0; color: Theme.color.surface }
-                GradientStop { position: 1; color: Qt.rgba(Theme.color.surface.r, Theme.color.surface.g, Theme.color.surface.b, 0) }
-            }
         }
     }
 
@@ -442,6 +488,7 @@ Item {
 
         Flea.CardScroll {
             id: subScroll
+            gutter: 0 // Menus keep no scroll gutter; the bar overlays.
             anchors.fill: parent
             anchors.topMargin: Theme.spacing.rowPaddingY
             anchors.bottomMargin: Theme.spacing.rowPaddingY
@@ -470,7 +517,10 @@ Item {
                               glyph: subRow.modelData.glyph !== undefined ? subRow.modelData.glyph
                                    : Menu.submenuGlyph(root.entries[root.openSubmenuRow].action) })
                     current: root.submenuCursor === subRow.index
-                    onPointerMoved: if (subRow.modelData.separator !== true) root.submenuCursor = subRow.index
+                    // A flyout opened by key can land under the resting pointer too, so it reads the same point.
+                    lastPointerGlobal: root.pointerGlobal
+                    onPointerSeen: function (at) { root.pointerGlobal = at }
+                    onPointerMoved: if (!root.pointerSettling && subRow.modelData.separator !== true) root.submenuCursor = subRow.index
                     onActivated: root.chooseSub(subRow.modelData.id)
                 }
             }

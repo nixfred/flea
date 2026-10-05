@@ -18,6 +18,10 @@ Item {
     property bool hovered: false
     property string thumb: ""
     property bool selected: false
+    // List.qml derives it per visible row, so an empty clipboard costs nothing.
+    property string clipMark: ""
+    // The mark's own size: 12 px in the muted role, 9 px after the name, per the board.
+    readonly property int clipPx: 12
     // The per-response dictionary row.k indexes into; List.qml hands down the same array every row of one response shares.
     property var kindNames: []
     // The row is its own rename editor while this is true, per the States artboard.
@@ -29,14 +33,11 @@ Item {
     property bool dropCopying: false
     // A directory's recursive size, resolved by index in List.qml the same way thumb already is; null until it arrives.
     property var dirSize: null
-    // The picker draws a check in front of every row, so its rows start one slot further in; the
-    // window's own rows leave this at zero and are laid out exactly as before.
+    // The picker's rows start one slot further in for its check; the window's own leave this at zero.
     property real leadingSlot: 0
     // The picker's second difference: SendPicker.html's narrow date column and its compact form.
     property bool compactDate: false
     property bool foregroundMetadata: false
-    // The window's own third: only FleaWindow.html and Search.html end a directory name with a slash.
-    property bool dirSuffix: false
     readonly property real dateWidth: root.dualMode ? Theme.dualColumn.date : root.compactDate ? Theme.column.pickerDate : Theme.column.date
     // The picker's third: it hides the columns its own board does not draw, and the window's own set stays ViewState's.
     property var hiddenCols: ViewState.hiddenCols
@@ -47,24 +48,29 @@ Item {
     // A search row's name is its path relative to the search root, so the name and location split here; see docs/protocol.md "search".
     readonly property bool searching: !root.filtering && root.searchQuery.length > 0 && root.row !== null && root.row.n.length > 0
     readonly property string displayName: root.row ? (root.searching ? Match.base(root.row.n) : root.row.n) : ""
-    // The name, then this surface's directory slash, then a link's target; never both, a link's d is false.
-    readonly property string dirMark: root.dirSuffix && root.row && root.row.d ? "/" : ""
     // FleaWindow.html and ThemeRoles.html both spell it "shell -> /usr/share/omarchy".
     readonly property string linkMark: root.row && root.row.l ? " -> " + root.row.l : ""
-    readonly property string decoratedName: root.displayName + root.dirMark + root.linkMark
+    // The name, then a link's target; a folder carries no slash, its glyph and the folders-first order already say it.
+    readonly property string decoratedName: root.displayName + root.linkMark
     readonly property string locationText: root.searching ? Match.location(root.row.n) : ""
     readonly property var nameRun: Match.run(root.displayName, root.searchQuery)
+    // Assigned by List.qml's shared budgets; -2 keeps the local geometry default for PickerList and drop-target rows.
+    property int assignedNameBudget: -2
+    property real paintWidth: 0 // Caller view width; fills paint to it under the lane, content keeps rowWidth.
+    // Local measured geometry for PickerList, drop targets and unlaid rows; a function so ordinary rows pay no floor.
+    function localNameBudget() { return Theme.bodyAdvance > 0 && name.width > 0 ? Math.floor(name.width / Theme.bodyAdvance) : -1 }
+    // Ordinary List rows share; drop targets keep local measured geometry with the label's own reserve.
+    readonly property int nameBudget: root.dropTarget ? root.localNameBudget() : (root.assignedNameBudget > -2 ? root.assignedNameBudget : root.localNameBudget())
+    readonly property string elidedName: root.nameRun.start < 0 && root.nameBudget >= 0 ? Format.middleElide(root.decoratedName, root.nameBudget) : root.decoratedName
     // A long name would otherwise hide the location entirely, and the location is what tells two matches apart.
     readonly property real nameShare: 0.66
-    // What the name and location share: the row minus its padding, the mark, the gap between the
-    // two of them, and the size column while it is still being drawn.
+    // What the name and location share: the row less its padding, the mark, their own gap, and the size column while it is drawn.
     readonly property real searchSlot: Math.max(0, root.width - 2 * Theme.spacing.rowPaddingX - root.markSlot - 2 * Theme.spacing.gap
                                                 - (root.sizeShown ? root.sizeWidth + Theme.spacing.gap : 0))
 
-    // The columns this row's width affords, and which of them this row is drawing. A column that
-    // is not drawn takes neither its width nor its gap, so the chain collapses onto the one to its
-    // right and the name takes back the whole of it.
-    readonly property var cols: root.dualMode ? Theme.dualColumns(root.width, root.hiddenCols) : Theme.columns(root.width, root.hiddenCols, root.dateWidth)
+    // The columns this row's width affords. A column that is not drawn takes neither its width nor its gap, so the chain collapses onto its right neighbour.
+    property var assignedCols: null // Set by List.qml; null keeps the local default below.
+    readonly property var cols: root.assignedCols !== null ? root.assignedCols : (root.dualMode ? Theme.dualColumns(root.width, root.hiddenCols) : Theme.columns(root.width, root.hiddenCols, root.dateWidth))
     readonly property bool modeShown: !root.searching && root.cols.mode
     // The search column set keeps Size and drops the other three, so only this one ignores searching.
     readonly property bool sizeShown: root.cols.size
@@ -75,20 +81,28 @@ Item {
     property bool lifted: root.cursor || root.hovered || root.selected || root.dropTarget
     // The OEM derives its secondary ink from the foreground rather than reading a separate palette key.
     readonly property color dim: Qt.darker(Theme.color.foreground, 1.4)
+    // One ink serves four cells, lifts metadata to foreground and carries cut dim without child opacity.
+    readonly property color cellInk: Util.alpha(root.lifted || root.foregroundMetadata ? Theme.color.foreground : root.dim, root.dimOpacity)
+    // A cut row dims its content, never the state fills, and every dimmed child reads this one value.
+    readonly property real dimOpacity: root.clipMark === "scissors" ? Theme.disabledOpacity : 1
+    // One helper, so each dimmed colour multiplies the cut without a second binding.
+    function dimmed(base) { return Util.alpha(base, root.dimOpacity) }
     // A thumbnail path is not a thumbnail: the cache file can be evicted between the pane's answer
     // and the decode, and a row whose Image failed to load has to be marked by its kind instead.
     readonly property bool thumbDrawn: root.thumb.length > 0 && thumbImage.status !== Image.Error
 
-    implicitHeight: root.renaming ? Math.max(Theme.fileRowHeight, editor.implicitHeight + 2 * Theme.spacing.rowPaddingY) : Theme.fileRowHeight
+    implicitHeight: root.renaming && renameLoader.item
+                    ? Math.max(Theme.fileRowHeight, renameLoader.item.implicitHeight + 2 * Theme.spacing.rowPaddingY) : Theme.fileRowHeight
     implicitWidth: parent ? parent.width : 0
 
     Accessible.role: Accessible.ListItem
     Accessible.name: root.displayName
     // The compact form drops the clock, so the picker's rows carry the whole stamp here instead; this tree has no tooltip.
-    Accessible.description: root.compactDate && root.row && root.row.m !== null ? Format.date(root.row.m, Date.now()) : ""
+    Accessible.description: root.compactDate && root.row && root.row.m !== null ? Format.date(root.row.m) : ""
 
     Rectangle {
-        anchors.fill: parent
+        width: root.paintWidth > 0 ? root.paintWidth : parent.width
+        height: parent.height
         // The cursor uses accent ink; marked rows keep the OEM's distinct selection rung.
         color: root.cursor && root.paneFocused ? Style.selectedAccentFill
              : root.selected && root.paneFocused ? Style.selectionFill
@@ -104,14 +118,50 @@ Item {
         color: root.paneFocused ? Theme.color.accent : Theme.color.muted
     }
 
-    // The drop frame: the board's hairline of accent inset in the row over a faint accent wash, the
-    // wash at the hover rung's alpha because the token wins over the mock's own 0.07.
-    Rectangle {
-        visible: root.dropTarget
+    // One Loader for the drop frame, the drop label and the clip mark, so a row at rest builds none.
+    Loader {
+        id: dropLoader
+        active: root.dropTarget || (root.clipMark.length > 0 && !root.renaming && !root.searching)
         anchors.fill: parent
-        color: Util.alpha(Theme.color.accent, Style.hoverFillAlpha)
-        border.width: Theme.spacing.hairline
-        border.color: Theme.color.accent
+        sourceComponent: Item {
+            property alias label: dropLabel
+            property alias mark: clipGlyph
+            anchors.fill: parent
+            // The board's accent hairline over a faint wash at the hover rung's alpha: the token wins over the mock's own 0.07.
+            Rectangle {
+                visible: root.dropTarget
+                width: root.paintWidth > 0 ? root.paintWidth : parent.width
+                height: parent.height
+                color: Util.alpha(Theme.color.accent, Style.hoverFillAlpha)
+                border.width: Theme.spacing.hairline
+                border.color: Theme.color.accent
+            }
+            // The board's own words in the columns' place: caption type in the accent, against the row padding.
+            Text {
+                id: dropLabel
+                visible: root.dropTarget
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.spacing.rowPaddingX
+                anchors.verticalCenter: parent.verticalCenter
+                text: DragOps.label(root.dropCopying)
+                color: Theme.color.accent
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.caption
+                textFormat: Text.PlainText
+            }
+            // A clipboard row under a drag keeps its mark beside the label, one pixel above the text centre line.
+            Glyph {
+                id: clipGlyph
+                visible: root.clipMark.length > 0 && !root.renaming && !root.searching
+                width: root.clipPx
+                height: root.clipPx
+                x: root.clipMark.length > 0 ? root.nameItem().x + Math.min(root.nameItem().implicitWidth, root.nameItem().width) + Theme.spacing.gap : 0
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.verticalCenterOffset: -1
+                name: root.clipMark
+                color: Theme.color.muted
+            }
+        }
     }
 
     // A thumbnail is a decoded image and stays one; the icon beside it is a native mark. The two
@@ -119,6 +169,7 @@ Item {
     Image {
         id: thumbImage
         visible: root.thumbDrawn
+        opacity: root.dimOpacity
         anchors.left: parent.left
         anchors.leftMargin: Theme.spacing.rowPaddingX + root.leadingSlot
         anchors.verticalCenter: parent.verticalCenter
@@ -142,8 +193,7 @@ Item {
         width: root.markSlot
         height: root.markSlot
         name: root.row ? Icons.glyphForRow(root.row.i, root.row.p) : Icons.FALLBACK
-        color: root.dualMode ? (root.cursor && root.paneFocused ? Theme.color.accent : Theme.color.muted)
-            : root.lifted ? Theme.color.foreground : root.dim
+        color: root.dimmed(root.dualMode ? (root.cursor && root.paneFocused ? Theme.color.accent : Theme.color.muted) : root.lifted ? Theme.color.foreground : root.dim)
     }
 
     // What the row actually draws, so a test catches the binding being cut and not only the lookup.
@@ -158,29 +208,32 @@ Item {
 
     // ui/List.qml's click-away commit reaches the open editor through this, and reads back whether
     // a commit really happened: an abandon must not leave renameKeepsPointerRow standing.
-    function commitEditor() { return editor.commit() }
+    function commitEditor() { return renameLoader.item ? renameLoader.item.commit() : false }
 
     // What the editor holds right now, for tests/ui.sh through ui/Ipc.qml's renameEditorText.
-    readonly property string editorText: editor.current
-    readonly property Item editorField: editor
+    readonly property string editorText: renameLoader.item ? renameLoader.item.current : ""
+    readonly property Item editorField: renameLoader.item as Item
 
     signal renameCommitted(string newName)
     signal renameAbandoned()
 
-    // The editor takes the name column's own box, so the row does not change shape when it opens.
-    Flea.RenameField {
-        id: editor
-        visible: root.renaming
+    // Built only while renaming; a Loader destroys it without a hide, so RenameField's begun guard owns the abandon.
+    Loader {
+        id: renameLoader
+        active: root.renaming
         anchors.left: icon.right
         anchors.leftMargin: Theme.spacing.gap
         anchors.right: mode.left
         anchors.rightMargin: root.modeShown ? Theme.spacing.gap : 0
         anchors.verticalCenter: parent.verticalCenter
-        height: implicitHeight
-        pane: root.renamePane
-        name: root.displayName
-        onCommitted: function (newName) { root.renameCommitted(newName) }
-        onAbandoned: root.renameAbandoned()
+        sourceComponent: Flea.RenameField {
+            height: implicitHeight
+            pane: root.renamePane
+            viewport: root.ListView.view
+            name: root.displayName
+            onCommitted: function (newName) { root.renameCommitted(newName) }
+            onAbandoned: root.renameAbandoned()
+        }
     }
 
     // corner: a filename is arbitrary text, so PlainText everywhere; MatchText draws its runs the same way.
@@ -190,46 +243,57 @@ Item {
         anchors.left: icon.right
         anchors.leftMargin: Theme.spacing.gap
         anchors.right: mode.left
-        anchors.rightMargin: root.modeShown ? Theme.spacing.gap : 0
+        anchors.rightMargin: (root.modeShown ? Theme.spacing.gap : 0) + (root.clipMark.length > 0 ? Theme.spacing.gap + root.clipPx : 0) + (root.dropTarget ? root.dropExtra() : 0)
         anchors.verticalCenter: parent.verticalCenter
-        text: root.decoratedName
+        text: root.elidedName
         matchStart: root.nameRun.start
         matchLength: root.nameRun.length
-        color: root.nameColor()
-        accent: Theme.color.accent
+        color: root.dimmed(root.nameColor())
+        accent: root.dimmed(Theme.color.accent)
+        elideMiddle: true
     }
 
     // The search column set: the name shrinks to its content so the location beside it has room.
-    MatchText {
-        id: searchName
-        visible: root.searching
+    // Both are built only while searching, over the same span the two drew in side by side.
+    Loader {
+        active: root.searching
         anchors.left: icon.right
-        anchors.leftMargin: Theme.spacing.gap
-        anchors.verticalCenter: parent.verticalCenter
-        width: Math.min(implicitWidth, root.searchSlot * root.nameShare)
-        text: root.decoratedName
-        matchStart: root.nameRun.start
-        matchLength: root.nameRun.length
-        color: root.nameColor()
-        accent: Theme.color.accent
-    }
-
-    Text {
-        id: location
-        visible: root.searching
-        anchors.left: searchName.right
         anchors.leftMargin: Theme.spacing.gap
         anchors.right: size.left
         anchors.rightMargin: root.sizeShown && !root.dualMode ? Theme.spacing.gap : 0
-        anchors.verticalCenter: parent.verticalCenter
-        text: root.locationText
-        color: root.cellColor()
-        font.family: Theme.font.family
-        font.pixelSize: Theme.font.caption
-        elide: Text.ElideLeft
-        textFormat: Text.PlainText
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        sourceComponent: Item {
+            MatchText {
+                id: searchName
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.min(implicitWidth, root.searchSlot * root.nameShare)
+                text: root.decoratedName
+                matchStart: root.nameRun.start
+                matchLength: root.nameRun.length
+                color: root.dimmed(root.nameColor())
+                accent: root.dimmed(Theme.color.accent)
+                // A search base name keeps its extension the same way a list name does.
+                elideMiddle: true
+            }
+
+            Text {
+                anchors.left: searchName.right
+                anchors.leftMargin: Theme.spacing.gap
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.locationText
+                color: root.cellInk
+                font.family: Theme.font.family
+                font.pixelSize: Theme.font.caption
+                elide: Text.ElideLeft
+                textFormat: Text.PlainText
+            }
+        }
     }
 
+    // The four metadata cells bind straight to the row; a hidden column holds no text, because a laid-out Text costs memory drawn or not.
     Text {
         id: mode
         anchors.right: size.left
@@ -237,14 +301,13 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         visible: root.modeShown && !root.dropTarget
         width: root.modeShown ? Theme.column.mode : 0
-        text: root.row ? Format.permissions(root.row.p) : ""
-        color: root.cellColor()
+        text: root.modeShown && root.row ? Format.permissions(root.row.p) : ""
+        color: root.cellInk
         font.family: Theme.font.family
         font.pixelSize: Theme.font.caption
         elide: Text.ElideRight
         textFormat: Text.PlainText
     }
-
     Text {
         id: size
         anchors.right: modified.left
@@ -252,15 +315,14 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         visible: root.sizeShown && !root.dropTarget
         width: root.sizeShown ? root.sizeWidth : 0
-        text: root.row ? root.sizeText() : ""
-        color: root.cellColor()
+        text: root.sizeShown && root.row ? root.sizeText() : ""
+        color: root.cellInk
         font.family: Theme.font.family
         font.pixelSize: Theme.font.caption
         horizontalAlignment: Text.AlignRight
         elide: Text.ElideRight
         textFormat: Text.PlainText
     }
-
     Text {
         id: modified
         anchors.right: kind.left
@@ -268,15 +330,15 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         visible: root.dateShown && !root.dropTarget
         width: root.dateShown ? root.dateWidth : 0
-        text: root.dateText()
-        color: root.cellColor()
+        text: root.dateShown ? root.dateText() : ""
+        // Short-circuit on the switch first, so with the switch off no row enters the library.
+        color: (ViewState.highlightToday && Format.isRecent(root.row ? root.row.m : null, ViewState.todayStart)) ? root.dimmed(Theme.color.foreground) : root.cellInk
         font.family: Theme.font.family
         font.pixelSize: Theme.font.caption
         horizontalAlignment: Text.AlignRight
         elide: Text.ElideRight
         textFormat: Text.PlainText
     }
-
     Text {
         id: kind
         anchors.right: parent.right
@@ -284,24 +346,11 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         visible: root.kindShown && !root.dropTarget
         width: root.kindShown ? Theme.column.kind : 0
-        text: root.row ? root.kindText() : ""
-        color: root.cellColor()
+        text: root.kindShown && root.row ? root.kindText() : ""
+        color: root.cellInk
         font.family: Theme.font.family
         font.pixelSize: Theme.font.caption
         elide: Text.ElideRight
-        textFormat: Text.PlainText
-    }
-
-    // The board's own words in the columns' place: caption type in the accent, against the row padding.
-    Text {
-        visible: root.dropTarget
-        anchors.right: parent.right
-        anchors.rightMargin: Theme.spacing.rowPaddingX
-        anchors.verticalCenter: parent.verticalCenter
-        text: DragOps.label(root.dropCopying)
-        color: Theme.color.accent
-        font.family: Theme.font.family
-        font.pixelSize: Theme.font.caption
         textFormat: Text.PlainText
     }
 
@@ -333,11 +382,6 @@ Item {
         return Format.fileUri(root.thumb) + "?m=" + root.row.m
     }
 
-    // A lifted row is a surface the theme never modelled, so its text takes the strongest ink; see the plan's Task 2 table.
-    function cellColor() {
-        return root.lifted || root.foregroundMetadata ? Theme.color.foreground : root.dim
-    }
-
     // A directory's own row.s is its dirent size, not the walk's, so this reads root.dirSize instead, see docs/protocol.md "dirsized".
     function sizeText() {
         // A link's own st_size is the length of its target path, which is not a size anyone means.
@@ -352,7 +396,7 @@ Item {
         return (root.dirSize.partial ? ">" : "") + Format.size(root.dirSize.bytes)
     }
 
-    // The window's own four forms, or the picker's compact three; both are cell text and nothing more.
+    // The window's one stamp, or the picker's compact three; both are cell text and nothing more.
     function dateText() {
         if (!root.row) {
             return ""
@@ -361,7 +405,7 @@ Item {
         if (root.row.m === null) {
             return "--"
         }
-        return root.compactDate ? Format.compactDate(root.row.m, Date.now()) : Format.date(root.row.m, Date.now())
+        return root.compactDate ? Format.compactDate(root.row.m) : Format.date(root.row.m)
     }
 
     // row.k indexes root.kindNames; an index past its bounds (a row held over from an older listing) reads as empty, never a crash.
@@ -406,5 +450,25 @@ Item {
         case "kind": return kind
         }
         return null
+    }
+
+    // Test seams as functions, so no row at rest binds to drop geometry.
+    function dropBuilt() { return root.dropTarget && dropLoader.item !== null }
+    function dropLabelLeft() { return root.dropTarget && dropLoader.item ? dropLoader.item.label.x : -1 }
+    function dropLabelText() { return root.dropTarget && dropLoader.item ? dropLoader.item.label.text : "" }
+    function nameRight() { return name.x + name.width }
+    // The clip mark's right edge, so the drop phase reads the drawn mark and not the name.
+    function clipRight() { var m = dropLoader.item ? dropLoader.item.mark : null; if (!m || !m.visible || m.width <= 0) return -1; return m.x + m.width }
+    // The drawn name and mark, so a dim check reads colours and not an opacity.
+    function nameItem() { return name }
+    function markColor() { return icon.color }
+    // Extra beyond the column gap, so a fitting name keeps its width while a long one clears the label.
+    function dropExtra() {
+        if (!root.dropTarget || !dropLoader.item) return 0
+        var labelW = dropLoader.item.label.implicitWidth
+        var hidden = root.width - Theme.spacing.rowPaddingX - mode.x
+        var base = root.modeShown ? Theme.spacing.gap : 0
+        var need = labelW + Theme.spacing.gap - hidden - base
+        return need > 0 ? need : 0
     }
 }

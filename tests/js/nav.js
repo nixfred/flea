@@ -10,13 +10,18 @@ function pane() {
         listInFlight: false,
         listedSeen: true,
         path: "/home/gm",
+        // What ui/js/Nav.js records for the listing it asks for; ui/Pane.qml dropPath reads it.
+        listingPath: "",
         total: 40,
         held: 10,
         rows: [{ n: "a" }],
+        // The filter's own list, null while nothing is filtered, which is what the pane always carries.
+        shown: null,
         kindNames: ["Plain text document"],
         thumbState: "stale",
         dirSizeState: "stale",
         cursorIndex: 7,
+        pendingSelect: "",
         renamingIndex: 4,
         trashArmedAt: 12345,
         listingState: "ready",
@@ -25,14 +30,19 @@ function pane() {
         filterQuery: "scr",
         filterTyping: true,
         cleared: 0,
+        // The collision card, shut; ui/CollideHost.qml opened is what the mouse back button reads.
+        collide: { opened: false },
         said: [],
         sent: []
     }
     p.clearSelection = function () { p.cleared += 1 }
     p.message = function (text, isError) { p.said.push(text) }
     p.listArea = { primeSettle: function () {} }
+    // ui/PaneSwap.qml with nothing held, so the reset runs at the request; tests/js/swap.js holds.
+    p.swap = { hold: function () { return false } }
     p.backend = {
-        list: function (path, first, hidden) { p.sent.push("list " + path) },
+        // A listing that answers is what moves the pane, ui/PaneSwap.qml applyListed, never the request.
+        list: function (path, first, hidden) { p.sent.push("list " + path); if (!p.refuses) p.path = path },
         askFsInfo: function () { p.sent.push("fsinfo") }
     }
     return p
@@ -50,7 +60,7 @@ function browsing(history) {
     // ui/Pane.qml menuVisible: the pane's own context menu, which covers the listing it was raised over.
     p.menuVisible = false
     p.open = function (target) { Nav.open(p, target) }
-    p.openWithoutHistory = function (target) { Nav.openWithoutHistory(p, target) }
+    p.openWithoutHistory = function (target, options) { Nav.openWithoutHistory(p, target, options) }
     return p
 }
 
@@ -67,16 +77,15 @@ function entered(row) {
     return went.join("|")
 }
 
-// The two readings a crumb check makes: what the bar draws, and where each piece would take you.
-function drawn(list) {
-    return list.map(function (c) { return c.text }).join("")
-}
-
-function targets(list) {
-    return list.map(function (c) { return c.path }).join(" ")
-}
-
 function run(check) {
+    // StatusBar board rule 4's first lane: a refused hop leaves the breadcrumb where it was, which is
+    // what taking the path off the answer buys. Nothing else in this suite can tell the two apart.
+    var refused = browsing(["/home/gm"])
+    refused.refuses = true
+    Nav.open(refused, "/home/gm/Work/inner")
+    check("a refused hop asks for the directory", refused.sent.join("|"), "list /home/gm/Work/inner|fsinfo")
+    check("and leaves the pane standing where it was", refused.path, "/home/gm/Work")
+
     var travel = browsing(["/home/gm"])
     Nav.back(travel)
     check("back preserves the departed directory for forward", travel.forwardHistory.join("|"), "/home/gm/Work")
@@ -112,6 +121,11 @@ function run(check) {
           fresh.trashArmedAt + "|" + fresh.cursorIndex + "|" + fresh.cleared, "0|0|1")
     check("and asks the backend for the directory it was given",
           fresh.sent.join(","), "list /home/gm/Work,fsinfo")
+    // A drop taken while the reply is still out lands in the directory asked for and not the one
+    // being left, so the request is recorded; the stub above answers at once, which the real
+    // backend does not, and ui/Pane.qml dropPath reads this only while the listing is in flight.
+    check("and records the directory it asked for, which is where a drop now lands",
+          fresh.listingPath, "/home/gm/Work")
     // The Locked state carries a mode string, so the reset that forgets the state must forget the
     // mode with it: a new directory drawn under the last one's permissions would be a false claim.
     check("and forgets the mode the last denial drew", fresh.lockedMode, 0)
@@ -124,8 +138,11 @@ function run(check) {
     // for, and nothing may be forgotten on a navigation that was refused.
     var busy = pane()
     busy.listInFlight = true
+    busy.listingPath = "/home/gm/Music"
     Nav.openWithoutHistory(busy, "/home/gm/Work")
     check("a refused navigation sends nothing", busy.sent.length, 0)
+    check("and leaves the listing in flight owning the path a drop would land in",
+          busy.listingPath, "/home/gm/Music")
     check("and says so", busy.said.join(""), "A directory is already loading.")
     check("and leaves the filter standing, because the listing did not change", busy.filterQuery, "scr")
     check("and leaves the cursor where it was", busy.cursorIndex, 7)
@@ -180,6 +197,16 @@ function run(check) {
           menuUp.path + "|" + menuUp.sent.length, "/home/gm/Work|0")
     check("and keeps the history entry it would have popped, so the menu's rows stay its own",
           menuUp.history.join(","), "/home/gm")
+    // The collision card holds a transfer into the folder it asked about, so the pane stays behind it.
+    var cardUp = browsing(["/home/gm"])
+    cardUp.collide = { opened: true }
+    Nav.mouseBack(cardUp)
+    check("mouse back behind an open collision card goes nowhere at all",
+          cardUp.path + "|" + cardUp.sent.length + "|" + cardUp.history.join(","), "/home/gm/Work|0|/home/gm")
+    var noHistory = browsing([])
+    noHistory.collide = { opened: true }
+    Nav.mouseBack(noHistory)
+    check("and does not climb either", noHistory.path + "|" + noHistory.sent.length, "/home/gm/Work|0")
 
     // open()'s own copy of the guard back() carries. The push happened before openWithoutHistory
     // could refuse the listing, so a crumb clicked during a load stacked the directory the pane was
@@ -191,33 +218,6 @@ function run(check) {
     check("and stays where it is, saying the sentence every refused navigation gives",
           busyOpen.path + "|" + busyOpen.said.join(""),
           "/home/gm/Work|A directory is already loading.")
-
-    // Issue 45: the chrome's path as the pieces a click can land on. The pieces have to concatenate
-    // to exactly the one line they replace, or the bar draws something nobody asked for, and each
-    // has to name the directory ui/ChromeBar.qml would hand to pathEntered.
-    var under = Nav.crumbs("/home/gm/Work/claude", "/home/gm")
-    check("the crumbs read as the tilde path they replace", drawn(under), "~/Work/claude")
-    check("and each one names the directory it would open",
-          targets(under), "/home/gm /home/gm/Work /home/gm/Work/claude")
-    check("and only the last is the directory the pane is already in",
-          under.map(function (c) { return c.last }).join(","), "false,false,true")
-    var atHome = Nav.crumbs("/home/gm", "/home/gm")
-    check("home itself is one crumb, the bare tilde",
-          drawn(atHome) + "|" + targets(atHome), "~|/home/gm")
-    var outside = Nav.crumbs("/usr/share", "/home/gm")
-    check("a path outside home keeps its leading separator, which is a crumb of its own",
-          drawn(outside) + "|" + targets(outside), "/usr/share|/ /usr /usr/share")
-    var root = Nav.crumbs("/", "/home/gm")
-    check("the root is one crumb and it is the last one",
-          drawn(root) + "|" + targets(root) + "|" + root.length, "/|/|1")
-    var noHome = Nav.crumbs("/home/gm/Work", "")
-    check("with no home in the environment every component is its own crumb",
-          drawn(noHome) + "|" + targets(noHome), "/home/gm/Work|/ /home /home/gm /home/gm/Work")
-    // ui/js/Format.js tilde writes /home/gmx as "~x", which is a wrong label on a line nobody can
-    // click and a wrong destination on one they can, so the crumbs test the separator themselves.
-    var sibling = Nav.crumbs("/home/gmx/deep", "/home/gm")
-    check("a sibling whose name merely starts with home's is outside it, and says so",
-          drawn(sibling) + "|" + targets(sibling), "/home/gmx/deep|/ /home /home/gmx /home/gmx/deep")
 
     // A keyboard rename reveals the row it renamed; one the pointer committed keeps the row the
     // click chose instead, because a write operation targets the selection ahead of the cursor.
@@ -239,4 +239,61 @@ function run(check) {
     check("a directory still navigates and every other row still goes to the opener",
           entered({ n: "Work", d: true }) + " / " + entered({ n: "notes.txt", i: "text-x-generic", s: 12 }),
           "/home/gm/Work|| / ||/home/gm/notes.txt")
+
+    // h climbs the tree and keeps the place: the parent listing selects the directory we left.
+    var up = pane()
+    up.path = "/home/gm/Work"
+    up.opened = []
+    up.open = function (path) { up.opened.push(path) }
+    Nav.parent(up)
+    check("h opens the parent directory", up.opened.join(""), "/home/gm")
+    check("and names the directory it left, so the cursor lands on it",
+          up.pendingSelect, "/home/gm/Work")
+
+    var rootDir = pane()
+    rootDir.path = "/"
+    rootDir.opened = []
+    rootDir.open = function (path) { rootDir.opened.push(path) }
+    Nav.parent(rootDir)
+    check("the root does not climb", rootDir.opened.length, 0)
+    check("and does not plant a select on a climb that did not happen",
+          rootDir.pendingSelect, "")
+
+    var home = pane()
+    home.path = "/home"
+    home.opened = []
+    home.open = function (path) { home.opened.push(path) }
+    Nav.parent(home)
+    check("a child of the root climbs to the root", home.opened.join(""), "/")
+    check("and still names the directory it left", home.pendingSelect, "/home")
+
+    var busyUp = pane()
+    busyUp.listInFlight = true
+    busyUp.path = "/home/gm/Work"
+    busyUp.opened = []
+    busyUp.open = function (path) { busyUp.opened.push(path) }
+    Nav.parent(busyUp)
+    check("a refused climb sends nothing", busyUp.opened.length, 0)
+    check("and plants no select", busyUp.pendingSelect, "")
+
+    // Issue 193, measured on the box at 0.3.4: Backspace on a refused hop's Locked tile climbed past the
+    // folder the breadcrumb names, a whole listing away from the refused folder's own Permissions row.
+    function lockedUp(path, asked) {
+        var p = pane()
+        p.path = path
+        p.listingPath = asked
+        p.listingState = "locked"
+        p.opened = []
+        p.open = function (to) { p.opened.push(to) }
+        Nav.parent(p)
+        return p.opened.join("") + " " + p.pendingSelect
+    }
+    check("up from a refused hop's Locked tile goes back to the folder the breadcrumb names, on the refused one",
+          lockedUp("/home/gm/Downloads", "/home/gm/Downloads/locked"), "/home/gm/Downloads /home/gm/Downloads/locked")
+    check("while a folder refused on its own re-read has no row there to return to, so it still climbs",
+          lockedUp("/home/gm/Work", "/home/gm/Work"), "/home/gm /home/gm/Work")
+    check("up from a Locked tile of a refused sidebar hop opens the refused folder's own parent, on the refused row",
+          lockedUp("/home/gm/Downloads", "/root"), "/ /root")
+    check("up from a Locked tile of a bookmark with a trailing slash trims it first",
+          lockedUp("/home/gm/Downloads", "/root/"), "/ /root")
 }

@@ -10,7 +10,6 @@ use crate::backend::owner;
 use crate::backend::sandbox;
 use crate::json::escape;
 use std::path::Path;
-use std::os::unix::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -25,6 +24,8 @@ const SIGKILL: i32 = 9;
 pub struct Meta {
     pub width: u32,
     pub height: u32,
+    // EXIF orientation 1 to 8 from the same header read, 1 for anything that names none; 5 to 8 swap the sides.
+    pub orientation: u8,
     // Milliseconds, and the sample rate in hertz; both zero for anything that is not media.
     pub duration_ms: u64,
     pub sample_rate: u32,
@@ -50,7 +51,7 @@ pub struct Meta {
 
 impl Meta {
     fn empty() -> Meta {
-        Meta { width: 0, height: 0, duration_ms: 0, sample_rate: 0, entries: 0, unpacked: 0, names: Vec::new(), archive_failed: false, lines: 0, lines_partial: false, lines_failed: false, target: String::new(), target_is_dir: false, owner: String::new() }
+        Meta { width: 0, height: 0, orientation: 1, duration_ms: 0, sample_rate: 0, entries: 0, unpacked: 0, names: Vec::new(), archive_failed: false, lines: 0, lines_partial: false, lines_failed: false, target: String::new(), target_is_dir: false, owner: String::new() }
     }
 }
 
@@ -64,9 +65,10 @@ pub fn read(path: &Path, text: bool, media: bool, archive: Option<&Formats>) -> 
         m.target = link.to_string_lossy().to_string();
         m.target_is_dir = path.metadata().map(|t| t.is_dir()).unwrap_or(false);
     }
-    if let Some((w, h)) = imagesize::dimensions(path) {
-        m.width = w;
-        m.height = h;
+    if let Some(image) = imagesize::header(path) {
+        m.width = image.width;
+        m.height = image.height;
+        m.orientation = image.orientation;
     }
     if let Some(formats) = archive {
         let listed = list_archive(path, formats);
@@ -107,17 +109,14 @@ fn list_archive(path: &Path, formats: &Formats) -> Contents {
     if !sandbox::available() {
         return failed;
     }
-    let full = sandbox::wrap_readonly(&inner, path);
-    let mut child = match std::process::Command::new(&full[0])
-        .args(&full[1..])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        // Its own group, so the watchdog can end the whole tree in one signal.
-        .process_group(0)
-        .spawn()
-    {
-        Ok(c) => c,
+    let mut full = sandbox::wrap_readonly(&inner, path);
+    sandbox::add_status(&mut full, inner.len());
+    let mut jailed = match crate::backend::jail::spawn_jailed(&full, |cmd| {
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::null());
+    }) {
+        Ok(j) => j,
         Err(_) => return failed,
     };
     // The parser's own deadline cannot fire while it is blocked inside a read, so a tool that stops
@@ -126,7 +125,8 @@ fn list_archive(path: &Path, formats: &Formats) -> Contents {
     let done = Arc::new(AtomicBool::new(false));
     let watchdog = {
         let done = Arc::clone(&done);
-        let pid = child.id() as i32;
+        let pid = jailed.child.id() as i32;
+        let sandbox_pid = Arc::clone(&jailed.sandbox_pid);
         std::thread::spawn(move || {
             let step = std::time::Duration::from_millis(50);
             let mut waited = std::time::Duration::ZERO;
@@ -139,15 +139,13 @@ fn list_archive(path: &Path, formats: &Formats) -> Contents {
                 waited += step;
             }
             if !done.load(Ordering::Relaxed) {
-                // The GROUP, not the pid: the listing tool runs under bwrap and prlimit, so killing
-                // the direct child leaves a grandchild holding the pipe open and the read still
-                // blocks. Measured: pid alone left a stalled tool running and the request unbounded.
-                // Safe: the child is still ours until wait() reaps it, and done gates that.
+                // The group ends bwrap and the sandbox pid ends the tool --new-session hid; the child is still ours until wait() reaps it.
+                crate::backend::jail::kill_sandbox(&sandbox_pid, pid);
                 unsafe { kill(-pid, SIGKILL) };
             }
         })
     };
-    let mut contents = match child.stdout.take() {
+    let mut contents = match jailed.child.stdout.take() {
         Some(out) => parse_reader(std::io::BufReader::new(out), &spec),
         None => {
             done.store(true, Ordering::Relaxed);
@@ -155,18 +153,16 @@ fn list_archive(path: &Path, formats: &Formats) -> Contents {
             return failed;
         }
     };
-    // A read cut short at its deadline is the one path where the tool is still alive, so the group
-    // kill has to happen BEFORE the watchdog is stood down. Storing done first disarmed it exactly
-    // there and left only child.kill(), which this file's own comment says is not enough: the tool
-    // runs under prlimit and bwrap and a grandchild survives it.
+    // A read cut short at its deadline leaves the tool alive, so the kills happen BEFORE done stands the watchdog down.
     if contents.failed {
-        unsafe { kill(-(child.id() as i32), SIGKILL) };
+        crate::backend::jail::kill_sandbox(&jailed.sandbox_pid, jailed.child.id() as i32);
+        unsafe { kill(-(jailed.child.id() as i32), SIGKILL) };
     }
     done.store(true, Ordering::Relaxed);
     let _ = watchdog.join();
     // The tool's own verdict, because an unreadable archive otherwise answers zero entries and the
     // tile cannot tell that apart from a read that has not happened yet.
-    match child.wait() {
+    match jailed.child.wait() {
         Ok(status) if status.success() => {}
         _ => contents.failed = true,
     }
@@ -178,7 +174,7 @@ fn list_archive(path: &Path, formats: &Formats) -> Contents {
     contents
 }
 
-// Sample output: {"t":"meta","row":4,"w":0,"h":0,"ms":0,"rate":0,"entries":214,"unpacked":3400,"afailed":false,"names":[{"n":"ui","d":true}],"lines":0,"partial":false,"lfailed":false,"target":"","targetdir":false,"owner":"gm"}
+// Sample output: {"t":"meta","row":4,"w":0,"h":0,"orient":1,"ms":0,"rate":0,"entries":214,"unpacked":3400,"afailed":false,"names":[{"n":"ui","d":true}],"lines":0,"partial":false,"lfailed":false,"target":"","targetdir":false,"owner":"gm"}
 pub fn meta_line(row: usize, m: &Meta) -> String {
     let names: Vec<String> = m
         .names
@@ -186,8 +182,8 @@ pub fn meta_line(row: usize, m: &Meta) -> String {
         .map(|e| format!(r#"{{"n":"{}","d":{}}}"#, escape(&e.name), e.is_dir))
         .collect();
     format!(
-        r#"{{"t":"meta","row":{},"w":{},"h":{},"ms":{},"rate":{},"entries":{},"unpacked":{},"afailed":{},"names":[{}],"lines":{},"partial":{},"lfailed":{},"target":"{}","targetdir":{},"owner":"{}"}}"#,
-        row, m.width, m.height, m.duration_ms, m.sample_rate, m.entries, m.unpacked,
+        r#"{{"t":"meta","row":{},"w":{},"h":{},"orient":{},"ms":{},"rate":{},"entries":{},"unpacked":{},"afailed":{},"names":[{}],"lines":{},"partial":{},"lfailed":{},"target":"{}","targetdir":{},"owner":"{}"}}"#,
+        row, m.width, m.height, m.orientation, m.duration_ms, m.sample_rate, m.entries, m.unpacked,
         m.archive_failed, names.join(","), m.lines, m.lines_partial, m.lines_failed,
         escape(&m.target), m.target_is_dir, escape(&m.owner)
     )
@@ -369,6 +365,22 @@ mod tests {
         m.target = "/tmp/say \"hi\"".to_string();
         assert!(meta_line(4, &m).contains(r#""target":"/tmp/say \"hi\"""#));
         assert!(meta_line(4, &m).starts_with(r#"{"t":"meta","row":4,"w":0,"h":0"#));
+    }
+
+    #[test]
+    fn a_turned_photo_s_orientation_rides_on_the_same_line_and_as_stored_reads_one() {
+        assert!(meta_line(4, &Meta::empty()).contains(r#""h":0,"orient":1,"ms""#));
+        let d = crate::backend::testdir::TestDir::new("metaorient");
+        // FFD8, APP1 "Exif\0\0" with IFD0's one entry naming orientation 6, then SOF0 carrying 4000 x 3000.
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x22];
+        v.extend_from_slice(b"Exif\0\0II\x2A\x00\x08\x00\x00\x00\x01\x00\x12\x01\x03\x00\x01\x00\x00\x00\x06\x00\x00\x00\x00\x00\x00\x00");
+        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x0B, 0xB8, 0x0F, 0xA0]);
+        v.extend_from_slice(&[0u8; 8]);
+        let path = d.join("phone.jpg");
+        std::fs::write(&path, &v).unwrap();
+        let m = read(&path, false, false, None);
+        assert_eq!((m.width, m.height, m.orientation), (4000, 3000, 6));
+        assert!(meta_line(1, &m).contains(r#""w":4000,"h":3000,"orient":6,"#));
     }
 
     // The real path a meta request takes: run.rs hands spawn these arguments and reads back one OpMsg.

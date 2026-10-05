@@ -1,0 +1,52 @@
+.pragma library
+
+// Sample input: primaryFor("collide") === "keep", isDestructive("trash", "delete") === true.
+// Variant A: one control for every dialog button, sized by Theme, primary is the safe Enter action.
+
+var PAD = 9
+var GAP = 9
+var RING = 2
+var DISABLED_OPACITY = 0.55
+var WASH_HOVER = 0.08
+var WASH_PRESS = 0.14
+// The pressed shrink every tappable mark takes, and how long it eases.
+var PRESS_SCALE = 0.96
+var PRESS_MS = 150
+// The shipped label size at base 14, the fallback when no body text stop is known.
+var LABEL_SIZE = 14
+
+// One label size for every button: the body Theme sizes from the text stop, so buttons grow with the rows beside them.
+function labelSizeFor(body) {
+    var n = Math.round(Number(body))
+    return n > 0 ? n : LABEL_SIZE
+}
+
+// One primary per dialog, fixed: it never moves with focus.
+var PRIMARY = {
+    trash: "cancel",
+    collide: "keep",
+    openWith: "open",
+    convert: "convert",
+    newFile: "create",
+    moveTo: "move",
+    copyTo: "copy",
+    network: "action",
+    permissions: "apply",
+    picker: "accept"
+}
+
+// A destructive action rests as the error label in a muted frame, never primary.
+var DESTRUCTIVE = {
+    trash: { "delete": true },
+    collide: { "replace": true },
+    picker: { "replace": true }
+}
+
+function primaryFor(dialog) {
+    return PRIMARY[dialog] || ""
+}
+
+function isDestructive(dialog, name) {
+    var set = DESTRUCTIVE[dialog] || {}
+    return set[name] === true
+}

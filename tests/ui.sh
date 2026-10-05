@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Drives the real Quickshell window with omarchy-drive and asserts through the read-only IPC seam.
-# Usage: ./tests/ui.sh [cursor|terminal|open|rows|click|menu|hidden|selection|select|colour|lifted|icons|thumbs|hashcache|stale|nosweep|oem|header|overflow|focus|preview|network|netmark|networktimeout|networklive|gvfs|sharebrowser|unmount|eject|rename|renamelife|taildrop|grid|columns|operations|tabs|openterminal|renderer|settings ...]; networklive is opt-in.
+# Usage: ./tests/ui.sh [cursor|terminal|open|rows|click|ctrlclick|viewrestart|dd|sortrestart|dirsortstale|editplace|mute|placemenu|runscript|unmounted|sidebar|menu|hidden|selection|watch|optical|select|colour|lifted|icons|thumbs|hashcache|stale|nosweep|oem|header|overflow|focus|preview|network|netmark|networktimeout|networklive|gvfs|sharebrowser|unmount|phones|eject|rename|renamelife|taildrop|grid|columns|columnsbackground|reclick|colroot|operations|tabs|openterminal|renderer|settings|makedefault|scrolllane|noblank|previewswap ...]; networklive is opt-in.
 set -u
 set -o pipefail
 # Hard rule 9's guard, which owns FIXTURE_ROOT and every create and delete this suite makes.
@@ -113,6 +113,8 @@ settle_s=0.4
 chrome_band_inset=2
 # Wide enough to hold the elided head's opaque fill and the hairline either side of it; that gap measured at x 80 to 86.
 chrome_edge_sample_width=200
+# The rule is the house hairline, foreground at 12 percent, so a crumb glyph under it shows through: measured 2 of 255 on this box, against 23 for the surface an opaque fill would expose in its place.
+chrome_edge_max_spread=8
 # The Hyprland corner arc shows wallpaper through the window's own top-left pixels, so start past it.
 header_sample_x=16
 header_sample_width=600
@@ -128,7 +130,7 @@ stale_mtime_back_s=86400
 preview_play_wait_s=5
 
 ipc() {
-    omarchy-drive ipc -p "$flea_ui" flea "$@"
+    omarchy-drive ipc -p "$flea_ui/boot" flea "$@"
 }
 
 # Window class used by every preflight, focus check and injected keystroke.
@@ -247,12 +249,13 @@ owned_trash_monitors() {
 }
 
 kill_flea() {
-    local pid pids found waited ownership deadline=$((SECONDS + drain_wait_s))
+    local pid pids found waited ownership deadline=$((SECONDS + drain_wait_s)) dead_pids=""
     [[ "$run_root" == /* && -f "$run_root/.flea-test-sandbox" ]] || fail "native process ownership root is missing"
     pids=$(flea_pids) || fail "cannot enumerate native windows for teardown"
     for pid in $pids; do
         [[ " $foreign_pids " == *" $pid "* ]] && continue
         if flea_process_owned "$pid"; then
+            dead_pids+=" $pid"
             kill "$pid" || {
                 [[ ! -d "$(flea_process_dir "$pid")" ]] || fail "could not stop owned native window $pid"
             }
@@ -283,10 +286,28 @@ kill_flea() {
         [[ -z "$pids" ]] || found=1
         pids=$(owned_trash_monitors) || fail "cannot inspect Trash monitor ownership while draining"
         [[ -z "$pids" ]] || found=1
-        [[ "$found" -eq 0 ]] && return
+        [[ "$found" -eq 0 ]] && break
         sleep 0.05
     done
-    fail "an owned backend or Trash monitor survived for $drain_wait_s s after its window closed"
+    (( found == 0 )) || fail "an owned backend or Trash monitor survived for $drain_wait_s s after its window closed"
+    # Hyprland lists a dead window 100 to 150 ms past its exit, so the next launch waits, bounded, until no client carries a dead pid.
+    deadline=$((SECONDS + drain_wait_s))
+    local hclients still
+    while :; do
+        still=""
+        hclients=$(hyprctl clients -j 2>/dev/null) || fail "cannot inspect Hyprland clients while draining"
+        jq -e 'type == "array"' <<< "$hclients" >/dev/null \
+            || fail "hyprctl clients -j returned non-JSON while draining, so no dead window can be ruled out"
+        for pid in $dead_pids; do
+            [[ -n "$pid" ]] || continue
+            if jq -e --argjson pid "$pid" '[.[] | select(.pid == $pid)] | length > 0' <<< "$hclients" >/dev/null; then
+                still+=" $pid"
+            fi
+        done
+        [[ -z "${still// /}" ]] && return
+        (( SECONDS < deadline )) || fail "Hyprland still lists dead Flea window${still} after $drain_wait_s s; fixtures kept"
+        sleep 0.05
+    done
 }
 
 # The four roots carry the markers; every per-case directory inside them is a scratch, so a listing
@@ -383,8 +404,7 @@ assert_theme() {
         || fail "this window paints foreground '$seen', not the live theme's $real_foreground, so no shot or colour claim from it is real"
 }
 
-# Theme reads exactly these four files, and they are copied rather than symlinked so that nothing
-# inside a sandbox this suite rm -rf's ever points back out at the operator's home.
+# Fixture copies the launcher's real theme inputs as regular bytes, absence kept.
 fixture_home_make() {
     local home="$1" theme="$1/.local/state/omarchy/current"
     sandbox_scratch "$home"
@@ -392,6 +412,9 @@ fixture_home_make() {
     cp "$real_state_dir/theme/colors.toml" "$theme/theme/colors.toml"
     cp "$real_state_dir/theme/shell.toml" "$theme/theme/shell.toml"
     cp "$real_state_dir/theme.name" "$theme/theme.name"
+    if [[ -f "$real_state_dir/theme/icons.theme" ]]; then
+        cp "$real_state_dir/theme/icons.theme" "$theme/theme/icons.theme"
+    fi
     # A box with no user shell.toml really does render at 12, so its absence is copied faithfully too.
     if [[ -f "$real_user_shell_toml" ]]; then
         mkdir -p "$home/.config/omarchy"
@@ -452,7 +475,8 @@ wait_listing() {
             continue
         fi
         row=$(ipc rowAt 0 2>/dev/null || printf loading)
-        if [[ "$total" == "$want_total" && "$row" != "loading" ]]; then
+        # The listing swap keeps the old rows and count up while the next listing is out, so the count alone can match early.
+        if [[ "$total" == "$want_total" && "$row" != "loading" && "$(ipc listInFlight 2>/dev/null)" == false ]]; then
             return
         fi
         sleep 0.05
@@ -465,12 +489,12 @@ wait_listing_wall() {
     local want_total="$1" timeout_s="${2:-20}" total=unavailable row=loading state=unavailable
     local deadline=$(( $(date +%s%3N) + timeout_s * 1000 ))
     while (( $(date +%s%3N) < deadline )); do
-        total=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea total 2>/dev/null || printf unavailable)
+        total=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea total 2>/dev/null || printf unavailable)
         if [[ "$want_total" == 0 ]]; then
-            state=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea state 2>/dev/null || printf unavailable)
+            state=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea state 2>/dev/null || printf unavailable)
             [[ "$total" == 0 && "$state" == empty ]] && return 0
         else
-            row=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea rowAt 0 2>/dev/null || printf loading)
+            row=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea rowAt 0 2>/dev/null || printf loading)
             [[ "$total" == "$want_total" && "$row" != "loading" ]] && return 0
         fi
         sleep 0.05
@@ -482,7 +506,7 @@ wait_path_wall() {
     local want="$1" timeout_s="${2:-20}" seen=unavailable
     local deadline=$(( $(date +%s%3N) + timeout_s * 1000 ))
     while (( $(date +%s%3N) < deadline )); do
-        seen=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea path 2>/dev/null || printf unavailable)
+        seen=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea path 2>/dev/null || printf unavailable)
         [[ "$seen" == "$want" ]] && return 0
         sleep 0.05
     done
@@ -493,9 +517,9 @@ find_row_wall() {
     local want="$1" timeout_s="${2:-20}" total=0 seen="" path=unavailable row
     local deadline=$(( $(date +%s%3N) + timeout_s * 1000 ))
     while (( $(date +%s%3N) < deadline )); do
-        total=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea total 2>/dev/null || printf 0)
+        total=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea total 2>/dev/null || printf 0)
         for ((row = 0; row < total && $(date +%s%3N) < deadline; row++)); do
-            seen=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea rowAt "$row" 2>/dev/null || true)
+            seen=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea rowAt "$row" 2>/dev/null || true)
             if [[ "$seen" == "$want|"* ]]; then
                 printf '%s\n' "$row"
                 return 0
@@ -504,7 +528,7 @@ find_row_wall() {
         sleep 0.05
     done
     [[ "$total" =~ ^[0-9]+$ ]] || total=-1
-    path=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea path 2>/dev/null || printf unavailable)
+    path=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea path 2>/dev/null || printf unavailable)
     printf 'NETWORKLIVE traversal expected=%s total=%s path=%s\n' "$want" "$total" "$path" >&2
     return 1
 }
@@ -517,6 +541,17 @@ wait_path() {
         sleep 0.05
     done
     fail "the pane never opened $want, it is at $seen"
+}
+
+# Waits up to 3 s for scrollbarState .shown to read $1, since the scroller holds 1 s and fades for 0.3 s before it hides.
+wait_scrollbar_shown() {
+    local want="$1" why="$2" seen
+    for _attempt in $(seq 1 60); do
+        seen=$(ipc scrollbarState | jq -r '.shown')
+        [[ "$seen" == "$want" ]] && return
+        sleep 0.05
+    done
+    fail "scrollbar: $why (shown is $seen)"
 }
 
 # The rail's two FileViews load asynchronously, so a key pressed right after launch can race them.
@@ -598,7 +633,7 @@ click_row() {
 # Steps the menu cursor onto a row by its label rather than by a hardcoded number of Downs, so a
 # case survives the operations design's own rows landing between the ones it cares about.
 menu_seek() {
-    local want="$1" entries target i cursor steps step
+    local want="$1" entries target i cursor steps step label
     entries=$(ipc contextMenuEntries)
     target=-1
     i=0
@@ -617,6 +652,30 @@ menu_seek() {
         settle
     done
     fail "menu_seek: could not reach $want, cursor stalled at $(ipc contextMenuCursor)"
+}
+
+# The same for an open flyout, whose rows are whatever the backend or the scripts directory offered,
+# so no case counts Downs: Sort by is four orders and Run script is however many scripts are there.
+menu_seek_submenu() {
+    local want="$1" entries target i cursor step label
+    entries=$(ipc contextMenuSubmenuEntries)
+    target=-1
+    i=0
+    local IFS='|'
+    for label in $entries; do
+        [[ "$label" == "$want" ]] && { target=$i; break; }
+        i=$((i + 1))
+    done
+    unset IFS
+    [[ "$target" -ge 0 ]] || fail "menu_seek_submenu: no row labelled $want in $entries"
+    for ((step = 0; step <= i; step++)); do
+        cursor=$(ipc menuState | jq -er '.submenuCursor') \
+            || fail "menu_seek_submenu: could not read the flyout cursor"
+        [[ "$cursor" == "$target" ]] && return 0
+        key -k Down >/dev/null
+        settle
+    done
+    fail "menu_seek_submenu: could not reach $want in $entries"
 }
 
 # The index of a menu row by its label, for a case that has to click that row: the Menus settings
@@ -653,7 +712,7 @@ list_row_at_y() {
             best=$i
         fi
     done
-    (( best_gap <= $(ipc metrics | cut -d' ' -f4) / 2 )) && printf '%s' "$best"
+    (( best_gap <= $(ipc fileRowHeight) / 2 )) && printf '%s' "$best"
 }
 
 # A right click on the listing's empty space, the background menu's own entrance. The point is
@@ -772,7 +831,7 @@ click_rail_row() {
 }
 
 # GM's contract, measured and not recomputed: the NETWORK "+" ink, its hit target and the rail's own
-# indicator dot share one x centre. The three boxes come from ui/shell.qml's boxOf, in window
+# indicator dot share one x centre. The three boxes come from ui/boot/shell.qml's boxOf, in window
 # coordinates, so nothing here restates the anchoring the way an arithmetic slot did.
 # The centres compare as strings and not with -eq, because -eq is integer-only and the defect this
 # case exists for is half a pixel: 8 and 8.5 round to the same whole number and pass a numeric test.
@@ -849,7 +908,7 @@ wait_message() {
     while (( $(date +%s%3N) < deadline )); do
         # 3 s, not 1: one ipc round trip costs hundreds of ms and grows under load, and a call that
         # times out returns nothing, which spends a sample of a sentence that stands for only 4 s.
-        seen=$(timeout 3 omarchy-drive ipc -p "$flea_ui" flea lastMessage 2>/dev/null || true)
+        seen=$(timeout 3 omarchy-drive ipc -p "$flea_ui/boot" flea lastMessage 2>/dev/null || true)
         if [[ "$seen" == "$want" ]]; then
             return 0
         fi
@@ -862,7 +921,7 @@ wait_network_result() {
     local want="$1" timeout_s="${2:-40}" seen=""
     local deadline=$(( $(date +%s%3N) + timeout_s * 1000 ))
     while (( $(date +%s%3N) < deadline )); do
-        seen=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea networkResult 2>/dev/null || true)
+        seen=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea networkResult 2>/dev/null || true)
         [[ "$seen" == "$want" ]] && return 0
         sleep 0.1
     done
@@ -875,7 +934,7 @@ wait_network_status() {
     local want="$1" timeout_s="${2:-40}" seen=""
     local deadline=$(( $(date +%s%3N) + timeout_s * 1000 ))
     while (( $(date +%s%3N) < deadline )); do
-        seen=$(timeout 2 omarchy-drive ipc -p "$flea_ui" flea networkStatus 2>/dev/null || true)
+        seen=$(timeout 2 omarchy-drive ipc -p "$flea_ui/boot" flea networkStatus 2>/dev/null || true)
         [[ "$seen" == "$want" ]] && return 0
         sleep 0.1
     done
@@ -886,11 +945,36 @@ wait_network_entry_state() {
     local want="$1" timeout_s="${2:-20}" seen=""
     local deadline=$(( $(date +%s%3N) + timeout_s * 1000 ))
     while (( $(date +%s%3N) < deadline )); do
-        seen=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea networkEntries 2>/dev/null || true)
+        seen=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea networkEntries 2>/dev/null || true)
         [[ "$seen" == *"|network|share|$want" ]] && return 0
         sleep 0.1
     done
     fail "network row never became mounted=$want (last: ${seen:-unavailable})"
+}
+
+# A successful IPC must show the exact live row gone; an error is not an empty network group.
+wait_network_entry_absent() {
+    local row="$1" mount_uri="$2" timeout_s="${3:-20}" seen="" status=0 line present
+    local deadline=$(( $(date +%s%3N) + timeout_s * 1000 ))
+    while (( $(date +%s%3N) < deadline )); do
+        if seen=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea networkEntries 2>/dev/null); then
+            status=0
+            present=false
+            # networkEntries row: SFTP|network|share|true
+            while IFS= read -r line; do
+                if [[ "${line%|*}" == "${row%|*}" ]]; then
+                    present=true
+                    break
+                fi
+            done <<< "$seen"
+            [[ "$present" == false ]] && return 0
+        else
+            status=$?
+        fi
+        sleep 0.1
+    done
+    [[ "$status" -eq 0 ]] || fail "network row disappearance IPC failed for $mount_uri (status $status)"
+    fail "network row $row for $mount_uri survived unmount (last: ${seen:-empty})"
 }
 
 # A stub that hangs on purpose is the only thing that can say when it started hanging, so a case
@@ -1051,6 +1135,261 @@ case_scroll() {
     shot scroll-three-notches
 }
 
+# The scrollbar is a viewport control over the integer model, not a second model: a short listing
+# draws none, a scale listing draws one, and a real track press moves the same ListView whose wheel
+# path drives window refetch. Switching views then proves the shared control reached all three
+# directory surfaces rather than being painted only over the default list.
+case_scrollbar() {
+    local dir="$fixture_root/scrollbar" state wx wy ww wh sx sy sw sh before after handle travel ratio list_bar
+    [[ -d "$bench_dir" ]] || fail "scrollbar: the 100,000-file fixture is missing at $bench_dir"
+    sandbox_scratch "$dir"
+    : > "$dir/only.txt"
+    launch "$dir"
+    wait_listing 1
+    state=$(ipc scrollbarState)
+    jq -e '.visible == false' <<< "$state" >/dev/null \
+        || fail "scrollbar: a one-row folder draws a scrollbar: $state"
+
+    launch "$bench_dir"
+    wait_listing 100000
+    click_chrome list
+    settle
+    state=$(ipc scrollbarState)
+    jq -e '.visible == true and .handle >= 24 and .content > .viewport and .offset == 0' <<< "$state" >/dev/null \
+        || fail "scrollbar: the scale listing has no usable top handle: $state"
+    # Sample input: scrollbarState .rect prints e.g. `1234 200 12 800`.
+    read -r sx sy sw sh <<< "$(jq -r '.rect' <<< "$state")"
+    [[ "$sx" =~ ^[0-9]+$ && "$sy" =~ ^[0-9]+$ && "$sw" =~ ^[0-9]+$ && "$sh" =~ ^[0-9]+$ ]] \
+        || fail "scrollbar: no scrollbar rect, ipc answered [$sx $sy $sw $sh]"
+    read -r wx wy ww wh < <(window_box) || fail "scrollbar: native window coordinates unavailable"
+    # Finder's overlay scroller hides at rest: once the load settles, nothing is drawn with the pointer away.
+    hyprctl dispatch "hl.dsp.cursor.move({x = $((wx + ww / 2)), y = $((wy + wh / 2))})" >/dev/null
+    wait_scrollbar_shown false "the scroller stayed drawn at rest"
+    omarchy-drive click "$((wx + sx + sw / 2))" "$((wy + sy + sh - 2))" left >/dev/null
+    settle
+    state=$(ipc scrollbarState)
+    # A press near the bottom of the track jumps there (Finder's jump to the spot clicked), not one page down.
+    jq -e '.shown == true and (.offset - ((.rect | split(" ")[3] | tonumber) - .handle) | fabs) <= 1' <<< "$state" >/dev/null \
+        || fail "scrollbar: a track press near the bottom did not jump the knob there: $state"
+    after=$(ipc listContentY)
+    (( after > $(jq -r '.viewport * 2 | ceil' <<< "$state") )) || fail "scrollbar: a track press moved the list only to $after, a page at most"
+    jq -e '.knob > 6' <<< "$state" >/dev/null || fail "scrollbar: the knob did not widen with the pointer in the lane: $state"
+    # The warp alone sends Qt no motion (see hover_row), so the lane would never learn the pointer left.
+    hyprctl dispatch "hl.dsp.cursor.move({x = $((wx + ww / 2)), y = $((wy + wh / 2))})" >/dev/null
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 1 -y 0 >/dev/null 2>&1 \
+        || fail "scrollbar: pointer motion out of the lane failed"
+    wait_scrollbar_shown false "the scroller stayed drawn after the pointer left and the view stopped"
+
+    key -k Home >/dev/null
+    settle
+    [[ "$(ipc listContentY)" == 0 ]] || fail "scrollbar: the track press stole keyboard focus"
+    state=$(ipc scrollbarState)
+    handle=$(jq -r '.handle | floor' <<< "$state")
+    travel=$(( (sh - handle) / 2 ))
+    hyprctl dispatch "hl.dsp.cursor.move({x = $((wx + sx + sw / 2 - 1)), y = $((wy + sy + handle / 2))})" >/dev/null
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 1 -y 0 >/dev/null 2>&1
+    # libinput accelerates relative motion about 2x, so halve the rest until it lands; hyprctl cursorpos prints e.g. `1214, 735`.
+    local target_y cursor_y cursor_now step
+    cursor_now=$(hyprctl cursorpos | tr -d ',' | cut -d' ' -f2)
+    [[ "$cursor_now" =~ ^[0-9]+$ ]] || fail "scrollbar: no pointer row from hyprctl cursorpos [$cursor_now]"
+    target_y=$(( cursor_now + travel ))
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x40 >/dev/null 2>&1 \
+        || fail "scrollbar: pointer press failed"
+    for step in $(seq 1 16); do
+        cursor_y=$(hyprctl cursorpos | tr -d ',' | cut -d' ' -f2)
+        if [[ ! "$cursor_y" =~ ^[0-9]+$ ]]; then
+            YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 || true
+            fail "scrollbar: no pointer row from hyprctl cursorpos [$cursor_y]"
+        fi
+        (( cursor_y >= target_y - 1 && cursor_y <= target_y + 1 )) && break
+        if ! YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 0 -y "$(( (target_y - cursor_y) / 2 ))" >/dev/null 2>&1; then
+            YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 || true
+            fail "scrollbar: pointer drag failed"
+        fi
+        sleep 0.05
+    done
+    # Read while still pressed, so a jump on release (MouseArea onClicked) cannot stand in for the drag.
+    settle
+    local pressed_ratio
+    pressed_ratio=$(ipc scrollbarState | jq -r '.offset / ((.rect | split(" ")[3] | tonumber) - .handle)')
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 \
+        || fail "scrollbar: pointer release failed"
+    jq -e '. >= 0.45 and . <= 0.55' <<< "$pressed_ratio" >/dev/null \
+        || fail "scrollbar: the knob had not followed the drag before the release, at track ratio $pressed_ratio"
+    settle
+    state=$(ipc scrollbarState)
+    ratio=$(jq -r '.offset / ((.rect | split(" ")[3] | tonumber) - .handle)' <<< "$state")
+    jq -e '. >= 0.45 and . <= 0.55' <<< "$ratio" >/dev/null \
+        || fail "scrollbar: a midpoint drag landed at track ratio $ratio: $state"
+    # Home put contentY back to 0 before the drag, and that was asserted, so a number above 0 is the drag's own.
+    after=$(ipc listContentY)
+    [[ "$after" =~ ^[0-9]+$ ]] && (( after > 0 )) \
+        || fail "scrollbar: a midpoint drag moved the handle but the list never scrolled: contentY [$after], $state"
+    list_bar=$(ipc scrollbarState)
+
+    click_chrome grid
+    settle
+    [[ "$(ipc viewMode)" == grid ]] || fail "scrollbar: the chrome button did not switch to the grid, still in $(ipc viewMode)"
+    state=$(ipc scrollbarState)
+    jq -e '.visible == true' <<< "$state" >/dev/null \
+        || fail "scrollbar: the scale grid has no scrollbar: $state"
+    [[ "$(jq -r '.rect' <<< "$state")" != "$(jq -r '.rect' <<< "$list_bar")" || "$(jq -r '.content' <<< "$state")" != "$(jq -r '.content' <<< "$list_bar")" ]] \
+        || fail "scrollbar: the grid reports the list bar's own rect and content: $state"
+    click_chrome columns
+    settle
+    [[ "$(ipc viewMode)" == columns ]] || fail "scrollbar: the chrome button did not switch to the columns, still in $(ipc viewMode)"
+    state=$(ipc scrollbarState)
+    jq -e '.visible == true' <<< "$state" >/dev/null \
+        || fail "scrollbar: the scale Miller column has no scrollbar: $state"
+    [[ "$(jq -r '.rect' <<< "$state")" != "$(jq -r '.rect' <<< "$list_bar")" || "$(jq -r '.content' <<< "$state")" != "$(jq -r '.content' <<< "$list_bar")" ]] \
+        || fail "scrollbar: the columns report the list bar's own rect and content: $state"
+    printf 'SCROLLBAR short=hidden scale=visible track=jump drag=middle views=list,grid,columns\n'
+}
+
+# rectOf answers rounded window pixels; within1 keeps a fractional layout honest.
+within1() { local got=$1 want=$2; (( got >= want - 1 && got <= want + 1 )); }
+
+# The bar sits in the lane it is measured against: ends at the view's own right edge, one lane wide, its knob 2 px inside.
+scrolllane_bar() {
+    local what="$1" view_right=$2 pad=$3 state bx by bw bh kx ky kw kh inset
+    state=$(ipc scrollbarState)
+    [[ "$(jq -r '.visible' <<< "$state")" == "true" ]] \
+        || fail "scrolllane: $what bar is hidden, the fixture does not scroll this view"
+    # Sample input: scrollbarState .rect prints "1234 200 12 800".
+    read -r bx by bw bh <<< "$(jq -r '.rect' <<< "$state")"
+    # Sample input: scrollbarState .knobRect prints "1236 200 8 100".
+    read -r kx ky kw kh <<< "$(jq -r '.knobRect' <<< "$state")"
+    [[ "$bx" =~ ^-?[0-9]+$ && "$by" =~ ^-?[0-9]+$ && "$bw" =~ ^[0-9]+$ && "$bh" =~ ^[0-9]+$ ]] \
+        || fail "scrolllane: $what bar rect answered '$bx $by $bw $bh'"
+    [[ "$kx" =~ ^-?[0-9]+$ && "$ky" =~ ^-?[0-9]+$ && "$kw" =~ ^[0-9]+$ && "$kh" =~ ^[0-9]+$ ]] \
+        || fail "scrolllane: $what knob rect answered '$kx $ky $kw $kh'"
+    (( bx + bw >= view_right - 1 && bx + bw <= view_right + 1 )) \
+        || fail "scrolllane: $what bar ends at $((bx + bw)), the view at $view_right"
+    (( bw == pad )) || fail "scrolllane: $what bar is $bw wide, the lane is $pad"
+    inset=$(( bx + bw - (kx + kw) ))
+    within1 "$inset" 2 \
+        || fail "scrolllane: $what knob sits $inset px inside the lane, not 2"
+    (( kx >= bx )) || fail "scrolllane: $what knob starts left of its lane"
+}
+
+# The list holds its rows one lane short of the view, and the header carries the same padding so its Kind title stays over the rows' Kind cells.
+scrolllane_list() {
+    local base=$1 pad=$2 ax ay aw ah rx ry rw rh area_right row_right left hx hw kind_right
+    # Sample input: listAreaRect prints "0 100 732 500", rowRect 0 prints "14 100 718 37".
+    read -r ax ay aw ah <<< "$(ipc listAreaRect)"
+    [[ "$ax" =~ ^-?[0-9]+$ && "$ay" =~ ^-?[0-9]+$ && "$aw" =~ ^[0-9]+$ && "$ah" =~ ^[0-9]+$ ]] \
+        || fail "scrolllane: base $base list listAreaRect answered '$ax $ay $aw $ah'"
+    read -r rx ry rw rh <<< "$(ipc rowRect 0)"
+    [[ "$rx" =~ ^-?[0-9]+$ && "$rw" =~ ^[0-9]+$ ]] \
+        || fail "scrolllane: base $base list rowRect 0 answered '$rx $ry $rw $rh'"
+    area_right=$((ax + aw)); row_right=$((rx + rw))
+    within1 $((area_right - row_right)) "$pad" \
+        || fail "scrolllane: base $base rows end $((area_right - row_right)) px short of the view, not the $pad px lane"
+    scrolllane_bar "base $base list" "$area_right" "$pad"
+    left=$(ipc headerLeft)
+    [[ "$left" =~ ^-?[0-9]+$ ]] \
+        || fail "scrolllane: base $base list headerLeft answered '$left'"
+    # Sample input: headerCellRect kind prints "602|130".
+    IFS='|' read -r hx hw <<< "$(ipc headerCellRect kind)"
+    [[ "$hx" =~ ^-?[0-9]+$ && "$hw" =~ ^[0-9]+$ ]] \
+        || fail "scrolllane: base $base list headerCellRect kind answered '$hx|$hw'"
+    kind_right=$((left + hx + hw))
+    within1 "$kind_right" $((row_right - pad)) \
+        || fail "scrolllane: base $base header Kind ends at $kind_right, rows end at $row_right with a $pad px padding"
+}
+
+# The grid counts and sizes its cells on the width less the lane, so the last tile of a row ends short of it.
+scrolllane_grid() {
+    local base=$1 pad=$2 ax ay aw ah area_right columns tx ty tw th lx ly lw lh last_right
+    read -r ax ay aw ah <<< "$(ipc listAreaRect)"
+    [[ "$ax" =~ ^-?[0-9]+$ && "$ay" =~ ^-?[0-9]+$ && "$aw" =~ ^[0-9]+$ && "$ah" =~ ^[0-9]+$ ]] \
+        || fail "scrolllane: base $base grid listAreaRect answered '$ax $ay $aw $ah'"
+    area_right=$((ax + aw))
+    columns=$(ipc gridColumns)
+    [[ "$columns" =~ ^[0-9]+$ && "$columns" -ge 1 ]] \
+        || fail "scrolllane: base $base grid reports $columns columns"
+    read -r tx ty tw th <<< "$(ipc rowRect 0)"
+    read -r lx ly lw lh <<< "$(ipc rowRect $((columns - 1)))"
+    [[ "$tx" =~ ^-?[0-9]+$ && "$tw" =~ ^[0-9]+$ && "$lx" =~ ^-?[0-9]+$ && "$lw" =~ ^[0-9]+$ ]] \
+        || fail "scrolllane: base $base grid rowRect answered '$tx $ty $tw $th' and '$lx $ly $lw $lh'"
+    last_right=$((lx + lw))
+    (( last_right <= area_right - pad + 1 )) \
+        || fail "scrolllane: base $base grid tiles reach $last_right, the lane starts at $((area_right - pad))"
+    (( last_right >= area_right - pad - tw )) \
+        || fail "scrolllane: base $base grid tiles end at $last_right, a tile short of the $((area_right - pad)) lane"
+    (( columns * tw <= aw - pad )) \
+        || fail "scrolllane: base $base $columns tiles at $tw px overrun the $aw px view less the $pad px lane"
+    scrolllane_bar "base $base grid" "$area_right" "$pad"
+}
+
+# Each Miller column keeps its own lane: the active column's rows end one lane short of the active edge, read off the drawn count.
+scrolllane_columns() {
+    local base=$1 pad=$2 ax ay aw ah col count rx ry rw rh
+    read -r ax ay aw ah <<< "$(ipc listAreaRect)"
+    [[ "$ax" =~ ^-?[0-9]+$ && "$ay" =~ ^-?[0-9]+$ && "$aw" =~ ^[0-9]+$ && "$ah" =~ ^[0-9]+$ ]] \
+        || fail "scrolllane: base $base columns listAreaRect answered '$ax $ay $aw $ah'"
+    count=$(ipc columnCount)
+    [[ "$count" =~ ^[0-9]+$ && "$count" -ge 2 && "$count" -le 5 ]] \
+        || fail "scrolllane: base $base columns draws $count columns"
+    col=$((aw / count))
+    read -r rx ry rw rh <<< "$(ipc rowRect 0)"
+    [[ "$rx" =~ ^-?[0-9]+$ && "$rw" =~ ^[0-9]+$ ]] \
+        || fail "scrolllane: base $base columns rowRect 0 answered '$rx $ry $rw $rh'"
+    within1 "$rw" $((col - pad)) \
+        || fail "scrolllane: base $base the active column holds $rw px rows in a $col px column with a $pad px lane"
+    within1 $((rx + rw)) $((ax + (count - 1) * col - pad)) \
+        || fail "scrolllane: base $base column rows end at $((rx + rw)), the column at $((ax + (count - 1) * col - pad))"
+    scrolllane_bar "base $base columns" $((ax + (count - 1) * col)) "$pad"
+}
+
+# ScrollLane040: every scrolling listing reserves a rowPaddingX lane at its right edge; two text sizes prove the lane scales with the token.
+case_scrolllane() {
+    local dir="$fixture_root/scrolllane"
+    sandbox_scratch "$dir"
+    local i
+    for i in $(seq -w 1 200); do printf 'body\n' > "$dir/file-$i.txt"; done
+    local fixture_home="$fixture_root/scrolllane-home" real_home="$HOME"
+    fixture_home_make "$fixture_home"
+    mkdir -p "$fixture_home/.config/omarchy"
+
+    local base pad prev_pad="" pad_12="" pad_14=""
+    for base in 12 14; do
+        printf '[font]\nbase-size = %s\n' "$base" > "$fixture_home/.config/omarchy/shell.toml"
+        seed_ui_state "$fixture_root/scrolllane-state-$base" '{"view":"list","columns":["name","mode","size","date","kind"]}'
+        export HOME="$fixture_home"
+        launch "$dir"
+        export HOME="$real_home"
+        wait_listing 200
+        settle
+        [[ "$(ipc viewMode)" == list ]] || fail "scrolllane: base $base opened in $(ipc viewMode), not the seeded list"
+        # Sample input: metrics prints "14 12 14 37", field 3 is rowPaddingX.
+        pad=$(ipc metrics | cut -d' ' -f3)
+        [[ "$pad" =~ ^[0-9]+$ ]] || fail "scrolllane: no row padding from metrics at base $base"
+        [[ -z "$prev_pad" || "$pad" != "$prev_pad" ]] || fail "scrolllane: base $base pad $pad equals the other size, the shell.toml override never reached Flea"
+        prev_pad="$pad"
+        [[ "$base" == 12 ]] && pad_12="$pad" || pad_14="$pad"
+        scrolllane_list "$base" "$pad"
+        shot "scrolllane-$base-list"
+        click_chrome grid
+        settle
+        [[ "$(ipc viewMode)" == grid ]] || fail "scrolllane: the chrome button did not switch to the grid at base $base"
+        scrolllane_grid "$base" "$pad"
+        shot "scrolllane-$base-grid"
+        click_chrome list
+        settle
+        [[ "$(ipc viewMode)" == list ]] || fail "scrolllane: the chrome button did not switch back to the list at base $base"
+        click_chrome columns
+        settle
+        [[ "$(ipc viewMode)" == columns ]] || fail "scrolllane: the chrome button did not switch to the columns at base $base"
+        scrolllane_columns "$base" "$pad"
+        shot "scrolllane-$base-columns"
+        kill_flea
+    done
+    sandbox_remove "$fixture_home"
+    sandbox_remove "$dir"
+    printf 'SCROLLLANE sizes=12,14 pads=%s,%s views=list,grid,columns\n' "$pad_12" "$pad_14"
+}
+
 # Catches removing the cursor clamp from ListView.onContentYChanged in ui/Pane.qml.
 case_cursor() {
     [[ -d "$bench_dir" ]] || fail "the 100,000-file fixture is missing at $bench_dir"
@@ -1103,7 +1442,7 @@ case_terminal() {
     printf 'TERMINAL qs=%s backend=%s before state=%s total=%s row=%q\n' \
         "$qs_pid" "$backend_pid" "$(ipc state)" "$(ipc total)" "$(ipc rowAt 0)"
     kill "$backend_pid"
-    omarchy-drive wait ipc -p "$flea_ui" flea state error --timeout 15 >/dev/null \
+    omarchy-drive wait ipc -p "$flea_ui/boot" flea state error --timeout 15 >/dev/null \
         || fail "the pane stayed in state '$(ipc state)' after the backend died"
     [[ "$(ipc total)" == "0" ]] || fail "the stale total $(ipc total) survived the backend"
     [[ "$(ipc rowAt 0)" == "loading" ]] || fail "the stale row $(ipc rowAt 0) survived the backend"
@@ -1118,8 +1457,8 @@ case_terminal() {
     assert_window
 }
 
-# The row and menu presentation the 0.1.4 boards specify: FleaWindow.html's symlink row, its own
-# trailing slash on a directory, and Menus.html's right-aligned key beside every bound row.
+# The row and menu presentation the boards specify: FleaWindow.html's symlink row, a directory drawn
+# without the 0.1.4 trailing slash (0.3.3), and Menus.html's right-aligned key beside every bound row.
 # Catches deleting decoratedName, sizeText's link branch or Icons.glyphForRow from ui/Row.qml, and
 # the hint slot from ui/MenuRow.qml.
 case_rows() {
@@ -1161,8 +1500,8 @@ case_rows() {
         "$(ipc rowSizeText "$file_row")" \
         "$(ipc rowGlyph "$dir_row")" "$(ipc rowGlyph "$link_row")"
 
-    [[ "$(ipc rowNameText "$dir_row")" == "subdir/" ]] \
-        || fail "rows: the directory reads $(ipc rowNameText "$dir_row"), not subdir/"
+    [[ "$(ipc rowNameText "$dir_row")" == "subdir" ]] \
+        || fail "rows: the directory reads $(ipc rowNameText "$dir_row"), not subdir"
     [[ "$(ipc rowNameText "$file_row")" == "target.txt" ]] \
         || fail "rows: a plain file grew a suffix, it reads $(ipc rowNameText "$file_row")"
     [[ "$(ipc rowNameText "$link_row")" == "linkdir -> $dir/subdir" ]] \
@@ -1278,7 +1617,7 @@ case_open() {
     seek_row_named subdir
     key l >/dev/null
     wait_path "$dir/subdir"
-    omarchy-drive wait ipc -p "$flea_ui" flea state empty --timeout 10 >/dev/null \
+    omarchy-drive wait ipc -p "$flea_ui/boot" flea state empty --timeout 10 >/dev/null \
         || fail "open: subdir never reached its empty listing, state is $(ipc state)"
     [[ ! -s "$opened" ]] || fail "l on a directory handed $(cat "$opened") to $open_handoff open"
     [[ -z "$(ipc lastMessage)" ]] || fail "open: entering the empty subdir said $(ipc lastMessage)"
@@ -1341,7 +1680,7 @@ case_open() {
     # because every archive type this box can name defaults to org.gnome.Nautilus.desktop.
     seek_row_named sample.zip
     key -k Return >/dev/null
-    omarchy-drive wait ipc -p "$flea_ui" flea previewState archive --timeout 10 >/dev/null \
+    omarchy-drive wait ipc -p "$flea_ui/boot" flea previewState archive --timeout 10 >/dev/null \
         || fail "Enter on an archive left the preview at $(ipc previewState), kind $(ipc previewKind), and the log holds $(cat "$opened")"
     printf 'OPEN archive kind=%q state=%q log=%q\n' "$(ipc previewKind)" "$(ipc previewState)" "$(cat "$opened")"
     shot open-archive
@@ -1543,6 +1882,8 @@ case_click() {
 
     # Ctrl and shift are Finder's selection modifiers, and neither ever opens.
     : > "$opened"
+    # The double click left the cursor on alpha with nothing marked, which is alpha selected, so the
+    # ctrl+click adds gamma to it rather than replacing it; case_ctrlclick drives that rule whole.
     click_row 4 left --mods ctrl
     settle
     [[ "$(ipc selectedIndices)" == "2,4" ]] || fail "click: ctrl+click selected '$(ipc selectedIndices)', not rows 2,4"
@@ -1583,6 +1924,10 @@ case_click() {
     key -k BackSpace >/dev/null
     wait_path "$dir"
     wait_listing 5
+    # PR 48 (shawnyeager): the climb reselects the directory it left, so the cursor is back on the
+    # row that was opened rather than on the first row, and Enter is a round trip.
+    [[ "$(ipc rowAt "$(ipc cursor)")" == "subdir|"* ]] \
+        || fail "click: the climb left the cursor on $(ipc rowAt "$(ipc cursor)" | cut -d'|' -f1), not the directory it came out of"
 
     # The grid, a different delegate in a different file carrying the same contract.
     click_chrome grid
@@ -1645,8 +1990,7 @@ case_click() {
     # unchanged too and would satisfy both assertions below without pressing anything.
     omarchy-drive click "$((ex + wx))" "$((ey + wy))" >/dev/null \
         || fail "click: omarchy-drive refused the press on the elision marker"
-    # A crumb's single tap is deferred until the double-tap interval expires, see ui/ChromeBar.qml
-    # "exclusiveSignals", so the reading is taken well after the click rather than on top of it.
+    # Two settles, so a press that navigated after all would have landed before the reading.
     settle
     settle
     printf 'CLICK elision path=%q barOpen=%s\n' "$(ipc path)" "$(ipc pathBarOpen)"
@@ -1654,10 +1998,23 @@ case_click() {
     [[ "$(ipc path)" == "$deep" ]] || fail "click: a tap on the elision marker navigated to $(ipc path)"
     [[ "$(ipc pathBarOpen)" == "false" ]] || fail "click: a tap on the elision marker opened the path bar"
 
-    # keys.toml's chrome/left x2/any row is the whole strip, and the chrome is the window's own top item, so its band is y 0 to chromeHeight - 1.
+    # The marker is one of keys.toml's inert segments, so the double click a tap on it never answers types the path.
+    omarchy-drive click "$((ex + wx))" "$((ey + wy))" --double >/dev/null \
+        || fail "click: omarchy-drive refused the double click on the elision marker"
+    settle
+    settle
+    printf 'CLICK elision-double path=%q barOpen=%s\n' "$(ipc path)" "$(ipc pathBarOpen)"
+    shot click-elision-double
+    [[ "$(ipc pathBarOpen)" == "true" ]] || fail "click: a double click on the elision marker did not open the path bar"
+    [[ "$(ipc path)" == "$deep" ]] || fail "click: the double click on the elision marker navigated to $(ipc path)"
+    key -k Escape >/dev/null
+    settle
+    [[ "$(ipc pathBarOpen)" == "false" ]] || fail "click: Escape did not close the path bar the elision marker opened"
+
+    # keys.toml's chrome/left x2/inert row covers the current folder's own segment, and the chrome is the window's own top item, so its band is y 0 to chromeHeight - 1.
     local chrome_h band_crumb band_x band
     chrome_h=$(ipc chromeHeight)
-    band_crumb=$(( $(ipc crumbCount) - 2 ))
+    band_crumb=$(( $(ipc crumbCount) - 1 ))
     read -r band_x _band_y <<< "$(ipc crumbCentre "$band_crumb")"
     [[ -n "$band_x" ]] || fail "click: crumb $band_crumb has no on-screen centre, so no band of the strip can be pressed over one"
     for band in "$chrome_band_inset" "$(( chrome_h - 1 - chrome_band_inset ))"; do
@@ -1675,15 +2032,16 @@ case_click() {
         [[ "$(ipc pathBarOpen)" == "false" ]] || fail "click: Escape did not close the path bar opened at y $band"
     done
 
-    # The strip's own bottom edge is one flat rule, so that row holds one colour until something opaque draws over it.
-    local edge_y edge_colours
+    # The strip's own bottom edge is one rule across that row, and what would break it is an opaque fill standing where the rule should be.
+    local edge_y edge_spread
     edge_y=$(( chrome_h - 1 ))
     shot click-chrome-edge
-    edge_colours=$(magick "$evidence_dir/click-chrome-edge.png" \
-        -crop "${chrome_edge_sample_width}x1+0+${edge_y}" +repage -unique-colors -format "%[fx:w]" info:)
-    printf 'CLICK chrome-edge y=%s width=%s colours=%s\n' "$edge_y" "$chrome_edge_sample_width" "$edge_colours"
-    [[ "$edge_colours" == "1" ]] \
-        || fail "click: the strip's bottom edge holds $edge_colours colours across ${chrome_edge_sample_width}px, so something drew over it"
+    edge_spread=$(magick "$evidence_dir/click-chrome-edge.png" \
+        -crop "${chrome_edge_sample_width}x1+0+${edge_y}" +repage \
+        -format "%[fx:round(255*max(max(maxima.r-minima.r,maxima.g-minima.g),maxima.b-minima.b))]" info:)
+    printf 'CLICK chrome-edge y=%s width=%s spread=%s\n' "$edge_y" "$chrome_edge_sample_width" "$edge_spread"
+    [[ "$edge_spread" -le "$chrome_edge_max_spread" ]] \
+        || fail "click: the strip's bottom edge spans $edge_spread of 255 across ${chrome_edge_sample_width}px, so something opaque drew over it"
 
     # Issue 45's own control, and the positive half the elision check needs: with only the negative
     # above, a click that missed the window entirely passed it. Nothing drove a crumb at all, so a
@@ -1731,12 +2089,430 @@ case_click() {
     settle
     printf 'CLICK back-climb path=%q\n' "$(ipc path)"
     [[ "$(ipc path)" == "$up" ]] || fail "click: the back button with no history left went to $(ipc path), not $up"
+
+    # GM's ruling of 2026-09-22: a parent answers on the first tap, so a double click on one is two taps and never types the path.
+    crumbs=$(ipc crumbCount)
+    target=$((crumbs - 2))
+    centre=$(ipc crumbCentre "$target")
+    [[ -n "$centre" ]] || fail "click: crumb $target has no on-screen centre for the double click"
+    read -r cx cy <<< "$centre"
+    local qs_pid pid held_pid="" click_status held_path held_bar
+    qs_pid=$(flea_pid)
+    # Sample input: /proc/<pid>/cmdline "/usr/bin/flea\0--backend\0"; ViewState's writer is a flea child too, run as --ui-state.
+    for pid in $(pgrep -P "$qs_pid" -x flea); do
+        tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" | grep -Fq -- ' --backend ' && held_pid="$held_pid $pid"
+    done
+    held_pid=${held_pid# }
+    [[ "$held_pid" =~ ^[0-9]+$ ]] || fail "click: expected one flea --backend child of qs $qs_pid to hold, found '$held_pid'"
+    # The path is written only when a listing answers, so a held backend keeps one crumb delegate under both taps.
+    kill -STOP "$held_pid" || fail "click: could not stop backend $held_pid, so the double click would run unheld"
+    omarchy-drive click "$((cx + wx))" "$((cy + wy))" --double >/dev/null
+    click_status=$?
+    settle
+    held_path=$(ipc path)
+    held_bar=$(ipc pathBarOpen)
+    kill -CONT "$held_pid" || fail "click: could not resume backend $held_pid after the double click"
+    (( click_status == 0 )) || fail "click: omarchy-drive refused the double click on crumb $target"
+    printf 'CLICK crumb-double=%s held path=%q barOpen=%s\n' "$target" "$held_path" "$held_bar"
+    shot click-crumb-double
+    [[ "$held_path" == "$up" ]] || fail "click: the path moved to $held_path with the backend held, so the two taps did not meet one crumb"
+    [[ "$held_bar" == "false" ]] || fail "click: a double click on a parent crumb typed the path instead of opening it"
+    settle
+    settle
+    printf 'CLICK crumb-double released path=%q\n' "$(ipc path)"
+    [[ "$(ipc path)" == "$(dirname "$up")" ]] || fail "click: a double click on a parent crumb went to $(ipc path), not the one directory it names"
+    kill_flea
+}
+
+# Ctrl+click after a plain click, in all three views. The plain click leaves the set empty with the
+# cursor on its row, which every write operation and shift+click read as "that row is the selection";
+# the ctrl+click used to replace it and now adds to it, keys.toml [[pointer]] "add the row to the
+# selection". ui/js/Filter.js toggleRow decides it and tests/js/filter.js checks the arithmetic; this
+# is the half that proves each view's delegate hands the real click there.
+case_ctrlclick() {
+    local dir="$fixture_root/ctrlclick"
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/subdir"
+    printf 'alpha\n' > "$dir/alpha.txt"
+    printf 'beta\n' > "$dir/beta.txt"
+    printf 'gamma\n' > "$dir/gamma.txt"
+    launch "$dir"
+    # Measured row order: subdir, alpha.txt, beta.txt, gamma.txt.
+    wait_listing 4
+    local view
+    for view in list grid columns; do
+        if [[ "$view" != list ]]; then
+            click_chrome "$view"
+            settle
+            local drawn
+            drawn=$(ipc viewMode)
+            [[ "$drawn" == "$view" ]] || fail "ctrlclick: the chrome drew '$drawn', not the $view"
+        fi
+        # ui/js/Tap.js's rule: a plain tap replaces the selection with its own row, Finder's.
+        click_row 1 left
+        settle
+        [[ "$(ipc selectedIndices)" == "1" ]] \
+            || fail "ctrlclick: a plain click in the $view selected '$(ipc selectedIndices)', not its own row"
+        click_row 3 left --mods ctrl
+        settle
+        printf 'CTRLCLICK %s indices=%s cursor=%s\n' "$view" "$(ipc selectedIndices)" "$(ipc cursor)"
+        shot "ctrlclick-$view"
+        [[ "$(ipc selectedIndices)" == "1,3" ]] \
+            || fail "ctrlclick: in the $view ctrl+click selected '$(ipc selectedIndices)', not 1,3"
+        [[ "$(ipc cursor)" == "3" ]] || fail "ctrlclick: in the $view the cursor is $(ipc cursor), not 3"
+        # The anchor is the ctrl+clicked row, so a shift+click from it runs 2,3 and never back to 1.
+        click_row 2 left --mods shift
+        settle
+        [[ "$(ipc selectedIndices)" == "2,3" ]] \
+            || fail "ctrlclick: in the $view shift+click selected '$(ipc selectedIndices)', not 2,3"
+        # PR 106's own case: a cursor row with nothing marked is that row selected to every write
+        # operation, so the ctrl+click adds to it rather than replacing it.
+        key -k Escape >/dev/null
+        settle
+        [[ "$(ipc selectionCount)" == "0" ]] \
+            || fail "ctrlclick: escape left $(ipc selectionCount) rows marked in the $view"
+        # No key moves it: escape leaves the cursor where the shift+click put it, and Up is a row
+        # of tiles in the grid against a row of text in the list.
+        [[ "$(ipc cursor)" == "2" ]] || fail "ctrlclick: the cursor is $(ipc cursor) in the $view, not 2"
+        click_row 3 left --mods ctrl
+        settle
+        [[ "$(ipc selectedIndices)" == "2,3" ]] \
+            || fail "ctrlclick: in the $view ctrl+click on an unmarked cursor row selected '$(ipc selectedIndices)', not 2,3"
+        # And on a row that is the whole selection it takes that row off, which is what a toggle is.
+        click_row 2 left
+        settle
+        click_row 2 left --mods ctrl
+        settle
+        [[ "$(ipc selectedIndices)" == "" ]] \
+            || fail "ctrlclick: in the $view ctrl+click on the marked row left '$(ipc selectedIndices)' marked"
+        # Nothing marked, so the next view's own first click is a transition and can fail.
+        key -k Escape >/dev/null
+        settle
+        local left
+        left=$(ipc selectionCount)
+        [[ "$left" == "0" ]] || fail "ctrlclick: the $view left $left rows marked for the next view"
+    done
+}
+
+# PR 97 (DouglasdeMoura), issue 96's neighbour: the view the window is left on is the view the next
+# launch opens on. The write is ui/Pane.qml onViewModeChanged and the read is its Component.onCompleted,
+# so nothing but a relaunch proves the pair; a tab carries its own view and must not be the one stored.
+case_viewrestart() {
+    local dir="$fixture_root/viewrestart" drew stored_view
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/sub"
+    : > "$dir/a.txt"
+    : > "$dir/b.txt"
+    # Columns, not the list: the list is what the reader falls back to, so a seeded list would pass
+    # this whether the stored word was read or ignored.
+    seed_ui_state "$fixture_root/viewrestart-state" '{"view":"columns"}'
+    launch "$dir"
+    wait_listing 3
+    drew=$(ipc viewMode)
+    [[ "$drew" == "columns" ]] || fail "viewrestart: the seeded state opened on '$drew', not the columns"
+    switch_view grid
+    launch "$dir"
+    wait_listing 3
+    drew=$(ipc viewMode)
+    [[ "$drew" == "grid" ]] || fail "viewrestart: the next launch opened on '$drew', not the grid it was left on"
+    # A tab carries its own view, so the window is left on the first tab's grid and not the second's list.
+    key t >/dev/null
+    settle
+    switch_view list
+    key -M ctrl -k Page_Down -m ctrl >/dev/null
+    settle
+    drew=$(ipc viewMode)
+    [[ "$drew" == "grid" ]] || fail "viewrestart: the first tab came back as '$drew', not the grid it held"
+    launch "$dir"
+    wait_listing 3
+    drew=$(ipc viewMode)
+    [[ "$drew" == "grid" ]] || fail "viewrestart: after the second tab's own switch the launch opened on '$drew', not the grid the window was left on"
+    # PR 97's own edge: a word this build cannot draw is read as the list and put back drawable.
+    kill_flea
+    local stored="$fixture_root/viewrestart-state/flea/ui.json"
+    python3 - "$stored" <<'EDIT'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    state = json.load(f)
+state["view"] = "banana"
+with open(path, "w") as f:
+    json.dump(state, f)
+EDIT
+    launch "$dir"
+    wait_listing 3
+    drew=$(ipc viewMode)
+    [[ "$drew" == "list" ]] || fail "viewrestart: a stored word this build cannot draw opened on '$drew', not the list"
+    # Checked before it is parsed, so a file nobody can read is not reported as a settle that wrote nothing.
+    [[ -r "$stored" ]] || fail "viewrestart: $stored cannot be read, so what the settle wrote cannot be judged"
+    # Sample input, the one key this reads out of the state file: {"keys":"default","view":"list"}
+    stored_view=$(grep -o '"view": *"[^"]*"' "$stored" | cut -d'"' -f4) || stored_view=""
+    [[ -n "$stored_view" ]] || fail "viewrestart: $stored names no view key at all"
+    [[ "$stored_view" == "list" ]] || fail "viewrestart: the settle left '$stored_view' in the state file, not the list the pane drew"
+    kill_flea
+}
+
+# Issue 70, TyRichards: the sort choice outlives the window, and the next launch lists in it rather
+# than in name ascending. The order is checked on the rows, not only on the header's own mark.
+case_sortrestart() {
+    local dir="$fixture_root/sortrestart" mark
+    sandbox_scratch "$dir"
+    # Size order and name order disagree on purpose: a listing in name order cannot pass this.
+    head -c 300 /dev/zero > "$dir/a.txt"
+    head -c 10 /dev/zero > "$dir/b.txt"
+    head -c 100 /dev/zero > "$dir/c.txt"
+    seed_ui_state "$fixture_root/sortrestart-state" '{"sort":{"key":"size","reverse":true}}'
+
+    launch "$dir"
+    wait_listing 3
+    mark=$(ipc sortMark)
+    [[ "$mark" == "size:desc" ]] || fail "sortrestart: the seeded order opened as '$mark', not size:desc"
+    [[ "$(ipc rowAt 0)" == "a.txt|"* && "$(ipc rowAt 1)" == "c.txt|"* && "$(ipc rowAt 2)" == "b.txt|"* ]] \
+        || fail "sortrestart: the seeded listing reads $(ipc rowAt 0) $(ipc rowAt 1) $(ipc rowAt 2)"
+
+    echo "-- S reverses it, and the next launch opens in what was left --"
+    key S >/dev/null
+    settle
+    mark=$(ipc sortMark)
+    [[ "$mark" == "size:asc" ]] || fail "sortrestart: S left the mark on '$mark', not size:asc"
+    launch "$dir"
+    wait_listing 3
+    mark=$(ipc sortMark)
+    [[ "$mark" == "size:asc" ]] || fail "sortrestart: the next launch opened on '$mark', not the size:asc it was left on"
+    [[ "$(ipc rowAt 0)" == "b.txt|"* && "$(ipc rowAt 1)" == "c.txt|"* && "$(ipc rowAt 2)" == "a.txt|"* ]] \
+        || fail "sortrestart: the restored listing reads $(ipc rowAt 0) $(ipc rowAt 1) $(ipc rowAt 2)"
+    printf 'SORTRESTART mark=%s rows=%s %s %s\n' "$mark" "$(ipc rowAt 0)" "$(ipc rowAt 1)" "$(ipc rowAt 2)"
+    kill_flea
+}
+
+# MediaMute board: one mark at the strip's right end says the state by its glyph, m flips it while a
+# media preview is open, the mark's own click does the same, and neither pauses the player.
+case_mute() {
+    command -v ffmpeg >/dev/null || fail "ffmpeg is missing, so the audio fixture cannot be built"
+    local dir="$fixture_root/mute"
+    sandbox_scratch "$dir"
+    # Audio, not video: the strip is permanent on an audio preview, so nothing has to be revealed.
+    ffmpeg -y -f lavfi -i "sine=frequency=440:duration=20" "$dir/tone.wav" >/dev/null 2>&1
+    [[ -s "$dir/tone.wav" ]] || fail "mute: ffmpeg produced no tone.wav"
+
+    launch "$dir"
+    wait_listing 1
+    key -k space >/dev/null
+    for _attempt in $(seq 1 60); do
+        [[ "$(ipc previewOpen)" == "true" ]] && break
+        sleep 0.25
+    done
+    [[ "$(ipc previewOpen)" == "true" && "$(ipc previewKind)" == "audio" ]] \
+        || fail "mute: the preview is $(ipc previewKind), open=$(ipc previewOpen)"
+    local strip
+    strip=$(ipc previewStrip) || fail "mute: the strip has no state"
+    [[ "$(jq -r .visible <<< "$strip")" == "true" ]] || fail "mute: an audio preview drew no strip"
+    [[ "$(jq -r .muted <<< "$strip")" == "false" ]] || fail "mute: the session opened muted"
+
+    echo "-- m mutes, and the player keeps going --"
+    local before after
+    before=$(ipc previewPosition)
+    key m >/dev/null
+    for _attempt in $(seq 1 40); do
+        [[ "$(ipc previewStrip | jq -r .muted)" == "true" ]] && break
+        sleep 0.25
+    done
+    [[ "$(ipc previewStrip | jq -r .muted)" == "true" ]] || fail "mute: m did not mute"
+    [[ "$(ipc previewState)" == "playing" ]] || fail "mute: m stopped the player, state is $(ipc previewState)"
+    sleep 2
+    after=$(ipc previewPosition)
+    (( after > before )) || fail "mute: the clock stopped at $after, so mute paused the player"
+    printf 'MUTE position %s then %s while muted\n' "$before" "$after"
+
+    echo "-- and the mark's own click flips it back --"
+    local wx wy cx cy
+    read -r wx wy _ _ < <(window_box) || fail "mute: native window coordinates unavailable"
+    read -r cx cy <<< "$(ipc previewStrip | jq -r .mute)"
+    [[ -n "$cy" ]] || fail "mute: the mark has no centre"
+    omarchy-drive click "$((wx + cx))" "$((wy + cy))" left >/dev/null || fail "mute: could not click the mark"
+    for _attempt in $(seq 1 40); do
+        [[ "$(ipc previewStrip | jq -r .muted)" == "false" ]] && break
+        sleep 0.25
+    done
+    [[ "$(ipc previewStrip | jq -r .muted)" == "false" ]] || fail "mute: the mark's click did not unmute"
+    [[ "$(ipc previewState)" == "playing" ]] || fail "mute: the click stopped the player"
+
+    echo "-- the flag is the session's, so it survives the preview that set it --"
+    key m >/dev/null
+    for _attempt in $(seq 1 40); do
+        [[ "$(ipc previewStrip | jq -r .muted)" == "true" ]] && break
+        sleep 0.25
+    done
+    key -k Escape >/dev/null
+    settle
+    [[ "$(ipc previewOpen)" == "false" ]] || fail "mute: escape left the preview open"
+    key -k space >/dev/null
+    for _attempt in $(seq 1 60); do
+        [[ "$(ipc previewOpen)" == "true" ]] && break
+        sleep 0.25
+    done
+    [[ "$(ipc previewStrip | jq -r .muted)" == "true" ]] \
+        || fail "mute: the next preview forgot the session's own flag"
+    key -k Escape >/dev/null
+    settle
+    kill_flea
+}
+
+# MenuAdditions rule 3: a Places or Favorites row opens the folder menu for its own path, and with
+# the Extras switch off the rail keeps the one Remove a favourite has offered since 0.2.1.
+case_placemenu() {
+    local dir="$fixture_root/placemenu"
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/Work"
+    : > "$dir/Work/one.txt"
+    : > "$dir/plain.txt"
+    local state="$fixture_root/placemenu-state"
+    # The switch on, and one favourite to open the menu over. Everything else is the shipped set.
+    # The switch on, and Open in terminal and Copy path on too, because a row switched off in Settings
+    # is off on this menu as well: with the shipped set those two are absent and the menu is shorter.
+    seed_ui_state "$state" "$(printf '{"menu":{"hidden":["delete","moveto","copyto","properties","permissions"]},"places":{"favourites":[{"label":"Work","path":"%s/Work"}]}}' "$dir")"
+
+    launch "$dir"
+    wait_listing 2
+    local favourite_index
+    favourite_index=$(ipc railEntries | jq -r 'map(.label) | index("Work")')
+    [[ -n "$favourite_index" && "$favourite_index" != "null" ]] \
+        || fail "placemenu: the seeded favourite is not on the rail, which carries $(ipc railEntries)"
+
+    echo "-- a Favorites row ends on Remove, and a Places row on Add --"
+    click_rail_row "$favourite_index" right
+    settle
+    [[ "$(ipc contextMenuVisible)" == "true" ]] || fail "placemenu: the favourite's right click opened no menu"
+    [[ "$(ipc contextMenuEntries)" == "Open|New tab|-|Open in terminal|Copy path|Remove from Favorites" ]] \
+        || fail "placemenu: the favourite offers $(ipc contextMenuEntries)"
+    key -k Escape >/dev/null
+    for _attempt in $(seq 1 20); do
+        [[ "$(ipc contextMenuVisible)" == "false" ]] && break
+        sleep 0.25
+    done
+    [[ "$(ipc contextMenuVisible)" == "false" ]] || fail "placemenu: escape left the favourite's menu open"
+    local home_index
+    home_index=$(ipc railEntries | jq -r 'map(.label) | index("Home")')
+    [[ -n "$home_index" && "$home_index" != "null" ]] \
+        || fail "placemenu: the rail has no Home row, it carries $(ipc railEntries | jq -r 'map(.label) | join(",")')"
+    click_rail_row "$home_index" right
+    settle
+    # Read visible before entries: the menu keeps its last rows, so a row that opens nothing would
+    # otherwise answer with the menu before it, which is exactly how this case first read green.
+    [[ "$(ipc contextMenuVisible)" == "true" ]] || fail "placemenu: the Home row's right click opened no menu"
+    [[ "$(ipc contextMenuEntries)" == "Open|New tab|-|Open in terminal|Copy path|Add to Favorites" ]] \
+        || fail "placemenu: the Home row offers $(ipc contextMenuEntries)"
+
+    echo "-- and a row acts on its own path, not on the listing's cursor --"
+    local tabs_before
+    tabs_before=$(ipc tabCount)
+    menu_seek "New tab"
+    key -k Return >/dev/null
+    for _attempt in $(seq 1 40); do
+        [[ "$(ipc tabCount)" == "$((tabs_before + 1))" ]] && break
+        sleep 0.25
+    done
+    [[ "$(ipc tabCount)" == "$((tabs_before + 1))" ]] \
+        || fail "placemenu: New tab left $(ipc tabCount) tabs"
+    wait_path "$HOME"
+    printf 'PLACEMENU tabs=%s path=%s labels=%s\n' "$(ipc tabCount)" "$(ipc path)" "$(ipc tabLabels)"
+
+    echo "-- with the switch off it is the menu it was --"
+    kill_flea
+    seed_ui_state "$fixture_root/placemenu-off" "$(printf '{"places":{"favourites":[{"label":"Work","path":"%s/Work"}]}}' "$dir")"
+    launch "$dir"
+    wait_listing 2
+    favourite_index=$(ipc railEntries | jq -r 'map(.label) | index("Work")')
+    click_rail_row "$favourite_index" right
+    settle
+    [[ "$(ipc contextMenuVisible)" == "true" ]] || fail "placemenu: with the switch off the favourite opened no menu"
+    [[ "$(ipc contextMenuEntries)" == "Remove from Favorites" ]] \
+        || fail "placemenu: with the switch off the favourite offers $(ipc contextMenuEntries)"
+    key -k Escape >/dev/null
+    settle
+    local home_off
+    home_off=$(ipc railEntries | jq -r 'map(.label) | index("Home")')
+    click_rail_row "$home_off" right
+    settle
+    [[ "$(ipc contextMenuVisible)" == "false" ]] \
+        || fail "placemenu: with the switch off the Home row opened $(ipc contextMenuEntries)"
+    printf 'PLACEMENU off=%s\n' "$(ipc contextMenuVisible)"
+    kill_flea
+}
+
+# MenuAdditions rule 2: one row per executable in ~/.config/flea/scripts, read when the menu opens,
+# run with the selected paths in the first one's folder, and absent when that directory holds none.
+case_runscript() {
+    local dir="$fixture_root/runscript"
+    sandbox_scratch "$dir"
+    printf 'one\n' > "$dir/a.txt"
+    printf 'two\n' > "$dir/b.txt"
+    local config="$fixture_root/runscript-config"
+    sandbox_scratch "$config"
+    mkdir -p "$config/flea/scripts"
+    export XDG_CONFIG_HOME="$config"
+    # Three, one of them not executable and one failing, which is the whole of the rule's own edges.
+    printf '#!/bin/sh\nprintf "%%s\\n" "$@" > %s/ran.log\nprintf "%%s\\n" "$PWD" >> %s/ran.log\n' "$dir" "$dir" > "$config/flea/scripts/stamp.sh"
+    printf '#!/bin/sh\nprintf "no such page\\n" >&2\nexit 2\n' > "$config/flea/scripts/ocr.sh"
+    printf '#!/bin/sh\nexit 0\n' > "$config/flea/scripts/not-executable.sh"
+    chmod +x "$config/flea/scripts/stamp.sh" "$config/flea/scripts/ocr.sh"
+    # The switch on: everything else in the shipped set stays as it is.
+    seed_ui_state "$fixture_root/runscript-state" '{"menu":{"hidden":["delete","openTerminal","placeMenu","moveto","copyto","properties","permissions","copypath"]}}'
+
+    launch "$dir"
+    wait_listing 2
+    seek_row_named "a.txt"
+    click_row "$(ipc cursor)" right
+    settle
+    [[ "$(ipc contextMenuVisible)" == "true" ]] || fail "runscript: the row's right click opened no menu"
+    [[ "$(ipc contextMenuEntries)" == *"Run script"* ]] \
+        || fail "runscript: the menu offers $(ipc contextMenuEntries)"
+    menu_seek "Run script"
+    key -k Return >/dev/null
+    settle
+    # Sorted by name, the label without the extension, and the file that is not executable absent.
+    [[ "$(ipc contextMenuSubmenuEntries)" == "ocr|stamp" ]] \
+        || fail "runscript: the submenu offers $(ipc contextMenuSubmenuEntries)"
+
+    echo "-- a row runs its script with the selected paths, in the first one's folder --"
+    menu_seek_submenu "stamp"
+    key -k Return >/dev/null
+    for _attempt in $(seq 1 40); do [[ -s "$dir/ran.log" ]] && break; sleep 0.25; done
+    [[ -s "$dir/ran.log" ]] || fail "runscript: the script never ran, the bar says $(ipc lastMessage)"
+    [[ "$(head -1 "$dir/ran.log")" == "$dir/a.txt" ]] \
+        || fail "runscript: the script was handed $(head -1 "$dir/ran.log")"
+    [[ "$(tail -1 "$dir/ran.log")" == "$dir" ]] \
+        || fail "runscript: the script ran in $(tail -1 "$dir/ran.log"), not the file's own folder"
+    printf 'RUNSCRIPT args=%s cwd=%s\n' "$(head -1 "$dir/ran.log")" "$(tail -1 "$dir/ran.log")"
+
+    echo "-- and a non-zero exit is its own last stderr line --"
+    click_row "$(ipc cursor)" right
+    settle
+    menu_seek "Run script"
+    key -k Return >/dev/null
+    settle
+    menu_seek_submenu "ocr"
+    key -k Return >/dev/null
+    wait_message "ocr.sh · no such page"
+    printf 'RUNSCRIPT said=%s\n' "$(ipc lastMessage)"
+
+    echo "-- an empty directory offers no row at all --"
+    rm -f "$config/flea/scripts/stamp.sh" "$config/flea/scripts/ocr.sh"
+    click_row "$(ipc cursor)" right
+    settle
+    key -k Escape >/dev/null
+    settle
+    click_row "$(ipc cursor)" right
+    settle
+    [[ "$(ipc contextMenuEntries)" != *"Run script"* ]] \
+        || fail "runscript: an empty directory still offers $(ipc contextMenuEntries)"
+    printf 'RUNSCRIPT empty=%s\n' "$(ipc contextMenuEntries)"
     kill_flea
 }
 
 # Catches narrowing the delegate TapHandler back to Qt.LeftButton in ui/Pane.qml.
 case_menu() {
-    local dir="$fixture_root/menu"
+    local dir="$fixture_root/menu" state="$fixture_root/menu-state"
     sandbox_scratch "$dir"
     mkdir -p "$dir/subdir"
     : > "$dir/a.txt"
@@ -1751,6 +2527,7 @@ case_menu() {
     : > "$dir/z3.txt"
     : > "$dir/z4.txt"
     : > "$dir/z5.txt"
+    seed_ui_state "$state" '{"view":"list","keys":"default"}'
     launch "$dir"
     wait_listing 10
     local row_height row_padding_x centre cx cy wx wy ww wh row_left beneath_y metrics
@@ -1913,7 +2690,7 @@ case_background() {
         "$(ipc sortMark)" "$(ipc contextMenuSubmenuEntries)" "$(ipc contextMenuSubmenuGlyphs)"
     shot background-sort
     # Four orders, because src/backend/ordering.rs answers kind as well as the three in sort.rs.
-    [[ "$(ipc contextMenuSubmenuEntries)" == "Name|Size|Date Modified|Kind" ]] \
+    [[ "$(ipc contextMenuSubmenuEntries)" == "Name|Size|Modified|Kind" ]] \
         || fail "background: the Sort by flyout is $(ipc contextMenuSubmenuEntries)"
     [[ "$(ipc contextMenuSubmenuGlyphs)" == "sort|sort|sort|sort" ]] \
         || fail "background: the sort flyout drew $(ipc contextMenuSubmenuGlyphs)"
@@ -2021,6 +2798,32 @@ case_background() {
         shot "background-$view"
         [[ "$(ipc contextMenuEntries)" == "New Folder|New File|-|Paste|Select all|-|Add to Favorites|-|Sort by|Show hidden files|-|Settings" ]] \
             || fail "background: the $view view drew $(ipc contextMenuEntries)"
+        key -k Escape >/dev/null
+        settle
+    done
+
+    # Issue 195 (@muellan): past the first screenful a row's right click raised this background menu
+    # instead of the row's, in every view, because the handler added contentY to a point that was
+    # already in content coordinates. Measured on 0.3.4: 52 of 52 scrolled rows. 150 rows overflow any window.
+    local scrolled="$fixture_root/background-scrolled" i last
+    sandbox_scratch "$scrolled"
+    mkdir -p "$scrolled"
+    for i in $(seq -w 1 150); do : > "$scrolled/f$i.txt"; done
+    launch "$scrolled"
+    wait_listing 150
+    for view in list grid columns; do
+        key -M ctrl -k "$(case "$view" in list) echo 1 ;; columns) echo 2 ;; grid) echo 3 ;; esac)" -m ctrl >/dev/null
+        settle
+        [[ "$(ipc viewMode)" == "$view" ]] || fail "background: the $view view did not come up over 150 rows"
+        key -k End >/dev/null
+        settle
+        last=$(( $(ipc total) - 1 ))
+        (( $(ipc viewContentY) > 0 )) || fail "background: End left the $view view unscrolled"
+        click_row "$last" right
+        settle
+        printf 'BACKGROUND scrolled %s contentY=%s row=%s entries=%s\n' "$view" "$(ipc viewContentY)" "$last" "$(ipc contextMenuEntries)"
+        [[ "$(ipc contextMenuEntries)" == Open\|* ]] \
+            || fail "background: a right click on the last row of the scrolled $view view opened $(ipc contextMenuEntries)"
         key -k Escape >/dev/null
         settle
     done
@@ -2152,7 +2955,24 @@ case_selection() {
     [[ "$(ipc selectionCount)" == "1" ]] || fail "selection: setup toggle before the stale check did not take"
     key -k Backspace >/dev/null
     wait_path "$fixture_root"
-    [[ "$(ipc selectionCount)" == "0" ]] || fail "selection: a new listing kept a stale selection"
+    local parent_cursor parent_row parent_state parent_loading
+    for _attempt in $(seq 1 300); do
+        parent_cursor=$(ipc cursor 2>/dev/null || printf 0)
+        parent_row=$(ipc rowAt "$parent_cursor" 2>/dev/null || true)
+        parent_state=$(ipc state 2>/dev/null || printf loading)
+        parent_loading=$(ipc listInFlight 2>/dev/null || printf true)
+        [[ "$parent_state" == ready && "$parent_loading" == false && "$parent_row" == selection\|dir\|* ]] && break
+        sleep 0.05
+    done
+    [[ "$parent_state" == ready && "$parent_loading" == false && "$parent_row" == selection\|dir\|* ]] \
+        || fail "selection: parent listing did not reselect selection/, row=$parent_row state=$parent_state inFlight=$parent_loading"
+    [[ "$(ipc selectionCount)" == "1" ]] \
+        || fail "selection: parent listing selection count is $(ipc selectionCount), not the pending folder"
+    [[ "$(ipc selectedIndices)" == "$parent_cursor" ]] \
+        || fail "selection: selectedIndices=$(ipc selectedIndices), cursor=$parent_cursor"
+    key -k Escape >/dev/null
+    settle
+    [[ "$(ipc selectionCount)" == "0" ]] || fail "selection: Escape did not clear the pending folder selection"
 
     printf 'SELECTION toggle=ok extend=ok all=ok clear=ok stale=ok\n'
     kill_flea
@@ -2171,13 +2991,56 @@ case_watch() {
     wait_listing 3
     [[ "$(ipc rowAt 0)" == alpha.txt\|* ]] || fail "watch: row 0 is $(ipc rowAt 0), not alpha.txt"
 
+    # Issue 159's move-into-new-directory case: create and move from outside Flea while its one window stays open.
+    local move_bytes='watch-move-payload-159' watch_pid
+    watch_pid=$(flea_pid)
+    printf '%s' "$move_bytes" > "$dir/move-source.txt"
+    mkdir "$dir/move-target"
+    mv "$dir/move-source.txt" "$dir/move-target/move-source.txt"
+    omarchy-drive wait ipc -p "$flea_ui/boot" flea total 4 --timeout 15 >/dev/null \
+        || fail "watch: creating a directory and moving a file into it left the listing at $(ipc total) rows"
+    [[ "$(ipc rowAt 0)" == move-target\|dir\|* ]] \
+        || fail "watch: the moved-into directory is not row 0, got $(ipc rowAt 0)"
+    for _move_row in 0 1 2 3; do
+        [[ "$(ipc rowAt "$_move_row")" != move-source.txt\|* ]] \
+            || fail "watch: the moved file stayed in the parent listing at row $_move_row"
+    done
+    seek_row_named move-target
+    key -k Return >/dev/null
+    wait_path "$dir/move-target"
+    wait_listing 1
+    [[ "$(ipc rowAt 0)" == move-source.txt\|file\|* ]] \
+        || fail "watch: entering the new directory lists $(ipc rowAt 0), not the moved file"
+    open_row move-source.txt
+    local preview_wait
+    for preview_wait in $(seq 1 100); do
+        [[ "$(ipc previewState)" == ready ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc previewState)" == ready && "$(ipc previewText)" == "$move_bytes" ]] \
+        || fail "watch: the moved file preview is state=$(ipc previewState), bytes=$(ipc previewText | od -An -tx1)"
+    key -k Escape >/dev/null
+    settle
+    key -k Backspace >/dev/null
+    wait_path "$dir"
+    wait_listing 4
+    [[ "$(flea_pid)" == "$watch_pid" ]] || fail "watch: the move case relaunched Flea"
+    printf 'WATCH move=ok parent-row=gone child-bytes=exact no-relaunch=ok\n'
+    [[ "$(ipc selectionCount)" == 1 ]] || fail "watch: returning to the parent did not select the folder"
+    key -k Escape >/dev/null
+    [[ "$(ipc selectionCount)" == 0 ]] || fail "watch: Escape did not release the folder selection"
+    rm "$dir/move-target/move-source.txt"
+    rmdir "$dir/move-target"
+    omarchy-drive wait ipc -p "$flea_ui/boot" flea total 3 --timeout 15 >/dev/null \
+        || fail "watch: move-case cleanup left the parent listing at $(ipc total) rows"
+
     # The reporter's four changes, from another process, while the window sits on the folder.
     printf 'new\n' > "$dir/NEWFILE-appeared.txt"
     mv "$dir/alpha.txt" "$dir/alpha-RENAMED.txt"
     rm "$dir/beta.txt"
     mkdir "$dir/brand-new-folder"
     # The 400 ms settle plus the re-read; the reporter waited several seconds and saw nothing move.
-    omarchy-drive wait ipc -p "$flea_ui" flea total 4 --timeout 15 >/dev/null \
+    omarchy-drive wait ipc -p "$flea_ui/boot" flea total 4 --timeout 15 >/dev/null \
         || fail "watch: the listing stayed at $(ipc total) rows after four outside changes"
     settle
     printf 'WATCH total=%s row0=%q row1=%q row2=%q\n' \
@@ -2200,7 +3063,7 @@ case_watch() {
     [[ "$(ipc rowAt "$(ipc cursor)")" == preview-me.txt\|* ]] \
         || fail "watch: the cursor did not start on preview-me.txt"
     printf 'z\n' > "$dir/AAA-above-the-cursor.txt"
-    omarchy-drive wait ipc -p "$flea_ui" flea total 5 --timeout 15 >/dev/null \
+    omarchy-drive wait ipc -p "$flea_ui/boot" flea total 5 --timeout 15 >/dev/null \
         || fail "watch: the second outside create left the listing at $(ipc total) rows"
     settle
     printf 'WATCH cursor=%s row=%q\n' "$(ipc cursor)" "$(ipc rowAt "$(ipc cursor)")"
@@ -2218,7 +3081,7 @@ case_watch() {
     [[ "$(ipc selectionCount)" == "1" ]] || fail "watch: the held selection was cleared anyway"
     # Clearing the selection is what pays the debt the notification left standing.
     key -k Escape >/dev/null
-    omarchy-drive wait ipc -p "$flea_ui" flea total 6 --timeout 15 >/dev/null \
+    omarchy-drive wait ipc -p "$flea_ui/boot" flea total 6 --timeout 15 >/dev/null \
         || fail "watch: clearing the selection did not run the owed re-read, total is $(ipc total)"
     printf 'WATCH deferred=ok paid=ok total=%s\n' "$(ipc total)"
 
@@ -2265,6 +3128,137 @@ case_watch() {
     kill_flea
 }
 
+# Issue 143, stubbed at lsblk and gio: empty, inserted and mounted optical media are all exercised without a real drive.
+case_optical() {
+    local dir="$fixture_root/optical" state="$fixture_root/optical-state"
+    local label='MATSHITA DVD+/-RW UJ8FB' payload='optical-payload-143' gio_log="$dir/gio.log"
+    sandbox_scratch "$dir"
+    sandbox_scratch "$state"
+    mkdir -p "$dir/bin" "$dir/files" "$dir/mnt/DVD" "$state/flea"
+    printf 'keep\n' > "$dir/files/keep.txt"
+    printf '%s' "$payload" > "$dir/mnt/DVD/disc-bytes.txt"
+    : > "$gio_log"
+
+    cat > "$dir/bin/lsblk" <<EOS
+#!/bin/sh
+if [ -f "$dir/malformed" ]; then
+    printf 'not json at all\\n'
+    exit 0
+fi
+if [ -f "$dir/mounted" ]; then
+    optical_points='["$dir/mnt/DVD"]'
+    optical_fs='"iso9660"'
+elif [ -f "$dir/inserted" ]; then
+    optical_points='[null]'
+    optical_fs='"iso9660"'
+else
+    optical_points='[null]'
+    optical_fs=null
+fi
+cat <<JSON
+{"blockdevices":[
+{"name":"nvme0n1","path":"/dev/nvme0n1","label":null,"mountpoints":[null],"rm":false,"size":256060514304,"type":"disk","model":"KBG40ZNS256G",
+"children":[{"name":"nvme0n1p1","path":"/dev/nvme0n1p1","label":null,"mountpoints":["/"],"rm":false,"size":256060514304,"type":"part","model":null}]},
+{"name":"sr0","path":"/dev/sr0","label":null,"mountpoints":\$optical_points,"rm":true,"size":0,"type":"rom","fstype":\$optical_fs,"model":"$label"},
+{"name":"sdb","path":"/dev/sdb","label":"USB","mountpoints":[null],"rm":true,"size":34359738368,"type":"disk","model":"USB Flash Disk","fstype":"vfat"}
+]}
+JSON
+EOS
+    chmod +x "$dir/bin/lsblk"
+
+    cat > "$dir/bin/gio" <<EOS
+#!/bin/sh
+printf '%s\\n' "\$*" >> "$gio_log"
+if [ "\$1 \$2 \$3" = "mount -d /dev/sr0" ]; then
+    [ -f "$dir/refuse" ] && exit 1
+    : > "$dir/mounted"
+fi
+exit 0
+EOS
+    chmod +x "$dir/bin/gio"
+
+    local fixture_home="$fixture_root/optical-home" real_home="$HOME" saved_path="$PATH" old_state="${XDG_STATE_HOME:-}"
+    fixture_home_make "$fixture_home"
+    export PATH="$dir/bin:$PATH"
+    export HOME="$fixture_home"
+    export XDG_STATE_HOME="$state"
+    launch "$dir/files"
+    export HOME="$real_home"
+    export PATH="$saved_path"
+    wait_listing 1
+
+    local entries
+    for _attempt in $(seq 1 200); do
+        entries=$(ipc deviceEntries)
+        [[ "$entries" == *"USB|device|volume|false"* ]] && break
+        sleep 0.05
+    done
+    [[ "$entries" == *"USB|device|volume|false"* ]] \
+        || fail "optical: the unmounted USB negative control is missing, got $entries"
+    [[ "$entries" != *"$label|device|volume|"* ]] \
+        || fail "optical: an empty optical drive was offered, got $entries"
+    if grep -q '^mount -d /dev/sr0$' "$gio_log"; then
+        fail "optical: an empty drive reached gio mount, log is $(cat "$gio_log")"
+    fi
+    shot optical-empty
+
+    : > "$dir/inserted"
+    wait_rail_label "$label"
+    for _attempt in $(seq 1 200); do
+        entries=$(ipc deviceEntries)
+        [[ "$entries" == *"$label|device|volume|false"* ]] && break
+        sleep 0.05
+    done
+    [[ "$entries" == *"$label|device|volume|false"* ]] \
+        || fail "optical: inserted media did not remain unmounted, got $entries"
+    : > "$dir/refuse"
+    click_rail_row "$(rail_row_of "$label")" left
+    wait_message "$label could not be mounted."
+    [[ "$(ipc lastMessage)" != *unplug* ]] || fail "optical: refusal still advised unplugging: $(ipc lastMessage)"
+    grep -q '^mount -d /dev/sr0$' "$gio_log" \
+        || fail "optical: inserted media never reached gio mount, log is $(cat "$gio_log")"
+    shot optical-refused
+
+    rm -f "$dir/refuse"
+    : > "$dir/mounted"
+    for _attempt in $(seq 1 200); do
+        entries=$(ipc deviceEntries)
+        [[ "$entries" == *"$label|device|volume|true"* ]] && break
+        sleep 0.05
+    done
+    [[ "$entries" == *"$label|device|volume|true"* ]] \
+        || fail "optical: mounted media did not retain its row, got $entries"
+    click_rail_row "$(rail_row_of "$label")" left
+    wait_path "$dir/mnt/DVD"
+    wait_listing 1
+    [[ "$(ipc rowAt 0)" == disc-bytes.txt\|file\|* ]] \
+        || fail "optical: mounted disc lists $(ipc rowAt 0), not disc-bytes.txt"
+    shot optical-mounted
+    open_row disc-bytes.txt
+    for _attempt in $(seq 1 100); do
+        [[ "$(ipc previewState)" == ready ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc previewState)" == ready && "$(ipc previewText)" == "$payload" ]] \
+        || fail "optical: mounted disc bytes are state=$(ipc previewState), bytes=$(ipc previewText | od -An -tx1)"
+    key -k Escape >/dev/null
+    settle
+
+    : > "$dir/malformed"
+    for _attempt in $(seq 1 200); do
+        entries=$(ipc deviceEntries)
+        [[ "$entries" != *"$label|device|volume|"* ]] && break
+        sleep 0.05
+    done
+    [[ "$entries" != *"$label|device|volume|"* ]] \
+        || fail "optical: malformed lsblk input retained a stale row, got $entries"
+    rm -f "$dir/malformed"
+    printf 'OPTICAL empty-hidden=ok usb-retained=ok inserted=ok refusal=observable mounted=ok bytes=exact malformed=clears\n'
+    if [[ -n "$old_state" ]]; then export XDG_STATE_HOME="$old_state"; else unset XDG_STATE_HOME; fi
+    kill_flea
+    sandbox_remove "$fixture_home"
+}
+
 # Mirrors the two env vars src/gui.rs sets from a resolved --select; tests/modes.sh covers the resolution itself.
 case_select() {
     local dir="$fixture_root/select"
@@ -2278,7 +3272,7 @@ case_select() {
     : > "$flea_log"
     # The renderer is stated because src/gui.rs owns that choice and a direct qs launch never runs it.
     QSG_RHI_BACKEND="${QSG_RHI_BACKEND:-vulkan}" FLEA_PATH="$dir" FLEA_SELECT="$dir/b.txt" FLEA_BIN="$flea_bin" \
-        setsid nohup qs -p "$flea_ui" >"$flea_log" 2>&1 </dev/null &
+        setsid nohup qs -p "$flea_ui/boot" >"$flea_log" 2>&1 </dev/null &
     omarchy-drive wait window flea --timeout 15 >/dev/null
     omarchy-drive focus flea >/dev/null
     assert_window
@@ -2296,7 +3290,7 @@ case_select() {
     : > "$flea_log"
     # The renderer is stated because src/gui.rs owns that choice and a direct qs launch never runs it.
     QSG_RHI_BACKEND="${QSG_RHI_BACKEND:-vulkan}" FLEA_PATH="$dir" FLEA_SELECT="$dir/does-not-exist.txt" FLEA_BIN="$flea_bin" \
-        setsid nohup qs -p "$flea_ui" >"$flea_log" 2>&1 </dev/null &
+        setsid nohup qs -p "$flea_ui/boot" >"$flea_log" 2>&1 </dev/null &
     omarchy-drive wait window flea --timeout 15 >/dev/null
     omarchy-drive focus flea >/dev/null
     assert_window
@@ -2328,7 +3322,7 @@ case_colour() {
     [[ "$file_colour" == "$foreground" ]] || fail "the file name is $file_colour, not foreground $foreground"
 }
 
-# Catches deleting the lifted branch from Row.nameColor or Row.cellColor in ui/Row.qml.
+# Catches deleting the lifted branch from Row.nameColor or Row.cellInk in ui/Row.qml.
 case_lifted() {
     local dir="$fixture_root/lifted"
     sandbox_scratch "$dir"
@@ -2339,7 +3333,7 @@ case_lifted() {
 
     # Found by name, not by a predicted sort position, see goto_row and icon_of for the same rule.
     local foreground symlink_colour i link_row=-1 plain_row=-1
-    read -r _background _surface foreground _muted _accent _error symlink_colour _executable <<< "$(ipc palette)"
+    read -r _background _surface foreground _muted _accent _error symlink_colour _executable _rest <<< "$(ipc palette)"
     for ((i = 0; i < 2; i++)); do
         case "$(ipc rowAt "$i")" in
             z-link\|*) link_row=$i ;;
@@ -2429,9 +3423,10 @@ case_columns() {
     [[ "$(ipc previewColumnState)" == "archive" ]] \
         || fail "columns: an archive previews as $(ipc previewColumnState)"
     archive_facts=$(ipc previewFacts)
-    [[ "$archive_facts" == *"Entries=3"* ]] \
+    # Preview board rule 1: Size above says what it weighs packed, so Entries carries both counts.
+    [[ "$archive_facts" == *"Entries=3, "*" out"* ]] \
         || fail "columns: the archive states $archive_facts, not the three members it holds"
-    [[ "$archive_facts" == *"Kind="*"Packed="*"Unpacked="* ]] \
+    [[ "$archive_facts" == *"Kind="*"Size="*"Modified="*"Entries="* ]] \
         || fail "columns: the archive tile's labels are wrong, got $archive_facts"
 
     seek_row_named "shot.png"
@@ -2443,7 +3438,7 @@ case_columns() {
     # glob pattern carrying the multiplication sign does not match under this suite's own locale.
     local facts
     facts=$(ipc previewFacts)
-    [[ "$(fact_labels "$facts")" == "Kind|Size|Pixels|Modified" ]] \
+    [[ "$(fact_labels "$facts")" == "Kind|Size|Modified|Pixels" ]] \
         || fail "columns: the image states $(fact_labels "$facts"), not the canvas's own four rows"
     [[ "$facts" == "Kind=PNG image|"* ]] || fail "columns: the image kind is wrong in $facts"
     [[ "$facts" == *"640"*"480"* ]] || fail "columns: the image pixels are wrong in $facts"
@@ -2454,7 +3449,7 @@ case_columns() {
     settle
     [[ "$(ipc previewColumnState)" == "text" ]] || fail "columns: notes.txt previews as $(ipc previewColumnState)"
     facts=$(ipc previewFacts)
-    [[ "$(fact_labels "$facts")" == "Kind|Size|Lines|Modified" ]] \
+    [[ "$(fact_labels "$facts")" == "Kind|Size|Modified|Lines" ]] \
         || fail "columns: the text states $(fact_labels "$facts")"
     [[ "$facts" == *"Lines=3"* ]] || fail "columns: the line count is wrong in $facts"
     printf 'COLUMNS text=%s\n' "$facts"
@@ -2542,18 +3537,246 @@ case_columns() {
     printf 'COLUMNS unsupported=%s state=%s\n' "$facts" "$(ipc previewColumnState)"
     shot columns-unsupported
 
+    # Toggling Hidden files re-asks the shown ancestors under the new key, or every column goes blank.
+    key . >/dev/null
+    settle
+    [[ "$(ipc showHidden)" == "true" ]] || fail "columns: . did not flip showHidden on"
+    [[ -n "$(ipc columnParentRowCentre 0)" ]] || fail "columns: toggling Hidden files left the parent column with no rows"
+    key . >/dev/null
+    settle
+    [[ "$(ipc showHidden)" == "false" ]] || fail "columns: a second . did not flip back off"
+    [[ -n "$(ipc columnParentRowCentre 0)" ]] || fail "columns: toggling Hidden files back left the parent column with no rows"
+
     click_chrome list
     settle
     [[ "$(ipc viewMode)" == "list" ]] || fail "columns: the list button did not switch back"
     kill_flea
 }
 
+# A click on the folder already shown lists nothing: the rail row and the columns
+# parent-column row of the current folder go through Nav.openPlace, a no-op on the
+# settled folder, so cursor, selection and scroll survive it. A click on another
+# folder still navigates. JS pins the decision in tests/js/reclick.js; this is the live half.
+case_reclick() {
+    local dir="$fixture_root/reclick"
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/aaa" "$dir/bbb"
+    printf 'in bbb\n' > "$dir/bbb/inside.txt"
+    local i seed
+    for i in $(seq -w 1 150); do printf 'body\n' > "$dir/file-$i.txt"; done
+    for i in $(seq -w 1 80); do printf 'body\n' > "$dir/aaa/file-$i.txt"; done
+    seed=$(jq -cn --arg path "$dir" --arg sub "$dir/aaa" '{view:"list",places:{favourites:[{label:"Reclick here",path:$path},{label:"Reclick sub",path:$sub}]}}')
+    seed_ui_state "$fixture_root/reclick-state" "$seed"
+    launch "$dir"
+    wait_listing 152
+    # Dirs sort first, so the two subdirs head the listing and the lit parent row later.
+    [[ "$(ipc rowAt 0)" == "aaa|dir|"* ]] || fail "reclick: row 0 is $(ipc rowAt 0), not the aaa directory"
+    [[ "$(ipc rowAt 1)" == "bbb|dir|"* ]] || fail "reclick: row 1 is $(ipc rowAt 1), not the bbb directory"
+    goto_row 40
+    key v >/dev/null
+    settle
+    [[ "$(ipc cursor)" == "40" ]] || fail "reclick: the cursor is $(ipc cursor), not row 40"
+    [[ "$(ipc selectedIndices)" == "40" ]] || fail "reclick: row 40 is not selected, got $(ipc selectedIndices)"
+    # Both taps below fire on release with no double-click deferral, so each half polls for the tap's own signal instead of waiting out an interval.
+    local tap_signal_timeout_s=5
+    local here_target rail_before deadline
+    here_target=$(rail_row_of 'Reclick here')
+    # The reach control is vacuous when the rail cursor already sits on the tapped row, so read it first and step it off with Home when it does.
+    rail_before=$(ipc railCursor)
+    if [[ "$rail_before" == "$here_target" ]]; then
+        key -k Tab >/dev/null; settle
+        [[ "$(ipc focusView)" == "rail" ]] || fail "reclick: Tab did not reach the rail, focus is $(ipc focusView)"
+        key -k Home >/dev/null; settle
+        rail_before=$(ipc railCursor)
+        [[ "$rail_before" != "$here_target" ]] || fail "reclick: the rail cursor would not leave row $here_target, so the reach control stays vacuous"
+        key -k Escape >/dev/null; settle
+        [[ "$(ipc focusView)" == "list" ]] || fail "reclick: Escape did not leave the rail, focus is $(ipc focusView)"
+    fi
+    # Escape must not clear the row 40 mark, or the later unchanged-selection read compares empty to empty.
+    [[ "$(ipc selectedIndices)" == "40" ]] || fail "reclick: Escape cleared the selection, got $(ipc selectedIndices)"
+    local req cur sel cy
+    req=$(ipc listRequests); cur=$(ipc cursor); sel=$(ipc selectedIndices); cy=$(ipc listContentY)
+    (( cy > 0 )) || fail "reclick: row 40 left contentY at $cy, so the scroll assertion is vacuous"
+    # Leaving the rail moves focus only, so the Home step above survives it; re-read here or the reach poll below is vacuous.
+    rail_before=$(ipc railCursor)
+    [[ "$rail_before" != "$here_target" ]] || fail "reclick: the rail cursor is back on row $here_target before the tap, so the reach control stays vacuous"
+    click_rail_row "$here_target" left
+    deadline=$(( $(date +%s%3N) + tap_signal_timeout_s * 1000 ))
+    while (( $(date +%s%3N) < deadline )); do
+        [[ "$(ipc railCursor)" == "$here_target" ]] && break
+        sleep 0.1
+    done
+    [[ "$(ipc railCursor)" == "$here_target" ]] \
+        || fail "reclick: the rail tap never reached the rail, cursor is $(ipc railCursor)"
+    # One turn for the tap's activate to run before the no-op reads.
+    settle
+    [[ "$(ipc path)" == "$dir" ]] || fail "reclick: a rail click on the shown folder left $dir for $(ipc path)"
+    [[ "$(ipc listRequests)" == "$req" ]] || fail "reclick: a rail click on the shown folder re-listed, $req then $(ipc listRequests)"
+    [[ "$(ipc cursor)" == "$cur" ]] || fail "reclick: a rail click on the shown folder moved the cursor to $(ipc cursor)"
+    [[ "$(ipc selectedIndices)" == "$sel" ]] || fail "reclick: a rail click on the shown folder lost the selection, got $(ipc selectedIndices)"
+    [[ "$(ipc listContentY)" == "$cy" ]] || fail "reclick: a rail click on the shown folder scrolled to $(ipc listContentY)"
+    printf 'RECLICK rail no-op req=%s cursor=%s selected=%s contentY=%s\n' "$req" "$cur" "$sel" "$cy"
+    # A click on a different folder still navigates: the positive control the no-op above needs.
+    click_rail_row "$(rail_row_of 'Reclick sub')" left
+    wait_path "$dir/aaa"
+    [[ "$(ipc listRequests)" -gt "$req" ]] || fail "reclick: a rail click on another folder listed nothing"
+    # The columns half: the parent column shows $dir with aaa lit at row 0, and the tap on the bbb sibling at row 1 is its positive control.
+    switch_view columns
+    [[ "$(ipc viewMode)" == "columns" ]] || fail "reclick: the view did not switch to columns"
+    goto_row 40
+    key v >/dev/null
+    settle
+    [[ "$(ipc cursor)" == "40" && "$(ipc selectedIndices)" == "40" ]] \
+        || fail "reclick: columns setup left cursor $(ipc cursor) selected $(ipc selectedIndices)"
+    req=$(ipc listRequests); cur=$(ipc cursor); sel=$(ipc selectedIndices); cy=$(ipc viewContentY)
+    (( cy > 0 )) || fail "reclick: row 40 left the active column at $cy, so the scroll assertion is vacuous"
+    # Focus off the list first, so the tap has a signal to change: the pane press handler returns focus to the list.
+    key -k Tab >/dev/null; settle
+    [[ "$(ipc focusView)" == "rail" ]] || fail "reclick: Tab did not reach the rail, focus is $(ipc focusView)"
+    local fx fy wx wy
+    # The focus witness below fires on any pane press, so the row-1 sibling tap proves the same seam and offsets land on rows.
+    read -r fx fy <<< "$(ipc columnParentRowCentre 0)"
+    [[ -n "$fy" ]] || fail "reclick: the parent column shows no row 0 for the lit aaa row"
+    read -r wx wy _ww _wh < <(window_box) || fail "native window coordinates unavailable"
+    omarchy-drive click "$((wx + fx))" "$((wy + fy))" left >/dev/null
+    deadline=$(( $(date +%s%3N) + tap_signal_timeout_s * 1000 ))
+    while (( $(date +%s%3N) < deadline )); do
+        [[ "$(ipc focusView)" == "list" ]] && break
+        sleep 0.1
+    done
+    [[ "$(ipc focusView)" == "list" ]] \
+        || fail "reclick: the parent-column tap never reached the pane, focus is $(ipc focusView)"
+    # One turn for the release's activate to run before the no-op reads.
+    settle
+    [[ "$(ipc path)" == "$dir/aaa" ]] || fail "reclick: a tap on the lit parent row left $dir/aaa for $(ipc path)"
+    [[ "$(ipc listRequests)" == "$req" ]] || fail "reclick: a tap on the lit parent row re-listed, $req then $(ipc listRequests)"
+    [[ "$(ipc cursor)" == "$cur" ]] || fail "reclick: a tap on the lit parent row moved the cursor to $(ipc cursor)"
+    [[ "$(ipc selectedIndices)" == "$sel" ]] || fail "reclick: a tap on the lit parent row lost the selection, got $(ipc selectedIndices)"
+    [[ "$(ipc viewContentY)" == "$cy" ]] || fail "reclick: a tap on the lit parent row scrolled to $(ipc viewContentY)"
+    printf 'RECLICK parent no-op req=%s cursor=%s selected=%s contentY=%s\n' "$req" "$cur" "$sel" "$cy"
+    read -r fx fy <<< "$(ipc columnParentRowCentre 1)"
+    [[ -n "$fy" ]] || fail "reclick: the parent column shows no row 1 for the bbb sibling"
+    omarchy-drive click "$((wx + fx))" "$((wy + fy))" left >/dev/null
+    wait_path "$dir/bbb"
+    [[ "$(ipc listRequests)" -gt "$req" ]] || fail "reclick: a tap on the bbb sibling listed nothing"
+    printf 'RECLICK sibling navigates\n'
+    kill_flea
+}
+
+# At / the climb stops, so every shown ancestor slot stays blank and keeps its width
+# instead of repeating / one and two levels down. Left at / is a silent no-op, and the
+# parent column lists / again once /usr is opened. JS pins the climb in tests/js/columns.js.
+case_colroot() {
+    local n count _cwx _cwy _cww _cwh
+    for n in 3 4 5; do
+        seed_ui_state "$fixture_root/colroot-state-$n" '{"view":"columns","columnsLimit":'"$n"'}'
+        launch "/"
+        wait_colroot_settled
+        [[ "$(ipc viewMode)" == "columns" ]] || fail "colroot: limit $n opened in $(ipc viewMode), not columns"
+        [[ "$(ipc path)" == "/" ]] || fail "colroot: limit $n opened at $(ipc path), not /"
+        count=$(ipc columnCount)
+        [[ "$count" =~ ^[0-9]+$ ]] || fail "colroot: limit $n answered count [$count], not a number"
+        read -r _cwx _cwy _cww _cwh < <(window_box) || fail "native window coordinates unavailable"
+        [[ "$count" == "$n" ]] || fail "colroot: limit $n shows $count columns on a ${_cww}px window, not $n"
+        # A blank slot has no rows, so its row centre is empty; centreOf answers "" for null.
+        [[ -z "$(ipc columnParentRowCentre 0)" ]] \
+            || fail "colroot: limit $n shows a parent row at /, the duplicate / column is back"
+        if (( n >= 4 )); then
+            [[ -z "$(ipc columnGrandparentRowCentre 0)" ]] \
+                || fail "colroot: limit $n shows a grandparent row at /"
+        fi
+        if (( n >= 5 )); then
+            [[ -z "$(ipc columnGreatGrandparentRowCentre 0)" ]] \
+                || fail "colroot: limit $n shows a great-grandparent row at /"
+        fi
+        [[ "$(ipc rowAt 0)" != "loading" ]] || fail "colroot: limit $n left the active column with no rows"
+        printf 'COLROOT limit=%s count=%s parent=blank active=%s\n' "$n" "$count" "$(ipc rowAt 0 | cut -d'|' -f1)"
+        shot "colroot-$n"
+        kill_flea
+    done
+    seed_ui_state "$fixture_root/colroot-state-left" '{"view":"columns","columnsLimit":5}'
+    launch "/"
+    wait_colroot_settled
+    local req msg
+    req=$(ipc listRequests); msg=$(ipc lastMessage)
+    key -k Left >/dev/null
+    settle
+    [[ "$(ipc path)" == "/" ]] || fail "colroot: Left at / left / for $(ipc path)"
+    [[ "$(ipc listRequests)" == "$req" ]] || fail "colroot: Left at / re-listed, $req then $(ipc listRequests)"
+    [[ "$(ipc lastMessage)" == "$msg" ]] || fail "colroot: Left at / said $(ipc lastMessage)"
+    seek_row_named "usr"
+    key -k Return >/dev/null
+    wait_path "/usr"
+    [[ -n "$(ipc columnParentRowCentre 0)" ]] \
+        || fail "colroot: the parent column shows no row for / under /usr"
+    # Positive control: at depth 3 every ancestor seam answers non-empty, so the blank reads above cannot pass on a missing seam.
+    seek_row_named "share"
+    key -k Return >/dev/null
+    wait_path "/usr/share"
+    settle
+    [[ -n "$(ipc columnParentRowCentre 0)" ]] \
+        || fail "colroot: the parent column shows no row under /usr/share"
+    [[ -n "$(ipc columnGrandparentRowCentre 0)" ]] \
+        || fail "colroot: the grandparent column shows no row under /usr/share"
+    seek_row_named "doc"
+    key -k Return >/dev/null
+    wait_path "/usr/share/doc"
+    settle
+    [[ -n "$(ipc columnParentRowCentre 0)" ]] \
+        || fail "colroot: the parent column shows no row under /usr/share/doc"
+    [[ -n "$(ipc columnGrandparentRowCentre 0)" ]] \
+        || fail "colroot: the grandparent column shows no row under /usr/share/doc"
+    [[ -n "$(ipc columnGreatGrandparentRowCentre 0)" ]] \
+        || fail "colroot: the great-grandparent column shows no row under /usr/share/doc"
+    printf 'COLROOT left=no-op parent-lists-slash depth-controls=ok\n'
+    kill_flea
+}
+
+# The listing at / has no fixed total, so this waits for a settled path rather than a count.
+wait_colroot_settled() {
+    local row
+    for _attempt in $(seq 1 300); do
+        row=$(ipc rowAt 0 2>/dev/null || printf loading)
+        if [[ "$(ipc path 2>/dev/null)" == "/" && "$row" != "loading" && "$(ipc listInFlight 2>/dev/null)" == "false" ]]; then
+            return
+        fi
+        sleep 0.05
+    done
+    fail "colroot: / never settled, row 0 is $row"
+}
+
+# Directive 48: there is no centre lane. The transient ends one padding before the text the disk facts
+# draw, and those facts never move: everything below is read off the rendered items, and the padding
+# comes from the theme's own token through ipc metrics rather than from the layout under test.
+transient_beside_disk() {
+    local label="$1" state lane disk padding gap disk_now
+    state=$(ipc statusFooterState)
+    lane=$(jq -c '.lane' <<< "$state")
+    disk=$(jq -c '.disk' <<< "$state")
+    padding=$(ipc metrics | cut -d' ' -f3)
+    [[ "$padding" =~ ^[0-9]+$ ]] || fail "status: the $label strip reported no padding token, got [$padding]"
+    jq -e '(.lane.width | numbers) and (.disk.width | numbers) and .disk.width > 0 and .lane.width > 0' <<< "$state" >/dev/null \
+        || fail "status: the $label strip has no transient to measure: lane=$lane disk=$disk"
+    # The facts are right aligned inside a fixed zone, so their text begins at its right edge less its own width.
+    gap=$(jq -r --argjson p "$padding" '(.disk.x + .disk.width - ([.disk.implicitWidth, .disk.width] | min))
+        - (.lane.x + .lane.width) - $p' <<< "$state")
+    printf 'TRANSIENT %s lane=%s disk=%s padding=%s gap=%s\n' "$label" "$lane" "$disk" "$padding" "$gap"
+    awk -v g="$gap" 'BEGIN { exit (g < 1 && g > -1) ? 0 : 1 }' \
+        || fail "status: the $label transient ends $gap px off one padding before the disk facts: lane=$lane disk=$disk"
+    # Rule 2: the facts keep their zone. status_disk_x is taken before any transient exists.
+    disk_now=$(jq -r '.disk.x' <<< "$state")
+    [[ "${status_disk_x:-}" =~ ^[0-9.]+$ ]] || fail "status: the $label check has no disk baseline to hold to"
+    [[ "$disk_now" == "$status_disk_x" ]] \
+        || fail "status: the $label transient moved the disk facts from $status_disk_x to $disk_now"
+}
 case_status() {
-    local dir="$fixture_root/status" failure
+    local dir="$fixture_root/status" failure status_disk_x
     sandbox_scratch "$dir"
     printf 'body\n' > "$dir/notes.txt"
     launch "$dir"
     wait_listing 1
+    status_disk_x=$(ipc statusFooterState | jq -r '.disk.x')
+    [[ "$status_disk_x" =~ ^[0-9.]+$ ]] || fail "status: the quiet strip reported no disk position, got [$status_disk_x]"
     sandbox_require "$dir"
     chmod u-w "$dir"
     click_row 0 right
@@ -2573,7 +3796,11 @@ case_status() {
     key -k Return >/dev/null
     settle
     [[ "$(ipc statusPrimary)" == "$failure" ]] || fail "status: search hid error"
-    [[ "$(ipc statusSecondary)" == *scanned* || "$(ipc statusSecondary)" == *result* ]] || fail "status: search lost secondary count"
+    transient_beside_disk "single pane, error"
+    # V7, StatusBar rule 4: a refusal is drawn alone, so the walk's own count yields while one stands
+    # and comes back when it is acknowledged. Before this the two shared the zone in one sentence.
+    [[ "$(ipc statusSecondary)" == " · esc dismisses" ]] \
+        || fail "status: the refusal kept company other than its own key: $(ipc statusSecondary)"
     [[ "$(ipc statusColor)" == "$(ipc palette | cut -d' ' -f6)" ]] || fail "status: error lost its color"
     shot status-error-search
     key -k Escape >/dev/null
@@ -2582,7 +3809,40 @@ case_status() {
     key -k Escape >/dev/null
     settle
     [[ "$(ipc statusError)" == false ]] || fail "status: Escape did not acknowledge error"
+    # V7: a result's hint is drawn on the secondary the way the undo hint is, so the sentence itself
+    # is one fact and does not end in advice. The clipboard note put up before the search says both.
+    [[ "$(ipc statusPrimary)" == "Copied 1 item" && "$(ipc statusSecondary)" == " · p pastes" ]] \
+        || fail "status: the clipboard note reads $(ipc statusPrimary)$(ipc statusSecondary)"
     shot status-dismissed
+    transient_beside_disk "single pane"
+    shot status-transient
+    # A selection widens the counts zone, which is what moves the leftover between the two zones and
+    # what the old centring followed. The strip's own midpoint does not move, so this state is the one
+    # that tells the two rules apart.
+    key -M ctrl -k a -m ctrl >/dev/null
+    settle
+    [[ "$(ipc statusFooterState | jq -r '.left.text')" == *selected* ]] \
+        || fail "status: select all did not widen the counts zone, it reads $(ipc statusFooterState | jq -r '.left.text')"
+    transient_beside_disk "single pane, selection"
+    shot status-transient-selection
+    key -k Escape >/dev/null
+    settle
+    # The trash keeps the same rule, so a transient is put up on the listing first and carried in:
+    # the trash view raises none of its own, and a lane with nothing in it measures nothing.
+    key y >/dev/null
+    settle
+    click_rail_row "$(rail_row_of 'Trash')" left
+    settle
+    settle
+    # Or the measurement below is the listing's again, taken under a name that says otherwise.
+    [[ "$(ipc statusFooterState | jq -r '.path')" == "Trash" ]] \
+        || fail "status: the Trash row did not open the trash, the strip still says $(ipc statusFooterState | jq -r '.path')"
+    transient_beside_disk "trash"
+    shot status-transient-trash
+    key -k Escape >/dev/null
+    settle
+    [[ "$(ipc statusFooterState | jq -r '.path')" == "$dir" ]] \
+        || fail "status: Escape did not return the strip to $dir, it says $(ipc statusFooterState | jq -r '.path')"
     kill_flea
 }
 
@@ -2592,9 +3852,21 @@ case_operations() {
     printf 'body\n' > "$dir/notes.txt"
     magick -size 48x32 xc:navy "$dir/shot.png"
     bsdtar -a -c -f "$dir/bundle.tar.zst" -C "$dir" notes.txt
+    # #165: the card case needs an extraction still running when the harness looks.
+    python3 - "$dir/slowpayload" <<'PY' || fail "operations: the slow extraction fixture could not be populated"
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+root.mkdir()
+for index in range(100000):
+    (root / f"member_{index}").touch()
+PY
+    bsdtar -a -c -f "$dir/slow.zip" -C "$dir/slowpayload" . \
+        || fail "operations: the slow extraction archive could not be built"
 
     launch "$dir"
-    wait_listing 3
+    wait_listing 5
 
     # The submenu is exactly the table the backend probed, never a fixed list.
     [[ "$(ipc archiveFormats)" == *"tar.zst"* ]] || fail "operations: the probed formats are $(ipc archiveFormats)"
@@ -2662,6 +3934,365 @@ case_operations() {
     [[ "$(magick identify -format '%m' "$dir/shot.png")" == "PNG" ]] \
         || fail "operations: the source was written over"
     printf 'OPERATIONS converted=%s\n' "$(ipc lastMessage)"
+
+    # #165: Extract drives the copy card, and its Escape cancel must leave no destination.
+    echo "-- extract in the copy card, cancelled with the transfer's own key --"
+    local state deadline
+    seek_row_named "slow.zip"
+    click_row "$(ipc cursor)" right
+    settle
+    menu_seek "Extract"
+    key -k Return >/dev/null
+    deadline=$((SECONDS + 20))
+    state=""
+    while (( SECONDS < deadline )); do
+        state=$(ipc statusActivityState) || fail "operations: extract-card observation failed"
+        jq -e '.transferCard.visible and (.transferCard.byteLine == "") and (.transferCard.cancel.visible and .transferCard.cancel.enabled) and (.activities[0].text | startswith("Extracting · slow.zip"))' <<< "$state" >/dev/null && break
+        sleep 0.05
+    done
+    jq -e '.transferCard.visible and (.transferCard.byteLine == "") and (.transferCard.cancel.visible and .transferCard.cancel.enabled) and (.activities[0].text | startswith("Extracting · slow.zip"))' <<< "$state" >/dev/null \
+        || fail "operations: no live no-byte Extracting card before the deadline: $state"
+    printf 'OPERATIONS extract-card=%s\n' "$state"
+    shot operations-extracting
+    key -k Escape >/dev/null
+    deadline=$((SECONDS + 20))
+    while (( SECONDS < deadline )); do
+        state=$(ipc statusActivityState) || fail "operations: extract-cancel observation failed"
+        jq -e '(.transferCard.visible | not) and (.activities | length) == 0' <<< "$state" >/dev/null && break
+        sleep 0.05
+    done
+    jq -e '(.transferCard.visible | not) and (.activities | length) == 0' <<< "$state" >/dev/null \
+        || fail "operations: a cancelled extraction never reached a terminal state: $state"
+    [[ ! -e "$dir/slow" ]] || fail "operations: a cancelled extract published $dir/slow"
+    printf 'OPERATIONS extract-cancelled=%s\n' "$state"
+
+    echo "-- a completed extract writes the tree beside the archive --"
+    seek_row_named "bundle.tar.zst"
+    click_row "$(ipc cursor)" right
+    settle
+    menu_seek "Extract"
+    key -k Return >/dev/null
+    for _ in $(seq 1 80); do [[ -f "$dir/bundle/notes.txt" ]] && break; sleep 0.25; done
+    [[ -f "$dir/bundle/notes.txt" ]] || fail "operations: extract wrote nothing, bar says $(ipc lastMessage)"
+    printf 'OPERATIONS extracted=%s\n' "$(ipc lastMessage)"
+    kill_flea
+}
+
+# Issue: after dd the cursor lands on the row that took the removed one's place, which for a block
+# is the row after the block and not the row below where the cursor happened to sit. PR 53, W4HO-ham.
+case_dd() {
+    local dir="$fixture_root/dd"
+    sandbox_scratch "$dir"
+    local i
+    for i in 1 2 3 4 5 6; do printf 'body\n' > "$dir/f$i.txt"; done
+    # The trash this case fills is its own, inside the sandbox this case owns, never the operator's.
+    export XDG_DATA_HOME="$fixture_root/dd-data"
+    mkdir -p "$XDG_DATA_HOME"
+
+    launch "$dir"
+    wait_listing 6
+
+    echo "-- a block leaves together, and the cursor takes the block's place --"
+    goto_row 1
+    key v >/dev/null
+    key J >/dev/null
+    settle
+    [[ "$(ipc selectedIndices)" == "1,2" ]] || fail "dd: the block is $(ipc selectedIndices), not rows 1,2"
+    key d >/dev/null
+    wait_message "Press d again to trash, or Delete on its own."
+    key d >/dev/null
+    for _attempt in $(seq 1 40); do [[ -e "$dir/f3.txt" ]] || break; sleep 0.25; done
+    [[ -e "$dir/f3.txt" ]] && fail "dd: the block was not trashed, the bar reads $(ipc lastMessage)"
+    # Hard rule 9 in the case itself: the rows went to this case's own trash and not the operator's.
+    [[ -s "$XDG_DATA_HOME/Trash/files/f2.txt" && -s "$XDG_DATA_HOME/Trash/files/f3.txt" ]] \
+        || fail "dd: the block did not land in $XDG_DATA_HOME/Trash/files, which holds $(ls -A "$XDG_DATA_HOME/Trash/files" 2>&1)"
+    wait_listing 4
+    settle
+    [[ "$(ipc cursor)" == "1" ]] \
+        || fail "dd: after a block the cursor is $(ipc cursor), not 1, the row the block left"
+    [[ "$(ipc rowAt "$(ipc cursor)")" == "f4.txt|"* ]] \
+        || fail "dd: after a block the cursor sits on $(ipc rowAt "$(ipc cursor)"), not the row that slid up"
+    printf 'DD block row=%s cursor=%s\n' "$(ipc rowAt "$(ipc cursor)")" "$(ipc cursor)"
+
+    echo "-- one row, and the cursor keeps its own index --"
+    key -k Escape >/dev/null
+    settle
+    seek_row_named "f5.txt"
+    local at
+    at=$(ipc cursor)
+    key d >/dev/null
+    wait_message "Press d again to trash, or Delete on its own."
+    key d >/dev/null
+    for _attempt in $(seq 1 40); do [[ -e "$dir/f5.txt" ]] || break; sleep 0.25; done
+    [[ -e "$dir/f5.txt" ]] && fail "dd: the row was not trashed, the bar reads $(ipc lastMessage)"
+    wait_listing 3
+    settle
+    [[ "$(ipc cursor)" == "$at" ]] || fail "dd: the cursor left row $at for $(ipc cursor)"
+    [[ "$(ipc rowAt "$(ipc cursor)")" == "f6.txt|"* ]] \
+        || fail "dd: the cursor sits on $(ipc rowAt "$(ipc cursor)"), not the row that slid up"
+
+    # The delete's anchor selects the row it landed on, which is the cursor row, so the next dd
+    # takes the cursor's row; Escape is what clears the selection.
+    [[ "$(ipc selectionCount)" == "1" ]] \
+        || fail "dd: the row the cursor landed on is not selected, count is $(ipc selectionCount)"
+    key -k Escape >/dev/null
+    settle
+    [[ "$(ipc selectionCount)" == "0" ]] || fail "dd: Escape left $(ipc selectionCount) rows selected"
+
+    echo "-- the last row clamps rather than running past the end --"
+    seek_row_named "f6.txt"
+    at=$(ipc cursor)
+    key d >/dev/null
+    wait_message "Press d again to trash, or Delete on its own."
+    key d >/dev/null
+    for _attempt in $(seq 1 40); do [[ -e "$dir/f6.txt" ]] || break; sleep 0.25; done
+    [[ -e "$dir/f6.txt" ]] && fail "dd: the last row was not trashed, the bar reads $(ipc lastMessage)"
+    wait_listing 2
+    settle
+    [[ "$(ipc cursor)" == "$((at - 1))" ]] \
+        || fail "dd: after the last row the cursor is $(ipc cursor), not $((at - 1))"
+    [[ "$(ipc rowAt "$(ipc cursor)")" == "f4.txt|"* ]] \
+        || fail "dd: the clamped cursor sits on $(ipc rowAt "$(ipc cursor)")"
+    kill_flea
+}
+
+# A click followed by a plain Down moves the lone selection with the cursor, so the dd after
+# it trashes the cursor row and not the clicked one: list, then grid, each asserting the clicked
+# file is still in the fixture and the cursor row is in this case's own Trash, case_dd's pattern.
+case_ddclick() {
+    local view dir count cur want stride
+    for view in list grid; do
+        dir="$fixture_root/ddclick-$view"
+        sandbox_scratch "$dir"
+        # The grid leg holds two full strides plus one, so Down from 0 lands mid-list and cannot clamp to a short last row.
+        if [[ "$view" == grid ]]; then count=61; else count=2; fi
+        local i
+        for i in $(seq 0 $((count - 1))); do printf 'body\n' > "$dir/f$i.txt"; done
+        export XDG_DATA_HOME="$fixture_root/ddclick-$view-data"
+        mkdir -p "$XDG_DATA_HOME"
+
+        launch "$dir"
+        wait_listing "$count"
+        if [[ "$view" == grid ]]; then
+            click_chrome grid
+            settle
+            [[ "$(ipc viewMode)" == grid ]] || fail "ddclick: the chrome did not switch to the grid"
+            stride="$(ipc gridColumns)"
+            [[ "$stride" =~ ^[0-9]+$ && "$stride" -ge 2 ]] || fail "ddclick (grid): gridColumns answered '$stride'"
+            (( count >= 2 * stride + 1 )) || fail "ddclick (grid): $count files hold fewer than 2*$stride+1, so Down could clamp"
+        fi
+
+        click_row 0 left
+        settle
+        [[ "$(ipc cursor)" == "0" ]] || fail "ddclick ($view): the click left the cursor on $(ipc cursor), not 0"
+        [[ "$(ipc selectedIndices)" == "0" ]] || fail "ddclick ($view): the click selected $(ipc selectedIndices), not 0"
+        key -k Down >/dev/null
+        settle
+        cur="$(ipc cursor)"
+        if [[ "$view" == grid ]]; then
+            [[ "$cur" == "$stride" ]] || fail "ddclick (grid): Down left the cursor on $cur, not one stride ($stride) below 0"
+        else
+            [[ "$cur" == "1" ]] || fail "ddclick ($view): Down left the cursor on $cur, not 1"
+        fi
+        [[ "$(ipc selectedIndices)" == "$cur" ]] || fail "ddclick ($view): the lone selection is $(ipc selectedIndices), not the cursor row $cur"
+        want="f$cur.txt"
+        key d >/dev/null
+        wait_message "Press d again to trash, or Delete on its own."
+        key d >/dev/null
+        for _attempt in $(seq 1 40); do [[ -e "$dir/$want" ]] || break; sleep 0.25; done
+        [[ -e "$dir/$want" ]] && fail "ddclick ($view): $want survived, the bar reads $(ipc lastMessage)"
+        [[ -e "$dir/f0.txt" ]] || fail "ddclick ($view): the clicked f0.txt went to Trash instead of the cursor row"
+        # Hard rule 9 in the case itself: the row went to this case's own trash and not the operator's.
+        [[ -s "$XDG_DATA_HOME/Trash/files/$want" ]] \
+            || fail "ddclick ($view): $want did not land in $XDG_DATA_HOME/Trash/files, which holds $(ls -A "$XDG_DATA_HOME/Trash/files" 2>&1)"
+        printf 'DDCLICK view=%s kept=f0.txt trashed=%s cursor=%s\n' "$view" "$want" "$cur"
+        kill_flea
+    done
+}
+
+# Paste onto a name that exists: asked once, and Cancel, Keep both, Skip and Replace with its Undo each do
+# what the card says. Replace fills this case's own trash, inside the sandbox, and Undo empties it again.
+# Every collide-<state> shot is one the canvas board draws, for the controller to compare by eye.
+case_collide() {
+    local dir="$fixture_root/collide" menus_checks=0 name wx wy rx ry
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/to"
+    for name in a b c d; do printf 'yours %s\n' "$name" > "$dir/$name.txt"; done
+    printf 'notes\n' > "$dir/notes.txt"
+    # Text bodies under a text name: a .png holding text makes the preview column log a decode failure, which the log check refuses.
+    printf 'yours\n' > "$dir/photo.txt"
+    printf 'there\n' > "$dir/to/photo.txt"
+    export XDG_DATA_HOME="$fixture_root/collide-data"
+    sandbox_scratch "$XDG_DATA_HOME"
+    # Undo finds a replaced item through gio trash --list, which only a gvfsd started with this XDG_DATA_HOME answers, so the window gets a private session bus.
+    local bus
+    mapfile -t bus < <(dbus-daemon --session --fork --print-address=1 --print-pid=1)
+    [[ ${#bus[@]} -eq 2 && "${bus[1]}" =~ ^[0-9]+$ ]] || fail "collide: no private session bus, dbus-daemon printed: ${bus[*]}"
+    collide_bus_pid=${bus[1]}
+    trap '( kill_flea ) >/dev/null 2>&1 || true; kill "$collide_bus_pid" 2>/dev/null || true' EXIT
+    export DBUS_SESSION_BUS_ADDRESS="${bus[0]}"
+
+    # A finished transfer's own line, polled because it stands only until the bar clears it; the undo hint tells it from the clipboard's.
+    collide_said() {
+        local want="$1" seen=""
+        for _attempt in $(seq 1 300); do
+            seen=$(ipc lastMessage)
+            [[ "$seen" == "$want"* ]] && return 0
+            sleep 0.05
+        done
+        fail "collide: the bar never said $want, it said $seen"
+    }
+    collide_until() {
+        local what="$1"; shift
+        for _attempt in $(seq 1 300); do
+            "$@" && return 0
+            sleep 0.05
+        done
+        fail "collide: $what"
+    }
+    collide_holds() { [[ "$(cat "$1" 2>/dev/null)" == "$2" ]]; }
+    collide_absent() { [[ ! -e "$1" && ! -L "$1" ]]; }
+    collide_untouched() { collide_absent "$dir/to/photo copy.txt" && collide_absent "$dir/to/notes.txt" && collide_absent "$dir/to/c.txt" && collide_holds "$dir/to/photo.txt" there; }
+    # The six files onto the clipboard and the pane into to, which is the whole of every paste below.
+    collide_copy_six() {
+        launch "$dir"
+        wait_listing 7
+        seek_row_named "a.txt"
+        key v >/dev/null
+        for _ in 1 2 3 4 5; do key J >/dev/null; done
+        settle
+        [[ "$(ipc selectedIndices)" == "1,2,3,4,5,6" ]] || fail "collide: the six files are not selected, $(ipc selectedIndices) is"
+        key y >/dev/null
+        menus_expect keyDeliveryState '(.clipboard.paths | length) == 6 and (.clipboard.cut | not)' "the six files are on the clipboard"
+        seek_row_named "to"
+        key -k Return >/dev/null
+        wait_path "$dir/to"
+    }
+    # Nothing on the card can wrap: the title and the names elide, and the one explanation line stays one line.
+    collide_one_line() {
+        menus_expect collideState '.buttonsFit and (.titleTruncated | not) and .explainLines == 1 and ([.buttons[].visible] | all)' "$1"
+    }
+
+    collide_copy_six
+    wait_listing 1
+
+    echo "-- asked once, on Keep both, and Cancel sends nothing --"
+    key p >/dev/null
+    menus_expect collideState '.opened and .title == "photo.txt already exists in to" and .names == ["photo.txt"] and .more == ""
+        and .explain == "Replaced items go to Trash, and Undo restores them." and .focus == "keep"' "one collision is asked about once, on Keep both"
+    collide_one_line "the one-name card keeps every line to one line"
+    shot collide-one-keep
+    key -M ctrl -k Return -m ctrl >/dev/null
+    settle
+    menus_expect collideState '.opened' "a modified Enter is ignored"
+
+    echo "-- the mouse back button leaves the pane where it is behind the card --"
+    command -v ydotool >/dev/null || fail "collide: ydotool is missing, so the mouse back button cannot be pressed"
+    export YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-$XDG_RUNTIME_DIR/.ydotool_socket}"
+    [[ -S "$YDOTOOL_SOCKET" ]] || fail "collide: no ydotoold socket at $YDOTOOL_SOCKET"
+    read -r wx wy _ _ < <(window_box) || fail "native window coordinates unavailable"
+    read -r rx ry <<< "$(ipc rowCentre 0)"
+    [[ -n "$rx" && -n "$ry" ]] || fail "collide: row 0 has no on-screen centre to park the pointer on"
+    omarchy-drive move "$((rx + wx))" "$((ry + wy))" >/dev/null || fail "collide: the pointer could not be parked over the window"
+    ydotool click 0xC3 >/dev/null 2>&1 || fail "collide: ydotool refused the mouse back button"
+    settle
+    settle
+    [[ "$(ipc path)" == "$dir/to" ]] || fail "collide: the mouse back button took the pane to $(ipc path) behind the card"
+    menus_expect collideState '.opened and .focus == "keep"' "the mouse back button leaves the card as it was"
+
+    key -k Escape >/dev/null
+    menus_expect collideState '.opened | not' "Escape cancels"
+    menus_expect keyDeliveryState '(.clipboard.paths | length) == 6 and (.paneFocus or .listFocus)' "Cancel keeps the clipboard and hands the list back"
+    settle
+    collide_untouched || fail "collide: Cancel changed $dir/to: $(ls -A "$dir/to")"
+    # The control: the same press at the same spot with the card shut does go back, so the one above reached the pane and was refused.
+    ydotool click 0xC3 >/dev/null 2>&1 || fail "collide: ydotool refused the control press"
+    wait_path "$dir"
+    seek_row_named "to"
+    key -k Return >/dev/null
+    wait_path "$dir/to"
+    wait_listing 1
+
+    echo "-- Enter takes Keep both, and Undo takes the copies away --"
+    key p >/dev/null
+    menus_expect collideState '.opened and .focus == "keep"' "the card opens on Keep both again"
+    key -k Return >/dev/null
+    collide_said "Copied 6 items · z undoes"
+    collide_holds "$dir/to/photo copy.txt" yours || fail "collide: Keep both wrote no photo copy.txt"
+    collide_holds "$dir/to/photo.txt" there || fail "collide: Keep both touched the photo.txt already there"
+    collide_holds "$dir/to/notes.txt" notes || fail "collide: Keep both did not copy the rest"
+    key z >/dev/null
+    collide_until "Undo left the kept copies in place" collide_untouched
+
+    echo "-- Skip leaves the collision and copies the rest --"
+    key p >/dev/null
+    menus_expect collideState '.opened' "the card opens for Skip"
+    key h >/dev/null
+    menus_expect collideState '.focus == "skip"' "h moves the focus to Skip"
+    key -k Return >/dev/null
+    collide_said "Copied 5 of 6 · 1 skipped · z undoes"
+    # The files are small, so the transfer card is gone by now and the line it leaves is what shows.
+    shot collide-skip-done
+    collide_holds "$dir/to/photo.txt" there || fail "collide: Skip touched the photo.txt already there"
+    collide_absent "$dir/to/photo copy.txt" || fail "collide: Skip kept a copy"
+    collide_holds "$dir/to/notes.txt" notes || fail "collide: Skip did not copy the rest"
+    key z >/dev/null
+    collide_until "Undo left the skipped transfer's copies in place" collide_untouched
+
+    echo "-- Replace sends the old item to Trash, and one Undo swaps them back --"
+    key p >/dev/null
+    menus_expect collideState '.opened' "the card opens for Replace"
+    key l >/dev/null
+    menus_expect collideState '.focus == "replace"' "l moves the focus to Replace"
+    shot collide-one-replace
+    key -k Return >/dev/null
+    collide_said "Copied 6 items · z undoes"
+    collide_holds "$dir/to/photo.txt" yours || fail "collide: Replace did not put the incoming photo.txt in place"
+    collide_holds "$XDG_DATA_HOME/Trash/files/photo.txt" there \
+        || fail "collide: the replaced photo.txt is not in this case's trash: $(ls -A "$XDG_DATA_HOME/Trash/files" 2>&1)"
+    shot collide-replaced
+    key z >/dev/null
+    collide_until "Undo did not restore the replaced photo.txt" collide_untouched
+    collide_absent "$XDG_DATA_HOME/Trash/files/photo.txt" || fail "collide: Undo left the old photo.txt in Trash as well"
+
+    echo "-- several names, all of them listed --"
+    for name in a b; do printf 'there %s\n' "$name" > "$dir/to/$name.txt"; done
+    key p >/dev/null
+    menus_expect collideState '.opened and .title == "3 items already exist in to" and .names == ["a.txt","b.txt","photo.txt"] and .more == ""' \
+        "three collisions are all named, with no more line"
+    collide_one_line "the several-name card keeps every line to one line"
+    shot collide-several
+    key -k Escape >/dev/null
+    menus_expect collideState '.opened | not' "Escape cancels the several-name card"
+
+    echo "-- more names than the card lists: three of them, and the rest counted --"
+    for name in c d; do printf 'there %s\n' "$name" > "$dir/to/$name.txt"; done
+    key p >/dev/null
+    menus_expect collideState '.opened and .title == "5 items already exist in to" and .names == ["a.txt","b.txt","c.txt"] and .more == "and 2 more"' \
+        "five collisions name three and count the rest"
+    collide_one_line "the and-more card keeps every line to one line"
+    shot collide-more
+    key -k Tab >/dev/null
+    menus_expect collideState '.focus == "replace"' "Tab moves on from Keep both"
+    key -k Tab >/dev/null
+    menus_expect collideState '.focus == "cancel"' "and comes round to Cancel"
+    key -k Return >/dev/null
+    menus_expect collideState '.opened | not' "Enter on Cancel cancels"
+    settle
+    for name in a b c d; do collide_holds "$dir/to/$name.txt" "there $name" || fail "collide: Cancel touched $name.txt"; done
+    collide_holds "$dir/to/photo.txt" there || fail "collide: Cancel touched photo.txt"
+
+    echo "-- at the largest text-size stop nothing on the card wraps --"
+    seed_ui_state "$fixture_root/collide-state" '{"display":{"textSize":{"mode":20}}}'
+    collide_copy_six
+    wait_listing 5
+    [[ "$(ipc bodyPx)" == 20 ]] || fail "collide: the seeded largest stop draws at $(ipc bodyPx)px, not 20"
+    key p >/dev/null
+    menus_expect collideState '.opened and .names == ["a.txt","b.txt","c.txt"] and .more == "and 2 more"' "the card opens at the largest stop"
+    collide_one_line "at the largest stop the buttons fit on one row and no line wraps"
+    shot collide-largest-text
+    key -k Escape >/dev/null
+    menus_expect collideState '.opened | not' "Escape cancels at the largest stop"
     kill_flea
 }
 
@@ -2705,6 +4336,18 @@ case_grid() {
     (( $(ipc cursor) == right - (down - start) )) || fail "grid: Up did not undo the row Down moved"
     printf 'GRID columns=%s cursorAfterDown=%s afterRight=%s\n' "$((down - start))" "$down" "$right"
 
+    # Issue 162: j moves the row of tiles Down moved, and k undoes it; a [[text]] chord goes bare.
+    local jfrom jdown
+    jfrom=$(ipc cursor)
+    key j >/dev/null
+    settle
+    jdown=$(ipc cursor)
+    (( jdown == jfrom + (down - start) )) \
+        || fail "grid: j moved $((jdown - jfrom)) from $jfrom, not the row of tiles Down moved"
+    key k >/dev/null
+    settle
+    (( $(ipc cursor) == jfrom )) || fail "grid: k did not undo the row j moved"
+
     click_chrome list
     settle
     [[ "$(ipc viewMode)" == "list" ]] || fail "grid: the list button did not switch back"
@@ -2714,6 +4357,13 @@ case_grid() {
     settle
     (( $(ipc cursor) == start + 1 )) \
         || fail "grid: after switching back the list did not take one step, so focus stayed with the grid"
+    # Issue 162 is the grid's only: the same letter is one row in the list.
+    local lstart lnext
+    lstart=$(ipc cursor)
+    key j >/dev/null
+    settle
+    lnext=$(ipc cursor)
+    (( lnext == lstart + 1 )) || fail "grid: in the list j moved $((lnext - lstart)), not one item"
     kill_flea
 }
 
@@ -2804,6 +4454,15 @@ grid_chrome_controls() {
     printf 'GRID_CHROME preset=%s filter_focus=ok sort_cycle=ok search_refusal=ok view_inventory=ok\n' "$preset"
 }
 
+# Move through measured rows and columns to the exact fixture tile.
+grid_move_to() {
+    local target="$1" columns="$2" i
+    key -k Home >/dev/null
+    for ((i = 0; i < target / columns; i++)); do key -k Down >/dev/null; done
+    for ((i = 0; i < target % columns; i++)); do key -k Right >/dev/null; done
+    cardsize_expect cursor "$target"
+}
+
 case_gridnavigation() {
     local dir="$fixture_root/grid-navigation" preset i columns next_columns edge selected_name
     local start_x start_y target_x target_y caption
@@ -2832,12 +4491,12 @@ case_gridnavigation() {
         [[ "$columns" =~ ^[0-9]+$ ]] && (( columns > 1 && columns < 30 )) || fail "grid: invalid measured column count $columns"
         click_row "$((columns - 1))" left
         key j >/dev/null
-        cardsize_expect cursor "$columns"
+        cardsize_expect cursor "$((2 * columns - 1))"
         key k >/dev/null
         cardsize_expect cursor "$((columns - 1))"
         key -k Right >/dev/null
         cardsize_expect cursor "$((columns - 1))"
-        key j -k Left >/dev/null
+        key -k Home -k Down -k Left >/dev/null
         cardsize_expect cursor "$columns"
         read -r start_x start_y <<< "$(ipc rowCentre "$columns")"
         key -k Down >/dev/null
@@ -2857,16 +4516,12 @@ case_gridnavigation() {
         # Prime fixture count guarantees an incomplete row at every admitted column count.
         (( 61 % columns != 0 )) || fail "grid: fixture did not produce an incomplete row"
         edge=$((61 - columns))
-        key -k Home >/dev/null
-        for ((i = 0; i < edge; i++)); do key j >/dev/null; done
-        cardsize_expect cursor "$edge"
+        grid_move_to "$edge" "$columns"
         key -k Down >/dev/null
         cardsize_expect cursor "$edge"
         key -k Escape >/dev/null
         cardsize_expect selectionCount 0
-        key -k Home >/dev/null
-        for i in 1 2 3 4 5 6; do key j >/dev/null; done
-        cardsize_expect cursor 6
+        grid_move_to 6 "$columns"
         key v >/dev/null
         cardsize_expect selectedIndices 6
         selected_name=$(ipc visibleRowName 6)
@@ -2916,7 +4571,7 @@ case_header() {
     mark=$(ipc sortMark)
     printf 'HEADER titles=%s mark=%s\n' "$titles" "$mark"
     shot header
-    [[ "$titles" == "Name|Mode|Size|Date Modified|Kind" ]] || fail "header: titles are $titles"
+    [[ "$titles" == "Name|Mode|Size|Modified|Kind" ]] || fail "header: titles are $titles"
     [[ "$mark" == "name:asc" ]] || fail "header: the sort mark reads $mark"
 
     # Gaps are anchored constants, so this only guards the wiring; overflow is guarded per cell in case_overflow.
@@ -2936,6 +4591,375 @@ case_header() {
     kill_flea
 }
 
+# ListColumns040: dragging a column edge resizes it, remembers the width, and never sorts. Sample input: headerCellRect size prints "400|70".
+# The drag is closed-loop against the live header rect, because ydotool relative motion is accelerated and a step count cannot name a distance.
+column_drag_to() {
+    local key="$1" target="$2" tries="$3"
+    local rect _x w
+    for (( _drag_i = 0; _drag_i < tries; _drag_i++ )); do
+        IFS='|' read -r _x w <<< "$(ipc headerCellRect "$key")"
+        if (( target >= 0 )); then
+            (( w >= target )) && return 0
+        else
+            (( w <= -target )) && return 0
+        fi
+        YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x "$4" -y 0 >/dev/null 2>&1 \
+            || fail "columnresize: the drag step failed"
+        sleep 0.1
+    done
+    IFS='|' read -r _x w <<< "$(ipc headerCellRect "$key")"
+    printf '%s' "$w"
+}
+
+case_columnresize() {
+    local dir="$fixture_root/columnresize"
+    sandbox_scratch "$dir"
+    printf 'alpha\n' > "$dir/alpha.txt"
+    printf 'beta\n' > "$dir/beta.txt"
+    printf 'gamma\n' > "$dir/gamma.txt"
+    seed_ui_state "$fixture_root/columnresize-state" '{"view":"list"}'
+    launch "$dir"
+    wait_listing 3
+    local before_mark before_w
+    before_mark=$(ipc sortMark)
+    IFS='|' read -r _x before_w <<< "$(ipc headerCellRect size)"
+    [[ "$before_w" =~ ^[0-9]+$ ]] || fail "columnresize: the size header has no width, got $before_w"
+
+    # The handle sits on the cell's left edge (Header.qml anchors each ResizeHandle there), not on the painted text centre, which misses the 9 px handle on a right-aligned cell.
+    local cx cy cell_x cell_w edge_x header_left wx wy ww wh
+    read -r cx cy <<< "$(ipc headerCellCentre size)"
+    [[ -n "$cx" && -n "$cy" ]] || fail "columnresize: the size header has no centre"
+    IFS='|' read -r cell_x cell_w <<< "$(ipc headerCellRect size)"
+    [[ "$cell_x" =~ ^-?[0-9]+$ ]] || fail "columnresize: the size header has no left edge, got $cell_x"
+    header_left=$(ipc headerLeft)
+    [[ "$header_left" =~ ^-?[0-9]+$ ]] || fail "columnresize: the header has no left edge, got $header_left"
+    edge_x=$(( header_left + cell_x ))
+    read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
+    omarchy-drive move "$(( wx + edge_x ))" "$(( wy + cy ))" >/dev/null
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x40 >/dev/null 2>&1 \
+        || fail "columnresize: the edge press failed"
+    # Closed-loop: ydotool relative motion is accelerated, so the rect decides when to stop.
+    column_drag_to size "$(( before_w + 40 ))" 12 -10
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 \
+        || fail "columnresize: the edge release failed"
+    settle
+    local grown_w
+    IFS='|' read -r _x grown_w <<< "$(ipc headerCellRect size)"
+    printf 'COLUMNRESIZE before=%s grown=%s mark=%s\n' "$before_w" "$grown_w" "$(ipc sortMark)"
+    shot columnresize-drag
+    (( grown_w >= before_w + 30 && grown_w <= before_w + 70 )) \
+        || fail "columnresize: a leftward 40 px drag moved size from $before_w to $grown_w"
+    [[ "$(ipc sortMark)" == "$before_mark" ]] \
+        || fail "columnresize: the drag sorted, mark is $(ipc sortMark)"
+    [[ "$(ipc columnWidths | jq -er '.size')" == "$grown_w" ]] \
+        || fail "columnresize: the seam reports $(ipc columnWidths), the header draws $grown_w"
+    local stored=""
+    for _attempt in $(seq 1 60); do
+        stored=$(jq -er '.columnWidths.size // empty' "$XDG_STATE_HOME/flea/ui.json" 2>/dev/null || true)
+        [[ "$stored" == "$grown_w" ]] && break
+        sleep 0.05
+    done
+    [[ "$stored" == "$grown_w" ]] \
+        || fail "columnresize: ui.json remembers $stored, the header draws $grown_w"
+    [[ "$(ipc rowCellOverflow 0)" == "0|0|0|0" ]] \
+        || fail "columnresize: a cell painted past its resized column, $(ipc rowCellOverflow 0)"
+
+    # To the floor: a rightward drag shrinks to the 48 rail, and six steps past it still read 48.
+    read -r cx cy <<< "$(ipc headerCellCentre size)"
+    IFS='|' read -r cell_x cell_w <<< "$(ipc headerCellRect size)"
+    [[ "$cell_x" =~ ^-?[0-9]+$ ]] || fail "columnresize: the size header has no left edge on the floor pass, got $cell_x"
+    header_left=$(ipc headerLeft)
+    [[ "$header_left" =~ ^-?[0-9]+$ ]] || fail "columnresize: the header has no left edge on the floor pass, got $header_left"
+    edge_x=$(( header_left + cell_x ))
+    omarchy-drive move "$(( wx + edge_x ))" "$(( wy + cy ))" >/dev/null
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x40 >/dev/null 2>&1 \
+        || fail "columnresize: the floor press failed"
+    column_drag_to size -48 24 10
+    for _over in $(seq 1 6); do
+        YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 10 -y 0 >/dev/null 2>&1 \
+            || fail "columnresize: the overshoot step failed"
+        sleep 0.1
+    done
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 \
+        || fail "columnresize: the floor release failed"
+    settle
+    local floored_w
+    IFS='|' read -r _x floored_w <<< "$(ipc headerCellRect size)"
+    printf 'COLUMNRESIZE floored=%s\n' "$floored_w"
+    shot columnresize-floor
+    [[ "$floored_w" == "48" ]] || fail "columnresize: a drag past the floor landed at $floored_w, not 48"
+
+    kill_flea
+}
+
+# ListColumns040: a double click fits the widest held value, and F4 fits every drawn column; the fit reads the held window alone, so an off-screen wide file never moves it.
+case_columnautofit() {
+    local dir="$fixture_root/columnautofit"
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/subdir"
+    printf 'alpha\n' > "$dir/alpha.txt"
+    : > "$dir/photo.jpg"
+    # Sample input: "1.5 GB" is GLib's own render of 1500000000, the first screen's widest size.
+    local big_bytes=1500000000
+    truncate -s "$big_bytes" "$dir/big.bin"
+    local i
+    # Past the pane's own window (visible rows plus twice the 150-row buffer, about 336 here), so G really moves the held window.
+    for i in $(seq -w 1 400); do printf 'body\n' > "$dir/file-$i.txt"; done
+    # 999,950 bytes renders as "1000.0 kB", wider than the "1.5 GB" above, and sorts last so it starts off screen.
+    truncate -s 999950 "$dir/zzz-wide.bin"
+    # Kind alone is widened: every other column keeps its floor, so the set still draws whole.
+    seed_ui_state "$fixture_root/columnautofit-state" '{"view":"list","columns":["name","mode","size","date","kind"],"columnWidths":{"kind":200}}'
+    launch "$dir"
+    wait_listing 405
+    local before_mark before_w
+    before_mark=$(ipc sortMark)
+    IFS='|' read -r _x before_w <<< "$(ipc headerCellRect kind)"
+    [[ "$before_w" == "200" ]] || fail "columnautofit: kind did not take its seeded 200, got $before_w"
+
+    local cx cy cell_x cell_w edge_x header_left wx wy ww wh
+    read -r cx cy <<< "$(ipc headerCellCentre kind)"
+    [[ -n "$cx" && -n "$cy" ]] || fail "columnautofit: the kind header has no centre"
+    IFS='|' read -r cell_x cell_w <<< "$(ipc headerCellRect kind)"
+    [[ "$cell_x" =~ ^-?[0-9]+$ ]] || fail "columnautofit: the kind header has no left edge, got $cell_x"
+    header_left=$(ipc headerLeft)
+    [[ "$header_left" =~ ^-?[0-9]+$ ]] || fail "columnautofit: the header has no left edge, got $header_left"
+    edge_x=$(( header_left + cell_x ))
+    read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
+    omarchy-drive click "$(( wx + edge_x ))" "$(( wy + cy ))" left --double >/dev/null
+    settle
+    local fitted_w
+    IFS='|' read -r _x fitted_w <<< "$(ipc headerCellRect kind)"
+    printf 'COLUMNAUTOFIT kind before=%s fitted=%s mark=%s\n' "$before_w" "$fitted_w" "$(ipc sortMark)"
+    shot columnautofit-double
+    (( fitted_w < before_w && fitted_w >= 48 )) \
+        || fail "columnautofit: a double click left kind at $fitted_w, not fitted under $before_w"
+    [[ "$(ipc sortMark)" == "$before_mark" ]] \
+        || fail "columnautofit: the double click sorted, mark is $(ipc sortMark)"
+    local stored=""
+    for _attempt in $(seq 1 60); do
+        stored=$(jq -er '.columnWidths.kind // empty' "$XDG_STATE_HOME/flea/ui.json" 2>/dev/null || true)
+        [[ "$stored" == "$fitted_w" ]] && break
+        sleep 0.05
+    done
+    [[ "$stored" == "$fitted_w" ]] \
+        || fail "columnautofit: ui.json remembers $stored, the header draws $fitted_w"
+    [[ "$(ipc rowCellOverflow 0)" == "0|0|0|0" ]] \
+        || fail "columnautofit: a cell painted past its fitted column, $(ipc rowCellOverflow 0)"
+
+    # The fit follows the held window: fitting size on the first screenful ignores the off-screen wide file, and fitting it again after G widens.
+    read -r cx cy <<< "$(ipc headerCellCentre size)"
+    [[ -n "$cx" && -n "$cy" ]] || fail "columnautofit: the size header has no centre"
+    IFS='|' read -r cell_x cell_w <<< "$(ipc headerCellRect size)"
+    [[ "$cell_w" =~ ^[0-9]+$ ]] \
+        || fail "columnautofit: the size header answered '$cell_w' before the first fit"
+    [[ "$cell_x" =~ ^-?[0-9]+$ ]] \
+        || fail "columnautofit: the size header has no left edge before the first fit, got $cell_x"
+    local size_before="$cell_w"
+    edge_x=$(( header_left + cell_x ))
+    omarchy-drive click "$(( wx + edge_x ))" "$(( wy + cy ))" left --double >/dev/null
+    settle
+    local narrow_w narrow_stored
+    # Sample input: "$(ipc headerCellRect size)" prints "400|70".
+    IFS='|' read -r _x narrow_w <<< "$(ipc headerCellRect size)"
+    printf 'COLUMNAUTOFIT size first=%s\n' "$narrow_w"
+    [[ "$narrow_w" =~ ^[0-9]+$ && "$narrow_w" != "$size_before" ]] \
+        || fail "columnautofit: the first size fit never ran, width stayed at $narrow_w from $size_before"
+    narrow_stored=""
+    for _attempt in $(seq 1 60); do
+        narrow_stored=$(jq -er '.columnWidths.size // empty' "$XDG_STATE_HOME/flea/ui.json" 2>/dev/null || true)
+        [[ "$narrow_stored" == "$narrow_w" ]] && break
+        sleep 0.05
+    done
+    [[ "$narrow_stored" == "$narrow_w" ]] \
+        || fail "columnautofit: ui.json remembers size as $narrow_stored, the header draws $narrow_w"
+    local held_before held_after
+    # Sample input: ipc listingWindowState | jq -r '.held' answers "12".
+    held_before=$(ipc listingWindowState | jq -r '.held')
+    [[ "$held_before" =~ ^[0-9]+$ ]] \
+        || fail "columnautofit: the held window answered '$held_before' before G, not a row"
+    key G >/dev/null
+    settle
+    for _attempt in $(seq 1 60); do
+        # Sample input: ipc listingWindowState | jq -r '.held' answers "12".
+        held_after=$(ipc listingWindowState | jq -r '.held')
+        [[ "$held_after" =~ ^[0-9]+$ && "$held_after" != "$held_before" ]] && break
+        sleep 0.05
+    done
+    [[ "$held_before" =~ ^[0-9]+$ && "$held_after" =~ ^[0-9]+$ && "$held_after" != "$held_before" ]] \
+        || fail "columnautofit: the held window never left the first screenful, held is $held_after from $held_before"
+    read -r cx cy <<< "$(ipc headerCellCentre size)"
+    IFS='|' read -r cell_x cell_w <<< "$(ipc headerCellRect size)"
+    [[ "$cell_x" =~ ^-?[0-9]+$ ]] || fail "columnautofit: the size header has no left edge after G, got $cell_x"
+    edge_x=$(( header_left + cell_x ))
+    omarchy-drive click "$(( wx + edge_x ))" "$(( wy + cy ))" left --double >/dev/null
+    settle
+    local wide_w
+    IFS='|' read -r _x wide_w <<< "$(ipc headerCellRect size)"
+    printf 'COLUMNAUTOFIT size second=%s\n' "$wide_w"
+    shot columnautofit-scrolled
+    (( wide_w > narrow_w )) \
+        || fail "columnautofit: fitting size after scrolling to the wide file left $narrow_w at $wide_w, so the fit scanned the directory"
+    [[ "$(ipc sortMark)" == "$before_mark" ]] \
+        || fail "columnautofit: fitting size sorted, mark is $(ipc sortMark)"
+
+    # F4 is proved in two phases with no guessed seed: fit once and read W, reseed above W, relaunch and fit back to W.
+    # Sample input: "$(ipc listAreaRect)" prints "0 100 732 500".
+    read -r _f4_ax _f4_ay _f4_aw _f4_ah <<< "$(ipc listAreaRect)"
+    [[ "$_f4_aw" =~ ^[0-9]+$ && "$_f4_aw" -ge 600 ]] \
+        || fail "columnautofit: the list area answered '$_f4_ax $_f4_ay $_f4_aw $_f4_ah', so the two-phase F4 has no fixture window"
+    local _f4key _drawn _have _want _stored _seed_ok _f4j_ok
+    for _f4key in mode size date kind; do
+        # Sample input: "$(ipc headerCellRect "$_f4key")" prints "602|70".
+        IFS='|' read -r _x _drawn <<< "$(ipc headerCellRect "$_f4key")"
+        [[ "$_drawn" =~ ^[0-9]+$ && "$_drawn" != "0" ]] \
+            || fail "columnautofit: $_f4key draws nothing to fit first, widths $(ipc columnWidths)"
+    done
+    # Sample input: "$(ipc columnWidths)" prints '{"mode":90,"size":120,"date":140,"kind":200}'.
+    local _f4b_all _f4w_all
+    _f4b_all=$(ipc columnWidths)
+    key -k F4 >/dev/null
+    settle
+    # Sample input: "$(ipc sortMark)" prints "size:asc".
+    [[ "$(ipc sortMark)" == "$before_mark" ]] \
+        || fail "columnautofit: the first F4 sorted, mark is $(ipc sortMark)"
+    # Sample input: "$(ipc columnWidths)" prints '{"mode":95,"size":125,"date":140,"kind":105}' once the first F4 lands.
+    _f4w_all=$(ipc columnWidths)
+    local _f4w_mode _f4w_size _f4w_date _f4w_kind _f4b_mode _f4b_size _f4b_date _f4b_kind
+    # Sample input: jq -r '.mode // empty' over '{"mode":95,"size":125}' answers "95".
+    _f4w_mode=$(jq -r '.mode // empty' <<< "$_f4w_all")
+    _f4w_size=$(jq -r '.size // empty' <<< "$_f4w_all")
+    _f4w_date=$(jq -r '.date // empty' <<< "$_f4w_all")
+    _f4w_kind=$(jq -r '.kind // empty' <<< "$_f4w_all")
+    _f4b_mode=$(jq -r '.mode // empty' <<< "$_f4b_all")
+    _f4b_size=$(jq -r '.size // empty' <<< "$_f4b_all")
+    _f4b_date=$(jq -r '.date // empty' <<< "$_f4b_all")
+    _f4b_kind=$(jq -r '.kind // empty' <<< "$_f4b_all")
+    [[ "$_f4w_mode" =~ ^[0-9]+$ && "$_f4w_size" =~ ^[0-9]+$ && "$_f4w_date" =~ ^[0-9]+$ && "$_f4w_kind" =~ ^[0-9]+$ ]] \
+        || fail "columnautofit: the first F4 left mode=$_f4w_mode size=$_f4w_size date=$_f4w_date kind=$_f4w_kind, want a fitted width for every drawn key"
+    # autofitAll writes only a column whose fit moved, so ui.json is owed only the keys the first F4 changed.
+    _f4j_ok=0
+    for _attempt in $(seq 1 60); do
+        _f4j_ok=1
+        # Sample input: jq -er '.columnWidths.size // empty' over ui.json answers "125".
+        [[ "$_f4w_mode" == "$_f4b_mode" || "$(jq -er '.columnWidths.mode // empty' "$XDG_STATE_HOME/flea/ui.json" 2>/dev/null || true)" == "$_f4w_mode" ]] || _f4j_ok=0
+        [[ "$_f4w_size" == "$_f4b_size" || "$(jq -er '.columnWidths.size // empty' "$XDG_STATE_HOME/flea/ui.json" 2>/dev/null || true)" == "$_f4w_size" ]] || _f4j_ok=0
+        [[ "$_f4w_date" == "$_f4b_date" || "$(jq -er '.columnWidths.date // empty' "$XDG_STATE_HOME/flea/ui.json" 2>/dev/null || true)" == "$_f4w_date" ]] || _f4j_ok=0
+        [[ "$_f4w_kind" == "$_f4b_kind" || "$(jq -er '.columnWidths.kind // empty' "$XDG_STATE_HOME/flea/ui.json" 2>/dev/null || true)" == "$_f4w_kind" ]] || _f4j_ok=0
+        (( _f4j_ok == 1 )) && break
+        sleep 0.05
+    done
+    (( _f4j_ok == 1 )) \
+        || fail "columnautofit: the first F4 never reached ui.json, want $_f4w_mode $_f4w_size $_f4w_date $_f4w_kind in $(cat "$XDG_STATE_HOME/flea/ui.json" 2>/dev/null)"
+    # Seeds sit one offset above their own fits, so no seed can equal the fit the second F4 must return to.
+    local SEED_OFFSET=23
+    local _f4s_mode _f4s_size _f4s_date _f4s_kind
+    _f4s_mode=$((_f4w_mode + SEED_OFFSET))
+    _f4s_size=$((_f4w_size + SEED_OFFSET))
+    _f4s_date=$((_f4w_date + SEED_OFFSET))
+    _f4s_kind=$((_f4w_kind + SEED_OFFSET))
+    # The name's floor, ui/Theme.qml's 20 characters at about 8 px each, so the seeded row must leave it room.
+    local _f4_name_min=160
+    (( _f4s_mode + _f4s_size + _f4s_date + _f4s_kind + _f4_name_min <= _f4_aw )) \
+        || fail "columnautofit: seeded widths $_f4s_mode+$_f4s_size+$_f4s_date+$_f4s_kind plus name minimum $_f4_name_min do not fit list area $_f4_aw"
+    local _f4seeds _f4wants
+    _f4seeds=$(printf '{"mode":%s,"size":%s,"date":%s,"kind":%s}' "$_f4s_mode" "$_f4s_size" "$_f4s_date" "$_f4s_kind")
+    _f4wants=$(printf '{"mode":%s,"size":%s,"date":%s,"kind":%s}' "$_f4w_mode" "$_f4w_size" "$_f4w_date" "$_f4w_kind")
+    kill_flea
+    "$flea_bin" --ui-state "{\"columnWidths\":$_f4seeds}" >/dev/null \
+        || fail "columnautofit: could not seed stored widths to $_f4seeds"
+    launch "$dir"
+    wait_listing 405
+    settle
+    # The relaunch opens at the top while W was fitted at the bottom, so G returns to the fitted window first.
+    # Sample input: ipc listingWindowState | jq -r '.held' answers "12".
+    local _f4_held_before _f4_held_after
+    _f4_held_before=$(ipc listingWindowState | jq -r '.held')
+    [[ "$_f4_held_before" =~ ^[0-9]+$ ]] \
+        || fail "columnautofit: the held window answered '$_f4_held_before' after relaunch, not a row"
+    key G >/dev/null
+    settle
+    for _attempt in $(seq 1 60); do
+        # Sample input: ipc listingWindowState | jq -r '.held' answers "12".
+        _f4_held_after=$(ipc listingWindowState | jq -r '.held')
+        [[ "$_f4_held_after" =~ ^[0-9]+$ && "$_f4_held_after" != "$_f4_held_before" ]] && break
+        sleep 0.05
+    done
+    [[ "$_f4_held_before" =~ ^[0-9]+$ && "$_f4_held_after" =~ ^[0-9]+$ && "$_f4_held_after" != "$_f4_held_before" ]] \
+        || fail "columnautofit: the held window never left the first screenful after relaunch, held is $_f4_held_after from $_f4_held_before"
+    local drawn_before=""
+    _seed_ok=0
+    for _attempt in $(seq 1 60); do
+        _seed_ok=1
+        drawn_before=""
+        for _f4key in mode size date kind; do
+            # Sample input: "$(ipc headerCellRect "$_f4key")" prints "602|118".
+            IFS='|' read -r _x _drawn <<< "$(ipc headerCellRect "$_f4key")"
+            # Sample input: jq -r --arg k "size" '.[$k] // empty' over '{"size":148}' answers "148".
+            _want=$(jq -r --arg k "$_f4key" '.[$k] // empty' <<< "$_f4seeds")
+            [[ "$_drawn" == "$_want" ]] || _seed_ok=0
+            [[ "$_drawn" =~ ^[0-9]+$ && "$_drawn" != "0" ]] && drawn_before="$drawn_before $_f4key"
+        done
+        (( _seed_ok == 1 )) && break
+        sleep 0.05
+    done
+    (( _seed_ok == 1 )) \
+        || fail "columnautofit: seeding stored widths to $_f4seeds did not draw, widths $(ipc columnWidths)"
+    key -k F4 >/dev/null
+    settle
+    # Sample input: "$(ipc columnWidths)" prints '{"mode":95,"size":125,"date":140,"kind":105}' once the second F4 lands.
+    local widths_once
+    widths_once=$(ipc columnWidths)
+    printf 'COLUMNAUTOFIT f4=%s\n' "$widths_once"
+    shot columnautofit-f4
+    local drawn_after=""
+    for _f4key in mode size date kind; do
+        # Sample input: "$(ipc headerCellRect "$_f4key")" prints "602|70".
+        IFS='|' read -r _x _drawn <<< "$(ipc headerCellRect "$_f4key")"
+        [[ "$_drawn" =~ ^[0-9]+$ && "$_drawn" != "0" ]] || continue
+        drawn_after="$drawn_after $_f4key"
+    done
+    [[ "$drawn_after" == "$drawn_before" ]] \
+        || fail "columnautofit: F4 changed the drawn column set from [$drawn_before ] to [$drawn_after ]"
+    for _f4key in mode size date kind; do
+        # Sample input: "$(ipc headerCellRect "$_f4key")" prints "602|70".
+        IFS='|' read -r _x _drawn <<< "$(ipc headerCellRect "$_f4key")"
+        # Sample input: jq -r --arg k "size" '.[$k] // empty' over '{"size":125}' answers "125".
+        _want=$(jq -r --arg k "$_f4key" '.[$k] // empty' <<< "$_f4wants")
+        [[ "$_drawn" == "$_want" ]] \
+            || fail "columnautofit: F4 drew $_f4key at $_drawn, want the fitted $_want"
+        _have=$(jq -r --arg k "$_f4key" '.[$k] // empty' <<< "$widths_once")
+        [[ "$_have" == "$_want" ]] \
+            || fail "columnautofit: F4 stored $_f4key as '$_have', want the fitted $_want"
+    done
+    [[ "$(ipc sortMark)" == "$before_mark" ]] \
+        || fail "columnautofit: the second F4 sorted, mark is $(ipc sortMark)"
+    _stored=""
+    _f4j_ok=0
+    for _attempt in $(seq 1 60); do
+        _stored=""
+        _f4j_ok=1
+        for _f4key in mode size date kind; do
+            # Sample input: jq -er --arg k "size" '.columnWidths[$k] // empty' over ui.json answers "125".
+            _have=$(jq -er --arg k "$_f4key" '.columnWidths[$k] // empty' "$XDG_STATE_HOME/flea/ui.json" 2>/dev/null || true)
+            _want=$(jq -r --arg k "$_f4key" '.[$k] // empty' <<< "$_f4wants")
+            [[ "$_have" == "$_want" ]] || _f4j_ok=0
+        done
+        (( _f4j_ok == 1 )) && break
+        sleep 0.05
+    done
+    (( _f4j_ok == 1 )) \
+        || fail "columnautofit: the second F4 never reached ui.json, widths $(ipc columnWidths)"
+    # A third F4 on fitted widths must change nothing, so F4 is a fit and never a toggle.
+    key -k F4 >/dev/null || fail "columnautofit: the third F4 was never sent"
+    settle
+    # Sample input: "$(ipc columnWidths)" prints '{"mode":95,"size":125,"date":140,"kind":105}'.
+    local widths_twice
+    widths_twice=$(ipc columnWidths)
+    [[ "$widths_twice" == "$widths_once" ]] \
+        || fail "columnautofit: a third F4 moved $widths_once to $widths_twice"
+
+    kill_flea
+}
 # contentWidth exceeds width only when elide is missing, since elide always caps it to width; this guards elide, not sizing.
 case_overflow() {
     local dir="$fixture_root/overflow"
@@ -2980,10 +5004,14 @@ case_icons() {
     # Empty on purpose: the MIME comes from the name, and a real jpeg would grow a thumbnail once Task 7 lands.
     : > "$dir/photo.jpg"
     ln -s "$dir/subdir" "$dir/linkdir"
+    # No ui.json at all, a first run's state, so these rows take the window's own default density.
+    sandbox_scratch "$fixture_root/icons-state"
+    export XDG_STATE_HOME="$fixture_root/icons-state"
     launch "$dir"
     wait_listing 5
     local row_height i y0 y1 pitch
-    row_height=$(ipc metrics | cut -d' ' -f4)
+    row_height=$(ipc fileRowHeight)
+    (( row_height < $(ipc metrics | cut -d' ' -f4) )) || fail "a first run drew $row_height px rows, not the compact default below the board's row"
     for i in 0 1 2 3 4; do
         printf 'ICONS row=%s name=%q glyph=%q\n' "$i" "$(ipc rowAt "$i")" "$(ipc rowGlyph "$i")"
     done
@@ -3019,11 +5047,13 @@ case_thumbs() {
     local before_large
     kill_flea
     before_large=$(ls -A "$cache_large" | wc -l)
+    seed_ui_state "$fixture_root/thumbs-state" '{"view":"list"}'
     launch "$thumb_fixture"
     wait_listing "$thumb_rows"
+    [[ "$(ipc viewMode)" == list ]] || fail "thumbs: fixture did not open its list view"
     # Read before any thumbnail lands, so the slot is compared against its pre-thumbnail row.
     local row_height
-    row_height=$(ipc metrics | cut -d' ' -f4)
+    row_height=$(ipc fileRowHeight)
 
     # One settle after the first window, and one request naming the visible rows.
     local waited
@@ -3143,6 +5173,7 @@ case_stale() {
     local pics="$stale_fixture/tree/pics"
     local cache="$stale_fixture/cache"
     local src="$stale_fixture/src"
+    local state="$stale_fixture/state"
     sandbox_make "$stale_fixture"
     mkdir -p "$pics" "$src" "$cache/thumbnails/large" "$cache/thumbnails/fail"
     magick -size 512x512 xc:red "$src/before.jpg"
@@ -3150,6 +5181,7 @@ case_stale() {
     cp "$src/before.jpg" "$pics/one.jpg"
     # Exported inside this case's own subshell, so no other case reads or writes the redirected root.
     export XDG_CACHE_HOME="$cache"
+    seed_ui_state "$state" '{"view":"list","keys":"default","preview":{"column":false,"thumbnails":"images"}}'
     launch "$pics"
     wait_listing 1
 
@@ -3315,9 +5347,12 @@ case_focus() {
     key -k Return >/dev/null
     wait_path "$HOME"
     [[ "$(ipc path)" == "$HOME" ]] || fail "focus: Enter on Home did not open $HOME, path is $(ipc path)"
-    # RailKeys.act's open case only emits sidebar.opened; nothing there hands focus back to the list.
-    [[ "$(ipc focusView)" == "rail" ]] || fail "focus: opening a favourite unexpectedly moved focus off the rail"
+    # #181: opening a rail row hands focus to the folder it opened, so the next key moves in Home.
+    [[ "$(ipc focusView)" == "list" ]] || fail "focus: Enter on a favourite left focus on $(ipc focusView), not the list"
     shot focus-opened
+    key -k Tab >/dev/null
+    settle
+    [[ "$(ipc focusView)" == "rail" ]] || fail "focus: tab did not return to the rail after an open"
     key -k Escape >/dev/null
     settle
     [[ "$(ipc focusView)" == "list" ]] || fail "focus: escape did not return to the list"
@@ -3400,7 +5435,7 @@ case_renderer() {
     env QSG_RHI_BACKEND=opengl FLEA_RENDERER_AUTOMATIC=1 \
         __EGL_VENDOR_LIBRARY_FILENAMES="$dir/no-such-egl-vendor.json" \
         FLEA_PATH="$dir" FLEA_BIN="$dir/flea-stub" \
-        setsid nohup qs -p "$flea_ui" > "$log" 2>&1 </dev/null &
+        setsid nohup qs -p "$flea_ui/boot" > "$log" 2>&1 </dev/null &
     local waited
     for waited in $(seq 1 200); do
         grep -aq 'graphics backend opengl failed' "$log" && break
@@ -3409,13 +5444,24 @@ case_renderer() {
     kill_flea
     printf 'RENDERER ran=%q\n' "$(tr '\n' ' ' < "$relaunched")"
     grep -aq 'graphics backend opengl failed' "$log" \
-        || fail "no scene-graph error reached ui/shell.qml, so its Connections never held the window"
-    # The denominator: with no stub run at all, the count of retries below would be zero for free.
-    local ran retried
-    ran=$(grep -c -- '--backend' "$relaunched" || true)
-    [[ "$ran" != "0" ]] || fail "the stub Flea was never run, so no retry could have been recorded either"
+        || fail "no scene-graph error reached ui/boot/shell.qml, so its Connections never held the window"
+    # A scene-graph failure now starts no backend at all, so counting FLEA_BIN is a zero denominator.
+    local retried
     retried=$(grep -c -- '--gui' "$relaunched" || true)
     [[ "$retried" == "0" ]] || fail "the retry fired for a renderer the operator named: $(cat "$relaunched")"
+    # The argv side of that arm, from a root carrying ui/boot's own two symlinks: the helper implicitly imports ui/, whose qmldir singletons import qs.Commons, and qs: resolves against the root.
+    local proberoot="$dir/retry-cfg" probe="$dir/retry-probe.log"
+    mkdir -p "$proberoot"
+    cp -a "$flea_ui/boot/Commons" "$flea_ui/boot/Ui" "$proberoot/" \
+        || fail "the boot root has no Commons or Ui to copy, so this probe would test its own fake root"
+    cp "$repo/tests/renderer-retry.qml" "$proberoot/probe.qml"
+    : > "$probe"
+    env RETRY_HELPER="$flea_ui/RendererRetry.qml" RETRY_BACKEND=vulkan \
+        FLEA_RENDERER_AUTOMATIC=1 FLEA_BIN="$dir/flea-stub" QT_QPA_PLATFORM=offscreen \
+        timeout 20 qs -p "$proberoot/probe.qml" > "$probe" 2>&1
+    local want='RETRY argv ["/usr/bin/env","QSG_RHI_BACKEND=opengl","'"$dir/flea-stub"'","--gui"]'
+    grep -aqF "$want" "$probe" \
+        || fail "the retry helper did not answer with the argv Renderer.js names: $(grep -a RETRY "$probe" | head -2)"
 }
 
 # Catches Space not opening a preview, the kind dispatch misclassifying a row, or the size gate not firing.
@@ -3545,10 +5591,11 @@ PYEOF
     (( pos_after < pos_before )) \
         || fail "preview: Left did not move tone.wav back, before=$pos_before after=$pos_after"
 
-    # Task 22: Space toggles play/pause on a MEDIA preview instead of closing it.
-    key -k space >/dev/null
+    # GM, 2026-09-11: space closes every kind, media included, and playback moved to its own p, which
+    # ui/js/PreviewKeys.js reaches only in the media context. This block is that ruling, not Task 22's.
+    key p >/dev/null
     wait_preview_state paused
-    [[ "$(ipc previewOpen)" == "true" ]] || fail "preview: space paused tone.wav but also closed the preview"
+    [[ "$(ipc previewOpen)" == "true" ]] || fail "preview: p paused tone.wav but also closed the preview"
     pos_before=$(ipc previewPosition)
     key l >/dev/null
     settle
@@ -3557,18 +5604,19 @@ PYEOF
     [[ "$(ipc previewState)" == "paused" ]] || fail "preview: l changed paused audio to $(ipc previewState)"
     [[ "$pos_after" == "$pos_before" ]] \
         || fail "preview: l moved paused audio, before=$pos_before after=$pos_after"
-    key -k space >/dev/null
+    key p >/dev/null
     wait_preview_state playing
 
-    key -k Escape >/dev/null
+    # And the second space closes a playing media preview, the way it closes every other kind.
+    key -k space >/dev/null
     settle
-    [[ "$(ipc previewOpen)" == "false" ]] || fail "preview: escape did not close the audio preview after the media-control checks"
+    [[ "$(ipc previewOpen)" == "false" ]] || fail "preview: space did not close the playing audio preview"
 
     open_row_fast clip.mp4
     [[ "$(ipc previewKind)" == "video" ]] || fail "preview: clip.mp4 classified as $(ipc previewKind), not video"
     wait_preview_state playing
     shot preview-video
-    [[ "$(ipc previewStripVisible)" == "true" ]] \
+    [[ "$(ipc previewStrip | jq -r .visible)" == "true" ]] \
         || fail "preview: the strip is not visible right after opening the video preview"
 
     # Fix round 1: the reviewer's finding was that PanelSlider's own MouseArea swallows pointer
@@ -3601,10 +5649,10 @@ PYEOF
     # the "still eventually hides" check below meaningless; moving off the window stops that.
     omarchy-drive move 5 5 >/dev/null
     while (( SECONDS < 6 )); do sleep 0.2; done
-    [[ "$(ipc previewStripVisible)" == "true" ]] \
+    [[ "$(ipc previewStrip | jq -r .visible)" == "true" ]] \
         || fail "preview: the strip hid before the slider interaction's own stripHideMs window expired"
     while (( SECONDS < interact_at + 5 )); do sleep 0.2; done
-    [[ "$(ipc previewStripVisible)" == "false" ]] \
+    [[ "$(ipc previewStrip | jq -r .visible)" == "false" ]] \
         || fail "preview: the strip never auto-hid once the slider interaction's own window expired"
 
     key -k Escape >/dev/null
@@ -3617,7 +5665,7 @@ PYEOF
         || fail "preview: the pdf overlay reports $(ipc previewState), so it fell through to the refusal"
     [[ "$(ipc previewPdfPage)" == "0" ]] || fail "preview: manual.pdf opened on page $(ipc previewPdfPage), not page 0"
     key l >/dev/null
-    omarchy-drive wait ipc -p "$flea_ui" flea previewPdfPage 1 --timeout 10 >/dev/null \
+    omarchy-drive wait ipc -p "$flea_ui/boot" flea previewPdfPage 1 --timeout 10 >/dev/null \
         || fail "preview: l left manual.pdf on page $(ipc previewPdfPage), not page 1"
     omarchy-drive wait ocr flea PAGETWO --timeout 10 >/dev/null \
         || fail "preview: l advanced manual.pdf state but left page 1 painted"
@@ -3673,6 +5721,139 @@ PYEOF
 # would leak into networkEntries and fail the empty check no matter what fixture HOME says; this
 # gates the empty check on "gio mount -l" itself carrying no Mount() line, and fails loud with
 # that listing rather than guessing, since this case cannot unmount another task's own work.
+# Issue 21, TomFaulkner: a saved network place can be edited from the rail, and the address that
+# finally mounts is written back over that place's own line rather than saved beside it.
+case_editplace() {
+    local dir="$fixture_root/editplace"
+    sandbox_scratch "$dir"
+    : > "$dir/one.txt"
+    local fake_root="$fixture_root/editplace-fake"
+    sandbox_scratch "$fake_root"
+    mkdir -p "$fake_root/bin"
+    local fixture_home="$fixture_root/editplace-home"
+    fixture_home_make "$fixture_home"
+    local real_home="$HOME" mount_log="$fake_root/mount.log"
+    local bookmarks="$fixture_home/.config/gtk-3.0/bookmarks"
+    export XDG_CONFIG_HOME="$fixture_home/.config"
+    seed_ui_state "$fixture_root/editplace-state" '{"view":"list","keys":"default","places":{"favourites":[]}}'
+    mkdir -p "$fixture_home/.config/gtk-3.0"
+    printf 'smb://legacy.test/data Legacy share\nfile:///missing/legacy Local legacy\n' > "$bookmarks"
+    : > "$mount_log"
+
+    # The same shape case_network's own fake has: this box's real mounts are the operator's, so the
+    # rail under test is exactly the two seeded lines and nothing the box happens to have open.
+    cat > "$fake_root/bin/gio" <<EOS
+#!/bin/sh
+case "\$1 \${2:-}" in
+"mount -li") exit 0 ;;
+"mount "*) printf '%s\n' "\$*" > "$mount_log" ;;
+"info "*) printf 'local path: %s\n' "$dir" ;;
+*) exit 0 ;;
+esac
+EOS
+    chmod +x "$fake_root/bin/gio"
+    local saved_path="$PATH"
+    export PATH="$fake_root/bin:$PATH"
+
+    export HOME="$fixture_home"
+    launch "$dir"
+    export HOME="$real_home"
+    wait_listing 1
+    local _attempt
+    for _attempt in $(seq 1 100); do
+        [[ "$(ipc networkEntries)" == 'Legacy share|network|share|false' ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc networkEntries)" == 'Legacy share|network|share|false' ]] \
+        || fail "editplace: the rail reads $(ipc networkEntries), not the one saved place"
+
+    local legacy_index
+    legacy_index=$(ipc railEntries | jq -r 'map(.label) | index("Legacy share")')
+    [[ -n "$legacy_index" && "$legacy_index" != "null" ]] || fail "editplace: the saved place is not on the rail"
+
+    click_rail_row "$legacy_index" right
+    settle
+    [[ "$(ipc contextMenuEntries)" == "Rename|Edit address|-|Remove from Network" ]] \
+        || fail "editplace: the saved place offers $(ipc contextMenuEntries), not Rename, Edit address and Remove from Network"
+    menu_seek "Edit address"
+    key -k Return >/dev/null
+    settle
+    [[ "$(ipc dialogOpen)" == "true" ]] || fail "editplace: Edit opened no dialog"
+    [[ "$(ipc networkUri)" == "smb://legacy.test/data" ]] \
+        || fail "editplace: the dialog opened on $(ipc networkUri), not the place Edit named"
+    # The host holds the caret on open, so the old one is taken out and the corrected one typed in.
+    local back
+    for back in $(seq 1 24); do key -k BackSpace >/dev/null; done
+    key "legacy2.test" >/dev/null
+    settle
+    [[ "$(ipc networkUri)" == "smb://legacy2.test/data" ]] \
+        || fail "editplace: the Mounts-as line reads $(ipc networkUri) after the address was corrected"
+    key -k Return >/dev/null
+    for _attempt in $(seq 1 200); do
+        [[ "$(ipc dialogOpen)" == "false" ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc dialogOpen)" == "false" ]] || fail "editplace: the dialog stayed open, it says $(ipc networkStatus)"
+    # SMB mounts go through --anonymous, the same argv ui/NetworkMounts.qml sends for every share.
+    [[ "$(cat "$mount_log")" == 'mount --anonymous smb://legacy2.test/data' ]] \
+        || fail "editplace: the edit mounted $(cat "$mount_log")"
+    local edited_marks
+    edited_marks=$(cat "$bookmarks")
+    [[ "$edited_marks" == 'smb://legacy2.test/data Legacy share
+file:///missing/legacy Local legacy' ]] \
+        || fail "editplace: the bookmarks file reads $edited_marks after the edit"
+    # The rail reads the file it was rewritten in, so the place is one row carrying the new address.
+    local rail_uri
+    for _attempt in $(seq 1 100); do
+        rail_uri=$(ipc railEntries | jq -r '[.[] | select(.group == "network")] | map(.uri) | join(",")')
+        [[ "$rail_uri" == "smb://legacy2.test/data" ]] && break
+        sleep 0.05
+    done
+    [[ "$rail_uri" == "smb://legacy2.test/data" ]] \
+        || fail "editplace: the rail's network rows are $rail_uri, not the one corrected place"
+    # The edit rewrites the place it came from, so Flea's own favourites gain nothing.
+    [[ "$(ipc railEntries | jq -r '[.[] | select(.group == "favorite")] | length')" == "0" ]] \
+        || fail "editplace: the edit added a favourite as well as rewriting the place"
+    printf 'EDITPLACE edit=%s rail=%s\n' "$(head -1 "$bookmarks")" "$rail_uri"
+
+    echo "-- an Edit nobody finished leaves the place alone when the next place is saved --"
+    legacy_index=$(ipc railEntries | jq -r 'map(.label) | index("Legacy share")')
+    [[ -n "$legacy_index" && "$legacy_index" != "null" ]] \
+        || fail "editplace: the edited place left the rail, which carries $(ipc railEntries)"
+    click_rail_row "$legacy_index" right
+    settle
+    menu_seek "Edit address"
+    key -k Return >/dev/null
+    settle
+    [[ "$(ipc dialogOpen)" == "true" ]] || fail "editplace: the second Edit opened no dialog"
+    key -k Escape >/dev/null
+    settle
+    [[ "$(ipc dialogOpen)" == "false" ]] || fail "editplace: Escape left the dialog open"
+    # Without the dialog's own disarm this next mount rewrites the line the abandoned Edit armed.
+    rail_focus
+    key a >/dev/null
+    settle
+    key "other.test" >/dev/null
+    key -k Tab >/dev/null
+    key -k Tab >/dev/null
+    key "/share" >/dev/null
+    key -k Return >/dev/null
+    for _attempt in $(seq 1 200); do
+        [[ "$(ipc dialogOpen)" == "false" ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc dialogOpen)" == "false" ]] || fail "editplace: the second place never saved, it says $(ipc networkStatus)"
+    [[ "$(cat "$mount_log")" == 'mount --anonymous smb://other.test/share' ]] \
+        || fail "editplace: the second place mounted $(cat "$mount_log")"
+    settle
+    [[ "$(cat "$bookmarks")" == "$edited_marks" ]] \
+        || fail "editplace: the abandoned Edit rewrote the saved place, the file now reads $(cat "$bookmarks")"
+    printf 'EDITPLACE abandoned=unchanged marks=%s\n' "$(head -1 "$bookmarks")"
+
+    export PATH="$saved_path"
+    kill_flea
+}
+
 case_network() {
     assert_network_attempt_reset _infoOutput infoProcess \
         || fail "network: info output is not cleared immediately before infoProcess starts"
@@ -3876,7 +6057,7 @@ case "\$*" in
 "info --attributes=trash::item-count trash:///"|"monitor --dir=trash:///") exec /usr/bin/gio "\$@" ;;
 esac
 case "\$1 \${2:-}" in
-"mount -l") exit 0 ;;
+"mount -li") exit 0 ;;
 "mount nfs://cancel.test/export")
     : > "$fake_root/cancel-started"
     read release < "$fake_root/mount-release"
@@ -3927,14 +6108,16 @@ EOS
     [[ -z "$(ipc networkEntries)" ]] || fail "network: the group is not empty with no bookmarks, gio mounts or Dropbox"
     shot network-empty
 
-    # "a" is the rail's add-dialog binding and nothing in the list; ui/js/Focus.js "lookup" scopes it.
-    # Since v0.1.3 there is no type-ahead, so the cursor must not move either.
+    # The current keymap binds "a" to add network from both listing and rail contexts.
     [[ "$(ipc focusView)" == "list" ]] || fail "network: did not start on the list"
     [[ "$(ipc cursor)" == "0" ]] || fail "network: did not start on row 0"
     key a >/dev/null
     settle
-    [[ "$(ipc dialogOpen)" == "false" ]] || fail "network: a opened the dialog from the list, where it is not bound"
-    [[ "$(ipc cursor)" == "0" ]] || fail "network: a moved the cursor, so something still type-aheads: $(ipc cursor)"
+    [[ "$(ipc dialogOpen)" == "true" ]] || fail "network: a from the list did not open the add-location dialog"
+    key -k Escape >/dev/null
+    settle
+    [[ "$(ipc dialogOpen)" == "false" ]] || fail "network: list add-location dialog did not close"
+    [[ "$(ipc cursor)" == "0" ]] || fail "network: list a changed the cursor to $(ipc cursor)"
 
     # The real submit path: Tab to the rail, "a" opens the dialog there, type a location, Enter submits.
     key -k Tab >/dev/null
@@ -4114,8 +6297,8 @@ EOS
         || fail "network: the added favorite is not present in the rail"
     click_rail_row "$added_favourite_index" right
     settle
-    [[ "$(ipc contextMenuEntries)" == "Remove" ]] \
-        || fail "network: the added favourite offers $(ipc contextMenuEntries), not Remove"
+    [[ "$(ipc contextMenuEntries)" == "Remove from Favorites" ]] \
+        || fail "network: the added favourite offers $(ipc contextMenuEntries), not Remove from Favorites"
     key -k Return >/dev/null
     network_wait_favourites '.places.favourites == []'
     [[ ! -e "$bookmarks" ]] || fail "network: Remove created shared GTK bookmarks"
@@ -4640,7 +6823,7 @@ case_networkauth() {
     cat > "$dir/bin/gio" <<EOS
 #!/bin/sh
 case "\$1 \${2:-}" in
-"mount -l")
+"mount -li")
     if [ -s "$state/mounted" ]; then
         uri=\$(cat "$state/mounted")
         printf 'Mount(0): auth-test -> %s\n' "\$uri"
@@ -4697,7 +6880,7 @@ EOS
     local want_entries='Own slot|network|share|true' seen_entries="" entries_deadline
     entries_deadline=$(( $(date +%s%3N) + 12000 ))
     while (( $(date +%s%3N) < entries_deadline )); do
-        seen_entries=$(timeout 1 omarchy-drive ipc -p "$flea_ui" flea networkEntries 2>/dev/null || true)
+        seen_entries=$(timeout 1 omarchy-drive ipc -p "$flea_ui/boot" flea networkEntries 2>/dev/null || true)
         [[ "$seen_entries" == "$want_entries" ]] && break
         sleep 0.1
     done
@@ -4715,8 +6898,9 @@ EOS
     [[ ! -s "$helper_log" ]] || fail "networkauth: already-mounted descendant launched helper"
     click_rail_row "$network_index" right
     settle
-    [[ "$(ipc contextMenuEntries)" == "Unmount|Rename|Remove" ]] \
-        || fail "networkauth: the projected mounted row offers $(ipc contextMenuEntries), not Unmount first"
+    [[ "$(ipc contextMenuEntries)" == "Open|-|Unmount|-|Rename|Edit address|-|Remove from Network" ]] \
+        || fail "networkauth: the projected mounted row offers $(ipc contextMenuEntries), not Open first"
+    menu_seek Unmount
     key -k Return >/dev/null
     wait_network_result unmounted 5
     [[ "$(cat "$state/unmount-uri")" == 'sftp://tester@slot.test/' ]] \
@@ -4757,7 +6941,9 @@ EOS
     key -k Tab >/dev/null
     key a >/dev/null
     settle
-    [[ "$(ipc networkTitle)" == "SMB share" ]] || fail "networkauth: wrong SMB title"
+    # Dialogs rule 6: the title says the task, so it is the same sentence under every chip below.
+    [[ "$(ipc networkTitle)" == "Add a network share" ]] \
+        || fail "networkauth: the add dialog does not name its own task, got $(ipc networkTitle)"
     [[ "$(ipc networkFields)" == "Label|Host|Port|Share|Domain|Username|Password" ]] \
         || fail "networkauth: SMB fields are $(ipc networkFields)"
     [[ "$(ipc networkHostPortWidths)" == *"|"* ]] || fail "networkauth: no Host/Port geometry"
@@ -4769,22 +6955,22 @@ EOS
     [[ "$(ipc networkDialogMetrics)" == "$(ipc networkDialogMetricTargets)" ]] \
         || fail "networkauth: card padding/gap $(ipc networkDialogMetrics) differs from scaled 16/12 target $(ipc networkDialogMetricTargets)"
 
-    local title_case want_protocol want_title want_fields
+    local title_case want_protocol want_fields
     for title_case in \
-        "SFTP|SFTP host|Label|Host|Port|Path|Username|Password" \
-        "FTPS|FTPS|Label|Host|Port|Path|Username|Password|TLS" \
-        "WebDAV|WebDAV endpoint|Label|Host|Port|Path|Username|Password|TLS"; do
-        IFS='|' read -r want_protocol want_title want_fields <<< "$title_case"
+        "SFTP|Label|Host|Port|Path|Username|Password" \
+        "FTPS|Label|Host|Port|Path|Username|Password|TLS" \
+        "WebDAV|Label|Host|Port|Path|Username|Password|TLS"; do
+        IFS='|' read -r want_protocol want_fields <<< "$title_case"
         click_chip "$want_protocol"
-        [[ "$(ipc networkTitle)" == "$want_title" ]] \
-            || fail "networkauth: $want_protocol title is $(ipc networkTitle)"
+        [[ "$(ipc networkTitle)" == "Add a network share" ]] \
+            || fail "networkauth: $want_protocol moved the title to $(ipc networkTitle)"
         [[ "$(ipc networkFields)" == "$want_fields" ]] \
             || fail "networkauth: $want_protocol fields are $(ipc networkFields)"
     done
 
     click_chip NFS
     settle
-    [[ "$(ipc networkTitle)" == "NFS export" ]] || fail "networkauth: wrong NFS title"
+    [[ "$(ipc networkTitle)" == "Add a network share" ]] || fail "networkauth: NFS moved the title"
     [[ "$(ipc networkFields)" == "Label|Host|Port|Export" ]] || fail "networkauth: NFS fields are $(ipc networkFields)"
     [[ "$(ipc networkNote)" == "No credentials: NFS trusts the client host" ]] \
         || fail "networkauth: NFS note is $(ipc networkNote)"
@@ -4947,10 +7133,16 @@ EOS
     [[ "$(cat "$state/info-uri")" == "smb://tester@slot.test/data" ]] \
         || fail "networkauth: corrected-retry setup did not resolve first location"
 
-    # The approved failed-connect artifact is FTPS: keep every field, mask the password, say one
-    # sentence and replace Save with Retry.
+    # #181: the share opened once its credential landed, and focus followed that open into it.
+    [[ "$(ipc focusView)" == "list" ]] \
+        || fail "networkauth: the corrected retry's open did not take focus into the share, focus is $(ipc focusView)"
+    key -k Tab >/dev/null
+    settle
     [[ "$(ipc focusView)" == "rail" ]] \
         || fail "networkauth: corrected-retry setup did not return to rail"
+
+    # The approved failed-connect artifact is FTPS: keep every field, mask the password, say one
+    # sentence and replace Save with Retry.
     key a >/dev/null
     click_chip FTPS
     key "slot.test" >/dev/null
@@ -4964,8 +7156,9 @@ EOS
     : > "$state/fail"
     key -k Return >/dev/null
     wait_network_result failed
-    [[ "$(ipc dialogOpen)" == "true" && "$(ipc networkTitle)" == "FTPS, failed connect" ]] \
-        || fail "networkauth: failure did not reopen approved FTPS artifact"
+    # Rule 6 again: a reopen after a failed connect is a connect, not an add, and it says which failed.
+    [[ "$(ipc dialogOpen)" == "true" && "$(ipc networkTitle)" == "Connect to a network share, failed connect" ]] \
+        || fail "networkauth: failure did not reopen approved FTPS artifact, title $(ipc networkTitle)"
     [[ "$(ipc networkStatus)" == "Connect failed: host refused the TLS handshake" ]] \
         || fail "networkauth: failure said $(ipc networkStatus)"
     [[ "$(ipc networkAction)" == "Retry" && "$(ipc networkPasswordState)" == "masked|set" ]] \
@@ -5015,7 +7208,7 @@ case_networktimeout() {
 
     cat > "$dir/bin/gio" <<EOS
 #!/bin/sh
-if [ "\$1 \$2" != "mount -l" ]; then
+if [ "\$1 \$2" != "mount -li" ]; then
   exec /usr/bin/gio "\$@"
 fi
 count=\$(cat "$calls")
@@ -5065,19 +7258,22 @@ EOS
 case_networklive() {
     local uri=${FLEA_NETWORK_LIVE_URI:-}
     local mount_uri=${FLEA_NETWORK_LIVE_MOUNT_URI:-$uri}
-    local mount_root=${FLEA_NETWORK_LIVE_ROOT:-}
+    local product_root=${FLEA_NETWORK_LIVE_ROOT:-}
     local relative=${FLEA_NETWORK_LIVE_RELATIVE:-}
+    local mount_relative=${FLEA_NETWORK_LIVE_MOUNT_RELATIVE:-}
     local protocol=${FLEA_NETWORK_LIVE_PROTOCOL:-}
     local host=${FLEA_NETWORK_LIVE_HOST:-}
     local remote_path=${FLEA_NETWORK_LIVE_PATH:-}
     local remote_user=${FLEA_NETWORK_LIVE_USER:-}
     local auth=${FLEA_NETWORK_LIVE_AUTH:-none}
-    local product_root
+    local mount_root
     [[ "$uri" == *://* && "$mount_uri" == *://* \
-        && "$mount_root" == "/run/user/$(id -u)/gvfs/"* ]] \
+        && "$product_root" == "/run/user/$(id -u)/gvfs/"* ]] \
         || fail "networklive: missing or unsafe live mount contract"
     [[ -n "$relative" && "$relative" != /* && "$relative" != *".."* ]] \
         || fail "networklive: unsafe relative test path"
+    [[ -n "$mount_relative" && "$mount_relative" != /* && "$mount_relative" != *".."* ]] \
+        || fail "networklive: unsafe mount-relative test path"
     [[ -n "$host" && ( "$auth" == password || "$auth" == none ) ]] \
         || fail "networklive: incomplete form contract"
 
@@ -5121,12 +7317,11 @@ case_networklive() {
     fi
     wait_network_result mounted 120
     product_root=$(timeout 5 gio info "$uri" 2>/dev/null | sed -n 's/^local path: //p')
-    [[ "$product_root" == "/run/user/$(id -u)/gvfs/"* ]] \
+    [[ "$product_root" == "/run/user/$(id -u)/gvfs/"* && -d "$product_root" ]] \
         || fail "networklive: product mount has no safe FUSE root"
-    mount_root=$product_root
-    [[ -f "${mount_root%/}/$relative/alpha.txt" ]] \
-        || fail "networklive: relative fixture is absent below product mount root $mount_root"
-    wait_path_wall "$mount_root" 25
+    [[ -f "${product_root%/}/$relative/alpha.txt" ]] \
+        || fail "networklive: relative fixture is absent below product mount root $product_root"
+    wait_path_wall "$product_root" 25
 
     wait_network_entry_state true
     local entries entry label network_count network_index step
@@ -5150,13 +7345,18 @@ case_networklive() {
     key g >/dev/null
     for ((step = 0; step < network_index; step++)); do key j >/dev/null; done
     key -k Return >/dev/null
+    mount_root=$(timeout 5 gio info "$mount_uri" 2>/dev/null | sed -n 's/^local path: //p')
+    [[ "$mount_root" == "/run/user/$(id -u)/gvfs/"* && -d "$mount_root" ]] \
+        || fail "networklive: mount URI has no safe FUSE root"
+    printf 'NETWORKLIVE roots product=%q mount=%q product-relative=%q mount-relative=%q\n' \
+        "$product_root" "$mount_root" "$relative" "$mount_relative"
     wait_path_wall "$mount_root" 25
     key -k Escape >/dev/null
     settle
     [[ "$(ipc focusView)" == "list" ]] || fail "networklive: Escape did not return focus to the list"
 
     local current=$mount_root component row
-    IFS=/ read -ra components <<< "$relative"
+    IFS=/ read -ra components <<< "$mount_relative"
     for component in "${components[@]}"; do
         [[ -n "$component" ]] || continue
         row=$(find_row_wall "$component" 25) \
@@ -5182,12 +7382,13 @@ case_networklive() {
     wait_listing_wall 0 25
     click_rail_row "$network_index" right
     settle
-    [[ "$(ipc contextMenuEntries)" == "Unmount|Rename|Remove" ]] \
-        || fail "networklive: mounted share menu is $(ipc contextMenuEntries), not Unmount first"
+    [[ "$(ipc contextMenuEntries)" == "Open|-|Unmount|-|Rename|Edit address|-|Remove from Network" ]] \
+        || fail "networklive: mounted share menu is $(ipc contextMenuEntries), not Open first"
+    menu_seek Unmount
     key -k Return >/dev/null
     wait_message "Unmounted $label."
     wait_network_result unmounted 25
-    wait_network_entry_state false 25
+    wait_network_entry_absent "$entries" "$mount_uri" 25
     ! gio mount -l 2>/dev/null | grep -Fq -- "-> $mount_uri" || fail "networklive: GIO mount survived"
 
     printf 'NETWORKLIVE protocol=%s cold-mount=ok rail=ok browse=ok preview=ok unmount=ok saved=false\n' "$protocol"
@@ -5230,8 +7431,15 @@ case_gvfs() {
     export HOME="$real_home"
     wait_listing 2
     wait_rail 2
-    [[ "$(ipc networkEntries)" == "share.zip|network|share|true" ]] \
-        || fail "gvfs: live mount never appeared, got $(ipc networkEntries)"
+    # The rail count is satisfied by Home and Trash, and ui/NetworkMounts.qml polls mounts every five
+    # seconds, so the fixture's own row is waited for. The operator's own shares sit on this rail too
+    # and are none of this case's business, which is why the row is looked for rather than counted.
+    for _attempt in $(seq 1 300); do
+        [[ "$(ipc networkEntries)" == *"share.zip|network|share|true"* ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc networkEntries)" == *"share.zip|network|share|true"* ]] \
+        || fail "gvfs: live mount never appeared, the rail carries $(ipc networkEntries)"
 
     key -k Tab >/dev/null
     key g >/dev/null
@@ -5255,15 +7463,17 @@ case_gvfs() {
 
     click_rail_row "$(rail_row_of share.zip)" right
     settle
-    [[ "$(ipc contextMenuEntries)" == "Unmount|Rename|Remove" ]] \
+    [[ "$(ipc contextMenuEntries)" == "Open|-|Unmount|-|Rename|Edit address|-|Remove from Network" ]] \
         || fail "gvfs: mounted share menu is $(ipc contextMenuEntries)"
+    menu_seek Unmount
     key -k Return >/dev/null
     wait_message "Unmounted share.zip."
     for _attempt in $(seq 1 100); do
-        [[ -z "$(ipc networkEntries)" ]] && break
+        [[ "$(ipc networkEntries)" != *"share.zip"* ]] && break
         sleep 0.05
     done
-    [[ -z "$(ipc networkEntries)" ]] || fail "gvfs: row survived unmount"
+    [[ "$(ipc networkEntries)" != *"share.zip"* ]] \
+        || fail "gvfs: the row survived unmount, the rail carries $(ipc networkEntries)"
     ! gio mount -l | grep -Fq -- "-> $uri" || fail "gvfs: GIO mount survived Flea unmount"
 
     printf 'GVFS rail=ok browse=ok preview=ok unmount=ok\n'
@@ -5521,7 +7731,7 @@ case_hangshare() {
 # Every call is logged, because a case that hangs on purpose has no other way to say which leg it
 # reached; the fail messages below quote it. Same idea as case_unmount's own stub log.
 printf '%s\n' "\$*" >> "$dir/bin/calls"
-if [ "\$1 \$2" = "mount -l" ]; then
+if [ "\$1 \$2" = "mount -li" ]; then
   printf 'Mount(0): hang en stubhost -> $hang_uri\n  Type: GDaemonMount\n'
   printf 'Mount(1): good en stubhost -> $good_uri\n  Type: GDaemonMount\n'
   exit 0
@@ -5575,6 +7785,9 @@ EOS
     settle
     key l >/dev/null
     wait_marker "$dir/bin/info-started" "hangshare: the hang share's gio info never started, the stub saw: $(grep -v '^mount -l$' "$dir/bin/calls" 2>/dev/null | sort -u | tr '\n' ';')"
+
+    # An open that has not landed keeps focus on the rail, so the next key still moves the rail's cursor (#181).
+    [[ "$(ipc focusView)" == "rail" ]] || fail "hangshare: focus left the rail for $(ipc focusView) while the share had not opened"
 
     # The guard is closed now, proven by the marker above rather than by a sleep, and a second share
     # must say so rather than swallow the keypress.
@@ -5655,7 +7868,7 @@ case_unmount() {
     cat > "$dir/bin/gio" <<EOS
 #!/bin/sh
 case "\$1 \$2" in
-  "mount -l")
+  "mount -li")
     # gvfsd composes this label and translates the word between share and host, so the stub speaks
     # Spanish here whatever the client locale is. What that proves is that the parser is robust to a
     # translated connector, and nothing about the C pin: live matrix step 0b ran this case in both
@@ -5702,7 +7915,7 @@ EOS
     settle
     [[ "$(ipc focusView)" == "rail" ]] || fail "unmount: Tab did not reach the rail"
 
-    # Right click raises the menu over the row and nothing else: the release row first, then the two
+    # Right click raises the menu over the row and nothing else: the release row first, then the three
     # rows the saved place itself owns, and no unmount has run. The old two-right-click arm is gone,
     # see ui/Sidebar.qml "openRailMenu" and ui/js/Mounts.js "rowMenu".
     click_rail_row "$(rail_row_of stubshare)" right
@@ -5711,10 +7924,10 @@ EOS
         "$(ipc contextMenuVisible)" "$(ipc contextMenuEntries)" "$(ipc contextMenuGlyphs)"
     shot unmount-menu
     [[ "$(ipc contextMenuVisible)" == "true" ]] || fail "unmount: right click opened no menu on the share"
-    [[ "$(ipc contextMenuEntries)" == "Unmount|Rename|Remove" ]] \
-        || fail "unmount: the share's menu is $(ipc contextMenuEntries), not Unmount then Rename then Remove"
-    [[ "$(ipc contextMenuGlyphs)" == "eject|rename|minus" ]] \
-        || fail "unmount: the share's rows draw $(ipc contextMenuGlyphs), not eject, rename and minus"
+    [[ "$(ipc contextMenuEntries)" == "Open|-|Unmount|-|Rename|Edit address|-|Remove from Network" ]] \
+        || fail "unmount: the share's menu is $(ipc contextMenuEntries), not Open, Unmount, Rename, Edit address then Remove from Network"
+    [[ "$(ipc contextMenuGlyphs)" == "folder-open|-|drive|-|rename|sliders|-|minus" ]] \
+        || fail "unmount: the share's rows draw $(ipc contextMenuGlyphs), not folder-open, drive, rename, sliders and minus"
     [[ -z "$(cat "$unmount_log")" ]] || fail "unmount: opening the menu already unmounted: $(cat "$unmount_log")"
 
     # Escape closes it and still nothing has run, which is what makes the menu the confirmation.
@@ -5726,6 +7939,7 @@ EOS
     # Choosing the row is what unmounts, and the row's key is what says which share, not its index.
     click_rail_row "$(rail_row_of stubshare)" right
     settle
+    menu_seek Unmount
     key -k Return >/dev/null
     wait_message "Unmounted stubshare."
     [[ "$(cat "$unmount_log")" == "UNMOUNT $share_uri" ]] \
@@ -5736,7 +7950,8 @@ EOS
     # the one favourite this fixture home has, and it is not a mount.
     click_rail_row 0 right
     settle
-    [[ "$(ipc contextMenuVisible)" == "false" ]] || fail "unmount: a favourite opened a menu with nothing in it"
+    [[ "$(ipc contextMenuVisible)" == "false" ]] \
+        || fail "unmount: a favourite opened $(ipc contextMenuEntries)"
 
     # The one instance is shared with the listing, so the keyboard must come back to it afterwards:
     # a second ContextMenu in this tree once killed every key in the window, see AGENTS.md.
@@ -5754,9 +7969,9 @@ EOS
     # for, each with its own sentence. This home has no bookmarks file, so the live share is unsaved.
     click_rail_row "$(rail_row_of stubshare)" right
     settle
-    [[ "$(ipc contextMenuEntries)" == "Unmount|Rename|Remove" ]] \
+    [[ "$(ipc contextMenuEntries)" == "Open|-|Unmount|-|Rename|Edit address|-|Remove from Network" ]] \
         || fail "unmount: the share's menu is $(ipc contextMenuEntries) before Remove"
-    menu_seek Remove
+    menu_seek "Remove from Network"
     key -k Return >/dev/null
     wait_message "stubshare is not a saved place, and stays on the rail until it is unmounted."
     [[ ! -e "$fixture_home/.config/gtk-3.0/bookmarks" ]] \
@@ -5794,7 +8009,7 @@ EOS
     unmount_log_before=$(cat "$unmount_log")
     click_rail_row "$(rail_row_of 'Saved Share')" right
     settle
-    menu_seek Remove
+    menu_seek "Remove from Network"
     key -k Return >/dev/null
     wait_message "Saved Share is forgotten, and stays on the rail until it is unmounted."
     [[ "$(cat "$bookmarks")" == "smb://stubhost/ghost Ghost Place" ]] \
@@ -5811,9 +8026,9 @@ EOS
     # Saved and nothing mounted: the line and the row both go, and no unmount clause is offered.
     click_rail_row "$(rail_row_of 'Ghost Place')" right
     settle
-    [[ "$(ipc contextMenuEntries)" == "Rename|Remove" ]] \
-        || fail "unmount: an unmounted place offers $(ipc contextMenuEntries), not Rename then Remove"
-    menu_seek Remove
+    [[ "$(ipc contextMenuEntries)" == "Rename|Edit address|-|Remove from Network" ]] \
+        || fail "unmount: an unmounted place offers $(ipc contextMenuEntries), not Rename, Edit address then Remove from Network"
+    menu_seek "Remove from Network"
     key -k Return >/dev/null
     wait_message "Ghost Place is forgotten."
     [[ -f "$bookmarks" ]] || fail "unmount: Remove unlinked the bookmarks file instead of emptying it"
@@ -5832,7 +8047,7 @@ EOS
     # on a file nobody had read: the file has been read, and this share is simply not in it.
     click_rail_row "$(rail_row_of stubshare)" right
     settle
-    menu_seek Remove
+    menu_seek "Remove from Network"
     key -k Return >/dev/null
     wait_message "stubshare is not a saved place, and stays on the rail until it is unmounted."
     # Both stat and cat print nothing for a path that is gone, so neither assertion below means
@@ -5844,6 +8059,302 @@ EOS
         || fail "unmount: the refused press rewrote the file, mtime moved from $before_press4"
 
     printf 'UNMOUNT remove saved-mounted=ok saved-only=ok pressed-again=ok\n'
+    kill_flea
+    sandbox_remove "$fixture_home"
+}
+
+# PR 122's phone rows, stubbed, because no MTP device is plugged into this box and gvfs is what the
+# parser reads. The stub answers what "gio mount -li" answers here, can_mount=0 on a volume gio has
+# already mounted included, which is the line the row has to survive to keep its Unmount.
+case_phones() {
+    local dir="$fixture_root/phones" state="$fixture_root/phones-state"
+    sandbox_scratch "$dir"
+    sandbox_scratch "$state"
+    mkdir -p "$dir/bin" "$dir/files" "$state/flea"
+    # The folder gio hands back after the mount, named the way gvfs names it, so the pane's own path
+    # is what ui/js/Mounts.js "trashable" reads for issue 133.
+    local fuse="$dir/gvfs/mtp:host=SAMSUNG_Android"
+    mkdir -p "$fuse/DCIM"
+    : > "$dir/files/local.txt"
+    : > "$fuse/DCIM/IMG_0001.jpg"
+    local mtp_uri="mtp://SAMSUNG_SAMSUNG_Android_RQGL705T0NR/"
+    # The MTP mount stub holds this long, so the keyboard leg can read focus while the mount is still running.
+    local mtp_mount_hold_s=2
+    # Directive 44's capture: an iPhone answers on GPhoto2 and on AFC at once, and the rail folds the
+    # pair into one row on the serial they share. The uuid here is GM's own phone's, as measured.
+    local afc_uuid="00008130-001641411883401C"
+    local afc_uri="afc://$afc_uuid/"
+    local afc_fuse="$dir/gvfs-afc/afc:host=$afc_uuid"
+    mkdir -p "$afc_fuse/DCIM/113APPLE"
+    : > "$afc_fuse/DCIM/113APPLE/IMG_3263.HEIC"
+    local unmount_log="$dir/unmount.log"
+    : > "$unmount_log"
+
+    cat > "$dir/bin/gio" <<EOS
+#!/bin/sh
+mounted="$dir/mounted"
+afcmounted="$dir/afcmounted"
+case "\$1 \${2:-}" in
+"mount -li")
+    printf 'Volume(0): SAMSUNG Android\n'
+    printf '  Type: GProxyVolume (GProxyVolumeMonitorMTP)\n'
+    printf '  activation_root=$mtp_uri\n'
+    if [ -f "\$mounted" ]; then
+        printf '  can_mount=0\n'
+        printf '  Mount(0): SAMSUNG Android -> $mtp_uri\n'
+        printf '    Type: GProxyShadowMount (GProxyVolumeMonitorMTP)\n'
+        printf 'Mount(0): mtp -> $mtp_uri\n'
+        printf '  Type: GDaemonMount\n'
+        printf '  is_shadowed=1\n'
+    else
+        printf '  can_mount=1\n'
+    fi
+    printf 'Volume(1): NIKON DSC D3500\n'
+    printf '  Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)\n'
+    printf '  activation_root=gphoto2://%%5Busb%%3A001%%2C004%%5D/\n'
+    printf '  can_mount=1\n'
+    printf 'Volume(2): iPhone\n'
+    printf '  Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)\n'
+    printf '  activation_root=gphoto2://Apple_Inc._iPhone_00008130001641411883401C/\n'
+    printf '  can_mount=1\n'
+    printf 'Volume(3): Documents on GM’s iPhone\n'
+    printf '  Type: GProxyVolume (GProxyVolumeMonitorAfc)\n'
+    printf '  uuid=$afc_uuid\n'
+    printf '  activation_root=afc://$afc_uuid:3/\n'
+    if [ -f "\$afcmounted" ]; then
+        printf '  can_mount=0\n'
+        printf 'Mount(2): GM’s iPhone -> $afc_uri\n'
+        printf '  Type: GDaemonMount\n'
+    else
+        printf '  can_mount=1\n'
+    fi
+    exit 0 ;;
+"mount -u")
+    printf 'UNMOUNT %s\n' "\$3" >> "$unmount_log"
+    rm -f "\$mounted" "\$afcmounted"
+    exit 0 ;;
+"mount $mtp_uri")
+    # A real MTP mount takes a moment; the started marker lets the keyboard leg below read focus inside it.
+    : > "$dir/mount-started"
+    sleep $mtp_mount_hold_s
+    : > "\$mounted"
+    exit 0 ;;
+"info $mtp_uri")
+    printf 'local path: %s\n' "$fuse"
+    exit 0 ;;
+"mount $afc_uri")
+    : > "\$afcmounted"
+    exit 0 ;;
+"info $afc_uri")
+    printf 'local path: %s\n' "$afc_fuse"
+    exit 0 ;;
+esac
+# Everything else is the real tool's, so the Trash count and its monitor keep working under the stub.
+exec /usr/bin/gio "\$@"
+EOS
+    chmod +x "$dir/bin/gio"
+
+    local fixture_home="$fixture_root/phones-home"
+    fixture_home_make "$fixture_home"
+    # Drive size on is what makes a phone row's detail reachable: a device row draws one when its
+    # size is not null, and a row carrying no size at all wrote a type error into this run's log.
+    printf '{"view":"list","places":{"driveSize":true,"trashCount":true}}\n' > "$state/flea/ui.json"
+    local real_home="$HOME" saved_path="$PATH" old_state="${XDG_STATE_HOME:-}"
+    export PATH="$dir/bin:$PATH"
+    export XDG_STATE_HOME="$state"
+    export HOME="$fixture_home"
+    launch "$dir/files"
+    export HOME="$real_home"
+    wait_listing 1
+    wait_rail 1
+
+    for _attempt in $(seq 1 200); do
+        [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|false"* ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|false"* \
+        && "$(ipc deviceEntries)" == *"NIKON DSC D3500|device|phone|false"* \
+        && "$(ipc deviceEntries)" == *"GM’s iPhone|device|phone|false"* ]] \
+        || fail "phones: the three volumes are not three unmounted DEVICES rows, got $(ipc deviceEntries)"
+    # Directive 44: the iPhone answers on GPhoto2 as well, and that leg is folded into the row above
+    # rather than drawn beside it, so the phone is one row and its camera store is not a second.
+    [[ "$(ipc deviceEntries)" != *"iPhone|device|phone|false|camera"* ]] \
+        || fail "phones: the iPhone's camera leg drew its own row, got $(ipc deviceEntries)"
+    # Behind the block devices, per the DEVICES rule: a block device leads and the phones are the tail.
+    ipc railEntries | jq -e '[.[] | select(.group == "device") | .kind] | index("phone") as $i
+        | ($i != null) and ($i > 0) and (.[$i:] | all(. == "phone"))' >/dev/null \
+        || fail "phones: the phone rows do not sit behind the block devices, got $(ipc railEntries | jq -c '[.[]|select(.group=="device")|.kind]')"
+    # PhoneMark rule 1: the monitor picks the mark, MTP the phone and GPhoto2 the camera.
+    # AFC is a phone the same way MTP is: the mark names the transport, and only GPhoto2 is a camera.
+    ipc railEntries | jq -e '[.[] | select(.kind == "phone") | .glyph] == ["smartphone", "camera", "smartphone"]' >/dev/null \
+        || fail "phones: the marks are $(ipc railEntries | jq -c '[.[]|select(.kind=="phone")|.glyph]'), not phone, camera, phone"
+    # RailDetails: a phone has no capacity to draw, and it keeps the fixed indicator slot a volume has.
+    ipc railDetails | jq -e '[.rows[] | select(.kind == "phone")] | length == 3
+        and all(.[]; .detail == "" and .indicatorVisible)' >/dev/null \
+        || fail "phones: a phone row drew a size or lost its indicator, got $(ipc railDetails | jq -c '[.rows[]|select(.kind=="phone")|{detail,indicatorVisible}]')"
+
+    # A row with no number gives its label the whole width up to the indicator slot: the label needs
+    # 126 px at this text size and the numbers column used to leave it 110.
+    ipc railDetails | jq -e '[.rows[] | select(.kind == "phone")] | length == 3
+        and all(.[]; .labelNeeds > 0 and .labelWidth >= .labelNeeds)' >/dev/null \
+        || fail "phones: a phone label is still cut, got $(ipc railDetails | jq -c '[.rows[]|select(.kind=="phone")|{label,labelWidth,labelNeeds}]')"
+
+    # An unmounted volume offers the mount its own row does, per RailAdditions rule 2, and choosing it
+    # is the row's own activation: this is the only thing that drives Sidebar.openPhone.
+    click_rail_row "$(rail_row_of 'SAMSUNG Android')" right
+    settle
+    [[ "$(ipc contextMenuVisible)" == "true" && "$(ipc contextMenuEntries)" == "Mount" ]] \
+        || fail "phones: an unmounted phone's menu is $(ipc contextMenuEntries), not Mount alone"
+    key -k Escape >/dev/null
+    settle
+
+    # Activating the unmounted row mounts it, resolves the folder and opens it, the way a share does.
+    click_rail_row "$(rail_row_of 'SAMSUNG Android')" left
+    wait_path "$fuse"
+    wait_listing 1
+    [[ "$(ipc rowAt 0)" == "DCIM|"* ]] || fail "phones: the phone's own listing is $(ipc rowAt 0)"
+    for _attempt in $(seq 1 200); do
+        [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|true"* ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|true"* ]] \
+        || fail "phones: the row did not survive its own mount, got $(ipc deviceEntries)"
+    [[ -z "$(ipc networkEntries)" ]] \
+        || fail "phones: gio's shadow mount became a NETWORK row as well, got $(ipc networkEntries)"
+    shot phones-mounted
+
+    # Issue 133: gio cannot trash into this mount, so neither the row nor the key is offered here.
+    click_row 0 right
+    settle
+    [[ "$(ipc contextMenuVisible)" == "true" && "$(ipc contextMenuEntries)" == *"Move to Dropbox"* ]] \
+        || fail "phones: the listing menu did not open on the phone's own row, got $(ipc contextMenuEntries)"
+    [[ "$(ipc contextMenuEntries)" != *"Move to Trash"* ]] \
+        || fail "phones: an MTP path still offers Move to Trash: $(ipc contextMenuEntries)"
+    key -k Escape >/dev/null
+    settle
+    # The listing holds the keyboard here, so the silence below is the guard refusing and not a key
+    # that went to the rail: asserted before the key rather than recovered from afterwards.
+    focus_now=$(ipc focusView)
+    [[ "$focus_now" == "list" ]] || fail "phones: the listing does not hold the keyboard, focus is $focus_now"
+    key d >/dev/null
+    # 50 ms apart cannot step over an arm that stands for four seconds, and a second of them outlasts the key's own round trip.
+    for _attempt in $(seq 1 20); do
+        [[ "$(ipc statusPrimary)" != *"Press d again"* ]] \
+            || fail "phones: d armed a trash that can only fail, the bar reads $(ipc statusPrimary)"
+        sleep 0.05
+    done
+    # One directory up is the folder the mount sits in rather than the mount, so the same key does arm
+    # there: the silence above is the guard and not a keyboard that stopped answering.
+    key h >/dev/null
+    wait_path "$dir/gvfs"
+    wait_listing 1
+    key j >/dev/null
+    settle
+    key d >/dev/null
+    wait_message "Press d again to trash, or Delete on its own."
+    # The arm itself, not the hint: ui/Pane.qml escapePressed clears a selection before it clears the
+    # bar, and coming up from the mount leaves the row we left selected (ui/js/Nav.js
+    # applyPendingSelect), so the sentence stands for its four seconds while the arm is already gone.
+    key -k Escape >/dev/null
+    settle
+    [[ "$(ipc keyDeliveryState | jq -er '.trashArmedAt')" == "0" ]] \
+        || fail "phones: Escape left the trash armed one directory up, the arm reads $(ipc keyDeliveryState | jq -c '.trashArmedAt')"
+    key -k Return >/dev/null
+    wait_path "$fuse"
+    wait_listing 1
+
+    # Unmount is the release a phone offers, never Eject, and the key that carries it is its uri.
+    click_rail_row "$(rail_row_of 'SAMSUNG Android')" right
+    settle
+    [[ "$(ipc contextMenuEntries)" == "Open|-|Unmount" ]] \
+        || fail "phones: the mounted phone's menu is $(ipc contextMenuEntries), not Open then Unmount"
+    menu_seek Unmount
+    key -k Return >/dev/null
+    for _attempt in $(seq 1 200); do
+        [[ -s "$unmount_log" ]] && break
+        sleep 0.05
+    done
+    [[ "$(cat "$unmount_log")" == "UNMOUNT $mtp_uri" ]] \
+        || fail "phones: the menu row unmounted $(cat "$unmount_log"), not $mtp_uri"
+    for _attempt in $(seq 1 200); do
+        [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|false"* ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|false"* ]] \
+        || fail "phones: the row never came back unmounted, got $(ipc deviceEntries)"
+
+    # And the menu's own Mount drives the same activation, on the row the unmount above just released:
+    # this is the only thing that reaches Sidebar.openPhone through the menu.
+    click_rail_row "$(rail_row_of 'SAMSUNG Android')" right
+    settle
+    [[ "$(ipc contextMenuEntries)" == "Mount" ]] \
+        || fail "phones: the released phone's menu is $(ipc contextMenuEntries), not Mount alone"
+    key -k Return >/dev/null
+    wait_path "$fuse"
+    wait_listing 1
+    for _attempt in $(seq 1 200); do
+        [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|true"* ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|true"* ]] \
+        || fail "phones: the menu's Mount did not mount the row, got $(ipc deviceEntries)"
+
+    # #181 from the keyboard: Enter on the released row only starts its mount, and focus follows the folder once it opens.
+    click_rail_row "$(rail_row_of 'SAMSUNG Android')" right
+    settle
+    menu_seek Unmount
+    : > "$unmount_log"
+    key -k Return >/dev/null
+    for _attempt in $(seq 1 200); do
+        [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|false"* ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc deviceEntries)" == *"SAMSUNG Android|device|phone|false"* ]] \
+        || fail "phones: the row did not come back unmounted for the keyboard leg, got $(ipc deviceEntries)"
+    # Off the mount first, so the wait below can only be satisfied by this leg's own open.
+    [[ "$(ipc path)" != "$fuse" ]] || { key h >/dev/null; wait_path "$dir/gvfs"; }
+    key -k Tab >/dev/null
+    settle
+    [[ "$(ipc focusView)" == "rail" ]] || fail "phones: Tab did not reach the rail, focus is $(ipc focusView)"
+    key g >/dev/null
+    for ((_step = 0; _step < $(rail_row_of 'SAMSUNG Android'); _step++)); do key j >/dev/null; done
+    settle
+    [[ "$(ipc railCursor)" == "$(rail_row_of 'SAMSUNG Android')" ]] || fail "phones: the rail cursor is on row $(ipc railCursor), not the phone"
+    rm -f "$dir/mount-started"
+    key -k Return >/dev/null
+    wait_marker "$dir/mount-started" "phones: Enter on the unmounted phone never started its mount"
+    [[ "$(ipc focusView)" == "rail" ]] \
+        || fail "phones: Enter on the unmounted phone moved focus to $(ipc focusView) before its mount landed"
+    wait_path "$fuse"
+    wait_listing 1
+    [[ "$(ipc focusView)" == "list" ]] \
+        || fail "phones: Enter on the unmounted phone opened it but left focus on $(ipc focusView), not the list"
+
+    # The same three legs on the iPhone's own row, which reaches its files over AFC: its menu offers
+    # the mount, activating it resolves the root rather than the documents volume gvfs advertises,
+    # and DCIM is what lists. Directive 44's live proof on the plugged phone is the overseer's.
+    click_rail_row "$(rail_row_of 'GM’s iPhone')" right
+    settle
+    [[ "$(ipc contextMenuVisible)" == "true" && "$(ipc contextMenuEntries)" == "Mount" ]] \
+        || fail "phones: the unmounted iPhone's menu is $(ipc contextMenuEntries), not Mount alone"
+    key -k Escape >/dev/null
+    settle
+    click_rail_row "$(rail_row_of 'GM’s iPhone')" left
+    wait_path "$afc_fuse"
+    wait_listing 1
+    [[ "$(ipc rowAt 0)" == "DCIM|"* ]] || fail "phones: the iPhone's own listing is $(ipc rowAt 0)"
+    for _attempt in $(seq 1 200); do
+        [[ "$(ipc deviceEntries)" == *"GM’s iPhone|device|phone|true"* ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc deviceEntries)" == *"GM’s iPhone|device|phone|true"* ]] \
+        || fail "phones: the iPhone row did not survive its own mount, got $(ipc deviceEntries)"
+    [[ -z "$(ipc networkEntries)" ]] \
+        || fail "phones: the AFC root mount became a NETWORK row as well, got $(ipc networkEntries)"
+    shot phones-iphone-mounted
+    printf 'PHONES rows=ok marks=ok mount=ok trash-guard=ok unmount=ok iphone=ok\n'
+    export PATH="$saved_path"
+    if [[ -n "$old_state" ]]; then export XDG_STATE_HOME="$old_state"; else unset XDG_STATE_HOME; fi
     kill_flea
     sandbox_remove "$fixture_home"
 }
@@ -5876,7 +8387,7 @@ cat <<JSON
 {"name":"nvme0n1","path":"/dev/nvme0n1","label":null,"mountpoints":[null],"rm":false,"size":"238.5G","type":"disk","model":"KBG40ZNS256G",
 "children":[{"name":"nvme0n1p1","path":"/dev/nvme0n1p1","label":null,"mountpoints":["/"],"rm":false,"size":"238.5G","type":"part","model":null}]},
 {"name":"sda","path":"/dev/sda","label":null,"mountpoints":[null],"rm":true,"size":"116.1G","type":"disk","model":"USB Flash Disk",
-"children":[{"name":"sda1","path":"/dev/sda1","label":"FLEASTICK","mountpoints":[\$mp],"rm":true,"size":"116.1G","type":"part","model":null}]}]}
+"children":[{"name":"sda1","path":"/dev/sda1","label":"FLEASTICK","mountpoints":[\$mp],"rm":true,"size":"116.1G","type":"part","model":null,"fstype":"vfat"}]}]}
 JSON
 EOS
     chmod +x "$dir/bin/lsblk"
@@ -5894,7 +8405,10 @@ EOS
 
     local fixture_home="$fixture_root/eject-home"
     fixture_home_make "$fixture_home"
-    local real_home="$HOME" saved_path="$PATH"
+    local real_home="$HOME" saved_path="$PATH" real_state="${XDG_STATE_HOME-}"
+    # Show unmounted drives ships on from 0.3.3, so this seeds it on: a mounted volume
+    # then offers Open, Unmount, Eject, and the case proves Ctrl+E and the menu both release it.
+    seed_ui_state "$fixture_root/eject-state" '{"places":{"showUnmounted":true}}'
     export PATH="$dir/bin:$PATH"
     export HOME="$fixture_home"
     launch "$dir"
@@ -5931,13 +8445,17 @@ EOS
         "$(ipc contextMenuVisible)" "$(ipc contextMenuEntries)" "$(ipc contextMenuGlyphs)"
     shot eject-menu
     [[ "$(ipc contextMenuVisible)" == "true" ]] || fail "eject: right click opened no menu on the volume"
-    [[ "$(ipc contextMenuEntries)" == "Eject" ]] \
-        || fail "eject: the volume's menu is $(ipc contextMenuEntries), not one Eject row"
-    [[ "$(ipc contextMenuGlyphs)" == "eject" ]] \
-        || fail "eject: the Eject row draws $(ipc contextMenuGlyphs), not the eject mark"
+    [[ "$(ipc contextMenuEntries)" == "Open|-|Unmount|Eject" ]] \
+        || fail "eject: the volume's menu is $(ipc contextMenuEntries), not Open|Unmount|Eject"
+    [[ "$(ipc contextMenuGlyphs)" == "folder-open|-|drive|eject" ]] \
+        || fail "eject: the volume's menu draws $(ipc contextMenuGlyphs), not folder-open|-|drive|eject"
     if grep -q '^mount -e' "$gio_log"; then
         fail "eject: opening the menu already ejected: $(cat "$gio_log")"
     fi
+
+    # Eject is the third row, not the first: choosing rows[0] would open the stick, which is
+    # the defect ui/js/Eject.js releaseFromRows exists for. Seek it by label, not by count.
+    menu_seek Eject
 
     # The negative control, and the whole point of the case: gio exits 0 and the volume is still
     # mounted, so the sentence must refuse. A verdict read off the exit code would say safe here.
@@ -5964,15 +8482,22 @@ EOS
     : > "$dir/really"
     click_rail_row "$volume_row" right
     settle
+    menu_seek Eject
     key -k Return >/dev/null
     wait_message "Ejected FLEASTICK, it is safe to unplug."
     printf 'EJECT really entries=%q\n' "$(ipc deviceEntries)"
     shot eject-safe
 
-    # An unmounted volume has nothing to release, so its menu is gone with its mount.
+    # An unmounted volume with the switch on offers the mount its own activation does, so its
+    # menu is a Mount row rather than no menu at all; choosing nothing leaves gio untouched.
     click_rail_row "$volume_row" right
     settle
-    [[ "$(ipc contextMenuVisible)" == "false" ]] || fail "eject: an unmounted volume was still offered a menu"
+    [[ "$(ipc contextMenuVisible)" == "true" ]] \
+        || fail "eject: an unmounted volume with unmounted drives shown was offered no menu"
+    [[ "$(ipc contextMenuEntries)" == "Mount" ]] \
+        || fail "eject: the unmounted volume's menu is $(ipc contextMenuEntries), not one Mount row"
+    key -k Escape >/dev/null
+    settle
 
     # gio's own -f is offered nowhere, and the eject never went through --device, which glib
     # dispatches before it ever reads --eject: see ui/DeviceMounts.qml "eject".
@@ -5987,6 +8512,7 @@ EOS
 
     printf 'EJECT menu=ok internal-disk-offers-nothing=ok exit-code-is-not-the-verdict=ok listing-is=ok no-force=ok\n'
     kill_flea
+    if [[ -n "$real_state" ]]; then export XDG_STATE_HOME="$real_state"; else unset XDG_STATE_HOME; fi
     sandbox_remove "$fixture_home"
 }
 
@@ -6001,7 +8527,7 @@ case_rename() {
     cat > "$dir/bin/gio" <<EOS
 #!/bin/sh
 case "\$1 \$2" in
-  "mount -l") cat "$dir/bin/gio-out"; exit 0 ;;
+  "mount -li") cat "$dir/bin/gio-out"; exit 0 ;;
 esac
 exit 0
 EOS
@@ -6232,103 +8758,6 @@ EOS
     printf 'TAILDROP checks=%s directory-disabled=ok brand=ok submenu=ok second-peer-recorded=ok signed-out-disabled=ok absent=ok isolated=ok\n' "$menus_checks"
 )
 
-# The rename editor's lifetime. renamingIndex used to outlive the editor it armed, and ui/js/Focus.js
-# swallowed every key while it was set, so a view change, a scroll past the cache buffer or a
-# navigation left the window keyboard-dead with no escape and no recovery but the mouse. Each leg
-# below proves the flag is gone AND that a key moves the cursor again, because the flag reading -1
-# is a claim about state and the cursor moving is the thing the operator actually lost.
-case_renamelife() {
-    local dir="$fixture_root/renamelife"
-    sandbox_scratch "$dir"
-    local i
-    for i in $(seq 1 200); do printf 'x' > "$dir/$(printf 'f%03d.txt' "$i")"; done
-    launch "$dir"
-    wait_listing 200
-
-    # A key press that reaches the pane moves the cursor; a swallowed one leaves it where it was.
-    moved() {
-        local before after
-        before=$(ipc cursor)
-        key j
-        settle
-        after=$(ipc cursor)
-        [[ "$before" != "$after" ]]
-    }
-
-    open_editor() {
-        key j
-        settle
-        key r
-        settle
-        [[ "$(ipc renameEditorLive)" == "true" ]] \
-            || fail "renamelife: r opened no editor, renamingIndex is $(ipc renamingIndex)"
-        key "HALFTYPED"
-        settle
-    }
-
-    # The editor arms itself, so the field carries the row's own name rather than an empty box.
-    key r
-    settle
-    [[ "$(ipc renameEditorText)" == "$(ipc rowAt 0 | cut -d'|' -f1)" ]] \
-        || fail "renamelife: the editor opened holding '$(ipc renameEditorText)', not row 0's name"
-    key -k Escape
-    settle
-
-    # Leg one: a chrome view button hides the list without moving focus.
-    open_editor
-    click_chrome grid
-    settle
-    [[ "$(ipc viewMode)" == "grid" ]] || fail "renamelife: the grid button did not change the view"
-    [[ "$(ipc renamingIndex)" == "-1" ]] \
-        || fail "renamelife: a view change left renamingIndex at $(ipc renamingIndex)"
-    moved || fail "renamelife: the keyboard is dead in the grid after a view change during a rename"
-    click_chrome list
-    settle
-
-    # Leg two: the renaming row is scrolled past the cache buffer and its delegate released.
-    open_editor
-    local wx wy ww wh
-    read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
-    omarchy-drive move "$((wx + ww / 2))" "$((wy + wh / 2))" >/dev/null
-    omarchy-drive scroll down "$fling_clicks" >/dev/null
-    settle
-    [[ "$(ipc renamingIndex)" == "-1" ]] \
-        || fail "renamelife: a scroll left renamingIndex at $(ipc renamingIndex)"
-    moved || fail "renamelife: the keyboard is dead after the renaming row scrolled away"
-
-    # Leg three: the pointer navigates out of the directory the editor's row belongs to.
-    key -k Home
-    settle
-    open_editor
-    click_chrome arrow-up
-    wait_path "$fixture_root"
-    [[ "$(ipc renamingIndex)" == "-1" ]] \
-        || fail "renamelife: a navigation left an editor open over $(ipc rowAt "$(ipc renamingIndex)")"
-    [[ "$(ipc renameEditorLive)" == "false" ]] \
-        || fail "renamelife: an editor is live in a directory nobody asked to rename anything in"
-    moved || fail "renamelife: the keyboard is dead after navigating away from a rename"
-    shot renamelife-navigated
-
-    # A name that is nothing but spaces is refused, the way the rail has always refused one.
-    launch "$dir"
-    wait_listing 200
-    key r
-    settle
-    key -k BackSpace
-    for i in 1 2 3 4; do key -k Delete; done
-    settle
-    [[ "$(ipc renameEditorText)" == "   " ]] \
-        || printf 'renamelife: the field holds %q, not three spaces\n' "$(ipc renameEditorText)"
-    key "   "
-    key -k Return
-    settle
-    [[ ! -e "$dir/   " ]] || fail "renamelife: a name of three spaces was accepted"
-    [[ -e "$dir/f001.txt" ]] || fail "renamelife: f001.txt was renamed by a whitespace submit"
-
-    printf 'RENAMELIFE arms=ok view=ok scroll=ok navigate=ok whitespace=ok\n'
-    kill_flea
-}
-
 # The settings panel: its doors, its seven sections, and the one thing a settings window
 # has to do that a menu does not, which is outlive the process that wrote it. XDG_STATE_HOME and
 # XDG_CONFIG_HOME both point inside the fixture root for the whole case, so nothing here can write
@@ -6341,16 +8770,17 @@ case_places() {
     sandbox_scratch "$config"
     sandbox_scratch "$state"
     : > "$dir/a.txt"
+    mkdir -p "$dir/sub" || fail "places: the second favourite's folder could not be made"
     export XDG_CONFIG_HOME="$config" XDG_STATE_HOME="$state"
     settings_seed "$state" "$config" "$state/flea/ui.json"
     launch "$dir"
-    wait_listing 1
-    settings_places "$dir"
+    wait_listing 2
+    settings_places "$dir" places-favourites
     kill_flea
 }
 
 case_dual() {
-    local dir="$fixture_root/dual" state="$fixture_root/dual-state" before
+    local dir="$fixture_root/dual" state="$fixture_root/dual-state" before status_disk_x
     sandbox_scratch "$dir"
     sandbox_scratch "$state"
     mkdir -p "$dir/left/nested" "$dir/right" "$state/flea"
@@ -6364,6 +8794,11 @@ case_dual() {
         '{view:"list",keys:"default",dual:{paths:[$left,$right],focus:0}}' > "$state/flea/ui.json"
     launch "$dir/left"
     wait_listing 3
+    # The baseline the disk facts hold to for the rest of this case, taken before any transient exists.
+    status_disk_x=$(ipc statusFooterState | jq -r '.disk.x')
+    [[ "$status_disk_x" =~ ^[0-9.]+$ ]] || fail "dual: the quiet strip reported no disk position, got [$status_disk_x]"
+    # The single view keeps the pane's own path at height 0, so it must hold no crumbs to rebuild on every move.
+    [[ "$(ipc paneCrumbCount 0)" == 0 ]] || fail "dual: the hidden pane path holds $(ipc paneCrumbCount 0) crumbs in the single view"
     click_chrome dual
     settle
     ipc dualState | jq -e '.active and .focused == 0' >/dev/null || fail "dual: chrome did not enter dual mode"
@@ -6382,6 +8817,19 @@ case_dual() {
     key l >/dev/null
     wait_listing 1
     [[ "$(ipc path)" == "$dir/left/nested" ]] || fail "dual: left navigation did not enter nested folder"
+    # A message first, or the lane is empty and its centre is a point rather than a measured box.
+    key y >/dev/null
+    settle
+    transient_beside_disk "dual left"
+    shot dual-transient-left
+    key -k Tab >/dev/null
+    settle
+    key y >/dev/null
+    settle
+    transient_beside_disk "dual right"
+    shot dual-transient-right
+    key -k Tab >/dev/null
+    settle
     key -k Tab >/dev/null
     settle
     [[ "$(ipc path)" == "$dir/right" && "$(ipc cursor)" == 1 ]] || fail "dual: left navigation changed right state"
@@ -6396,17 +8844,89 @@ case_dual() {
     shot dual-right-focused
     before=$(ipc dualState)
     kill_flea
-    launch "$dir/left"
+    # A named folder goes to the focused side since 0.3.3 (case_duallaunch); the restored pair is what dualState proves below.
+    launch "$dir/right"
     wait_listing 2
-    [[ "$(ipc path)" == "$dir/right" ]] || fail "dual: focused pane did not survive restart"
+    [[ "$(ipc path)" == "$dir/right" ]] || fail "dual: the focused pane is not on $dir/right after the relaunch"
     ipc dualState | jq -e --arg path "$dir/left/nested" '.active and .focused == 1 and .panes[0].path == $path' >/dev/null \
         || fail "dual: independent paths did not survive restart"
     shot dual-reopened
+    local crumbs target centre cx cy wx wy _ww _wh
+    # Quick Look covers both panes, so a press on its ground over the left pane's parent crumb must not navigate that pane.
+    key -k space >/dev/null
+    settle
+    [[ "$(ipc previewOpen)" == true ]] || fail "dual: space did not open Quick Look on the right pane's file"
+    centre=$(ipc paneCrumbCentre 0 "$(( $(ipc paneCrumbCount 0) - 2 ))")
+    read -r cx cy <<< "$centre"
+    # A null or empty centre would press the window's corner and pass without reaching the crumb.
+    [[ "$cx" =~ ^[0-9]+$ && "$cy" =~ ^[0-9]+$ ]] || fail "dual: the left pane's parent crumb has no centre under Quick Look [$centre]"
+    read -r wx wy _ww _wh < <(window_box) || fail "native window coordinates unavailable"
+    omarchy-drive click "$((cx + wx))" "$((cy + wy))" >/dev/null || fail "dual: omarchy-drive refused the press over Quick Look"
+    settle
+    settle
+    shot dual-quicklook-crumb
+    ipc dualState | jq -e --arg nested "$dir/left/nested" '.panes[0].path == $nested' >/dev/null \
+        || fail "dual: a press on Quick Look reached the left pane's crumb beneath, left is at $(ipc dualState | jq -r '.panes[0].path')"
+    [[ "$(ipc previewOpen)" == false ]] || { key -k Escape >/dev/null; settle; }
+    # The right pane keeps focus through it, so the tap below is what moves focus left.
+    [[ "$(ipc dualState | jq -r '.focused')" == 1 ]] || fail "dual: a press on Quick Look moved focus to pane $(ipc dualState | jq -r '.focused')"
+    # Issue 45 in dual view: the unfocused pane's own path answers one tap on a parent, and the tap focuses that pane.
+    crumbs=$(ipc paneCrumbCount 0)
+    (( crumbs >= 3 )) || fail "dual: the left pane drew $crumbs crumbs, too few to press a parent"
+    target=$((crumbs - 2))
+    centre=$(ipc paneCrumbCentre 0 "$target")
+    [[ -n "$centre" ]] || fail "dual: left crumb $target has no on-screen centre"
+    read -r cx cy <<< "$centre"
+    read -r wx wy _ww _wh < <(window_box) || fail "native window coordinates unavailable"
+    omarchy-drive click "$((cx + wx))" "$((cy + wy))" >/dev/null \
+        || fail "dual: omarchy-drive refused the press on left crumb $target"
+    # Two settles, so the reading lands after the tap's navigation has had time to reach both panes.
+    settle
+    settle
+    shot dual-crumb
+    ipc dualState | jq -e --arg left "$dir/left" --arg right "$dir/right" \
+        '.focused == 0 and .panes[0].path == $left and .panes[1].path == $right' >/dev/null \
+        || fail "dual: a tap on the left pane's parent crumb left $(ipc dualState | jq -c '[.focused, .panes[0].path, .panes[1].path]')"
+    [[ "$(ipc pathBarOpen)" == "false" ]] || fail "dual: a single tap on a pane crumb opened the path bar"
+    # A double click types the path wherever a tap opens nothing: the padding before the first crumb, the space after the last, the current folder's own crumb.
+    local strip sx sy sw sh press_x press_y crumb_inset
+    read -r sx sy sw sh <<< "$(ipc panePathRect 0)"
+    [[ -n "$sh" ]] || fail "dual: the left pane path has no on-screen box"
+    # The crumbs start rowPaddingX in and fit inside it at the far end, so a press nearer either edge is on the strip's own area.
+    crumb_inset=$(ipc metrics | cut -d' ' -f3)
+    (( chrome_band_inset < crumb_inset )) || fail "dual: a press $chrome_band_inset px in would land on a crumb, which starts $crumb_inset px in"
+    # The last crumb is the pane's own folder, the one crumb a tap cannot open.
+    target=$(( $(ipc paneCrumbCount 0) - 1 ))
+    centre=$(ipc paneCrumbCentre 0 "$target")
+    [[ -n "$centre" ]] || fail "dual: left crumb $target has no on-screen centre after the tap"
+    read -r cx cy <<< "$centre"
+    for strip in padding tail crumb; do
+        case $strip in
+            padding) press_x=$((sx + chrome_band_inset)) press_y=$((sy + sh / 2)) ;;
+            tail) press_x=$((sx + sw - chrome_band_inset)) press_y=$((sy + sh / 2)) ;;
+            crumb) press_x=$cx press_y=$cy ;;
+        esac
+        omarchy-drive click "$((press_x + wx))" "$((press_y + wy))" --double >/dev/null \
+            || fail "dual: omarchy-drive refused the double click on the left pane path's $strip"
+        settle
+        settle
+        shot "dual-path-double-$strip"
+        [[ "$(ipc pathBarOpen)" == "true" ]] || fail "dual: a double click on the left pane path's $strip did not open the path bar"
+        ipc dualState | jq -e --arg left "$dir/left" '.panes[0].path == $left' >/dev/null \
+            || fail "dual: the double click on the left pane path's $strip navigated to $(ipc dualState | jq -r '.panes[0].path')"
+        key -k Escape >/dev/null
+        settle
+        [[ "$(ipc pathBarOpen)" == "false" ]] || fail "dual: Escape did not close the path bar opened from the pane path's $strip"
+    done
+    # Leaving dual has to put focus back on the primary pane, which only shows if the second pane holds it first.
+    key -k Tab >/dev/null
+    settle
+    ipc dualState | jq -e '.focused == 1' >/dev/null || fail "dual: Tab did not focus the right pane before leaving dual"
     click_chrome list
     settle
     ipc dualState | jq -e '(.active | not) and .focused == 0' >/dev/null || fail "dual: leaving dual did not restore primary focus"
     kill_flea
-    printf 'DUAL navigation=ok focus=ok watch=ok restart=ok before=%s\n' "$before"
+    printf 'DUAL navigation=ok focus=ok watch=ok restart=ok crumb=ok before=%s\n' "$before"
 }
 
 dual_sort_wait() {
@@ -6565,6 +9085,7 @@ case_settings() {
     sandbox_scratch "$state"
     : > "$dir/a.txt"
     : > "$dir/b.txt"
+    mkdir -p "$dir/sub" || fail "settings: the second favourite's folder could not be made"
     local real_config="${XDG_CONFIG_HOME-}"
     local real_state="${XDG_STATE_HOME-}"
     export XDG_CONFIG_HOME="$config"
@@ -6577,7 +9098,7 @@ case_settings() {
     settings_seed "$state" "$config" "$stored"
 
     launch "$dir"
-    wait_listing 2
+    wait_listing 3
 
     settings_doors
     settings_view
@@ -6618,20 +9139,20 @@ case_settings() {
 
     kill_flea
     launch "$dir"
-    wait_listing 2
+    wait_listing 3
     [[ "$(token_of baseSize)" == "$pinned_base" ]] \
         || fail "settings: a restart lost the ${pinned_base}px override, it draws at $(token_of baseSize)"
     settings_open_key
     settle
     settings_section display
-    [[ "$(ipc settingsRows)" == *"ruler|Effective|${pinned_base}px"* ]] \
+    [[ "$(ipc settingsRows)" == *"fact|Effective|${pinned_base} px"* ]] \
         || fail "settings: a restart brought the panel back on a different stop"
     # A new process opens on View; the explicit Display selection above reads the pinned size, while
     # the master row is not reachable until the rail has been walked. The master is derived from the
     # stored set, so a restart that read only menu.hidden must still draw the five of six the panel
     # left behind, and the six rows under it must agree with it.
     settings_section menus
-    [[ "$(ipc settingsRows)" == *"master|All basic file actions|5 of 6"* ]] \
+    [[ "$(ipc settingsRows)" == *"group|Basic file actions|5 of 6"* ]] \
         || fail "settings: a restart did not derive the master back to five of six, got $(ipc settingsRows)"
     key -k Escape >/dev/null
     settle
@@ -6714,7 +9235,7 @@ settings_view() {
     settings_section view
     local inventory
     inventory=$(ipc settingsSections | jq -r 'map(.id) | join(",")')
-    [[ "$inventory" == "view,places,preview,keys,display,menus,about" ]] || fail "settings: wrong rail order $inventory"
+    [[ "$inventory" == "view,places,shelf,preview,keys,display,menus,about" ]] || fail "settings: wrong rail order $inventory"
     settings_focus_row view
     key l >/dev/null; settle
     [[ "$(ipc viewMode)" == "columns" ]] || fail "settings: View choice did not change the listing"
@@ -6730,12 +9251,13 @@ settings_view() {
     chrome=$(token_of chromeHeight)
     rail=$(token_of railRowHeight)
     before_card=$(ipc settingsCardRect)
-    key h >/dev/null; settle
-    settings_wait_value '.density == "compact"'
-    [[ "$(token_of chromeHeight)" == "$chrome" && "$(token_of railRowHeight)" == "$rail" && "$(ipc settingsCardRect)" == "$before_card" ]] \
-        || fail "settings: row density changed shared chrome, rail, or Settings card geometry"
+    # Compact is the default from 0.3.2, so the first step right lands on Normal.
     key l >/dev/null; settle
     settings_wait_value '.density == "normal"'
+    [[ "$(token_of chromeHeight)" == "$chrome" && "$(token_of railRowHeight)" == "$rail" && "$(ipc settingsCardRect)" == "$before_card" ]] \
+        || fail "settings: row density changed shared chrome, rail, or Settings card geometry"
+    key h >/dev/null; settle
+    settings_wait_value '.density == "compact"'
     settings_click_control hidden
     settings_wait_value '.hidden == true'
     [[ "$(ipc showHidden)" == "true" ]] || fail "settings: Show hidden control has no listing consumer"
@@ -6787,26 +9309,40 @@ settings_preview() {
 }
 
 settings_places() {
-    local dir="$1" flag group
+    local dir="$1" frame="${2:-settings-places}" flag group
     settings_open_key; settle
     settings_section places
     settings_wait_value '.places.favourites == []'
-    settings_focus_row favouriteActions
+    settings_focus_row addFavourite
     key -k Return >/dev/null; settle
     settings_wait_value '.places.favourites | length == 1'
+    # Issue 138, src/favourites.rs: a place already held is kept once however it is spelled, so the
+    # same folder added twice is still one row. The new favourite is also a row of its own now, so
+    # the button is asked for by id rather than assumed to be still under the cursor.
+    settings_focus_row addFavourite
+    key -k Return >/dev/null; settle
+    ipc uiSettings | jq -e '.places.favourites | length == 1' >/dev/null \
+        || fail "settings: the same folder was saved twice, Favorites holds $(ipc uiSettings | jq -c '.places.favourites')"
+    # The second favourite is a second directory, which is what the move and remove rows below need.
+    key -k Escape >/dev/null; settle
+    seek_row_named sub
+    key -k Return >/dev/null
+    wait_path "$dir/sub"
+    settings_open_key; settle
+    settings_section places
+    settings_focus_row addFavourite
     key -k Return >/dev/null; settle
     settings_wait_value '.places.favourites | length == 2'
-    ipc uiSettings | jq -e --arg path "$dir" '.places.favourites | length == 2 and all(.[]; .path == $path)' >/dev/null \
-        || fail "settings: Add current folder did not preserve duplicate paths"
+    ipc uiSettings | jq -e --arg dir "$dir" '[.places.favourites[].path] == [$dir, $dir + "/sub"]' >/dev/null \
+        || fail "settings: Favorites holds $(ipc uiSettings | jq -c '[.places.favourites[].path]'), not the two folders in the order they were added"
     settings_focus_row favourite:0
     key -M shift -k j -m shift >/dev/null; settle
     [[ "$(ipc settingsCursor)" == "2" ]] || fail "settings: Shift+J did not keep focus on the moved favourite"
-    settings_focus_row favouriteActions
-    key l >/dev/null; key -k Return >/dev/null; settle
+    # SettingsRest rule 4: x on the row is the same action its own mark performs.
+    key x >/dev/null; settle
     settings_wait_value '.places.favourites | length == 1'
     settings_focus_row favourite:0
-    settings_focus_row favouriteActions
-    key -k Return >/dev/null; settle
+    key -k Delete >/dev/null; settle
     settings_wait_value '.places.favourites == []'
     for flag in showHome showNetwork showDevices showTrash; do
         settings_click_control "places.$flag"
@@ -6837,8 +9373,12 @@ settings_places() {
     settings_wait_value '.places.sidebarWidth == 256'
     key h >/dev/null; settle
     settings_wait_value '.places.sidebarWidth == 224'
-    shot settings-places
+    shot "$frame"
     key -k Escape >/dev/null; settle
+    # Back where this block started: the second favourite was added from inside sub, and every caller
+    # after this one drives the fixture's own listing.
+    key h >/dev/null
+    wait_path "$dir"
 }
 
 settings_about() {
@@ -6846,7 +9386,7 @@ settings_about() {
     settings_section about
     local rows
     rows=$(ipc settingsModel)
-    printf '%s' "$rows" | jq -e 'any(.[]; .kind == "fact" and .label == "Language" and .value == "English · read-only")' >/dev/null \
+    printf '%s' "$rows" | jq -e 'any(.[]; .kind == "fact" and .label == "Language" and .value == "English")' >/dev/null \
         || fail "settings: About language is not passive metadata"
     printf '%s' "$rows" | jq -e 'any(.[]; .id == "support" and .kind == "action") and any(.[]; .id == "reportIssue" and .kind == "action")' >/dev/null \
         || fail "settings: About omitted support routes"
@@ -6908,7 +9448,7 @@ settings_read_refused() {
     before_ino=$(stat -c '%i' "$stored")
     chmod 000 "$stored" || fail "settings: the state file could not be made unreadable"
     launch "$dir"
-    wait_listing 2
+    wait_listing 3
     [[ "$(ipc lastMessage)" == "Your saved settings could not be read, so these are the defaults." ]] \
         || fail "settings: an unreadable state file was not reported, the status bar says $(ipc lastMessage)"
     # And the write half of that same file, one keystroke away: the window is holding the shipped
@@ -6917,8 +9457,15 @@ settings_read_refused() {
     settle
     [[ "$(ipc lastMessage)" == "Your saved settings could not be read, so these are the defaults." ]] \
         || fail "settings: a second failure acknowledged the unreadable-settings error"
-    key -k Escape >/dev/null
-    settle
+    # Three refusals can be waiting here: the read, the Favorites reader's own (ui/ViewState.qml
+    # favouritesReadError, raised by the same unreadable file) and the save. Escape dismisses the head
+    # of that queue one at a time, the way the operator would, until the save's sentence is showing.
+    local dismissed
+    for dismissed in 1 2 3; do
+        key -k Escape >/dev/null
+        settle
+        [[ "$(ipc lastMessage)" == "That setting could not be saved." ]] && break
+    done
     [[ "$(ipc lastMessage)" == "That setting could not be saved." ]] \
         || fail "settings: a save onto an unreadable state file was not reported, the status bar says $(ipc lastMessage)"
     kill_flea
@@ -6938,6 +9485,7 @@ case_settingsrefused() {
     printf '{"view":"list"}\n' > "$stored"
     printf 'a\n' > "$dir/a.txt"
     printf 'b\n' > "$dir/b.txt"
+    printf 'c\n' > "$dir/c.txt"
     export XDG_STATE_HOME="$state"
     settings_read_refused "$stored" "$dir"
     if [[ -n "$old_state" ]]; then export XDG_STATE_HOME="$old_state"; else unset XDG_STATE_HOME; fi
@@ -7046,7 +9594,7 @@ settings_display() {
     omarchy_base=$(token_of baseSize)
     [[ "$(ipc settingsRows)" == *"choice|Text size|Follow Omarchy"* ]] \
         || fail "settings: Display did not open on Follow Omarchy, got $(ipc settingsRows)"
-    [[ "$(ipc settingsRows)" == *"ruler|Effective|${omarchy_base}px"* ]] \
+    [[ "$(ipc settingsRows)" == *"fact|Effective|${omarchy_base} px"* ]] \
         || fail "settings: the ruler does not report Omarchy's own ${omarchy_base}px"
     # Read-only means read-only: the compositor's two rows are facts, and no control sits on them.
     [[ "$(ipc settingsRows)" == *"fact|Scale|"* ]] \
@@ -7064,7 +9612,7 @@ settings_display() {
     settle
     [[ "$(ipc settingsRows)" == *"choice|Text size|Override"* ]] \
         || fail "settings: Enter on the mode row did not reach Override, got $(ipc settingsRows)"
-    [[ "$(ipc settingsRows)" == *"ruler|Effective|${omarchy_base}px"* ]] \
+    [[ "$(ipc settingsRows)" == *"fact|Effective|${omarchy_base} px"* ]] \
         || fail "settings: the override did not start on Omarchy's own stop"
     [[ "$(ipc metrics)" == "$before" ]] \
         || fail "settings: switching to Override moved the type before any step, $before then $(ipc metrics)"
@@ -7094,7 +9642,7 @@ settings_display() {
     settle
     [[ "$(ipc settingsRows)" == *"choice|Text size|Follow Omarchy"* ]] \
         || fail "settings: the mode row did not go back to Follow Omarchy"
-    [[ "$(ipc settingsRows)" == *"ruler|Effective|${omarchy_base}px"* ]] \
+    [[ "$(ipc settingsRows)" == *"fact|Effective|${omarchy_base} px"* ]] \
         || fail "settings: following Omarchy again left the ruler on the override's stop"
     [[ "$(ipc metrics)" == "$before" ]] \
         || fail "settings: following Omarchy again did not put the type back, $before then $(ipc metrics)"
@@ -7127,7 +9675,7 @@ settings_chord_alias() {
         || fail "settings: the chord did not announce its stop, got $(ipc lastMessage)"
     settings_open_key
     settle
-    [[ "$(ipc settingsRows)" == *"ruler|Effective|${grown}px"* ]] \
+    [[ "$(ipc settingsRows)" == *"fact|Effective|${grown} px"* ]] \
         || fail "settings: the panel does not show the stop the chord set, got $(ipc settingsRows)"
     key -k Escape >/dev/null
     settle
@@ -7191,7 +9739,7 @@ assert_monitor_scale_row() {
     live=$(hyprctl monitors -j | jq -r 'map(select(.focused)) | .[0].scale // empty')
     [[ -n "$live" ]] || fail "settings: hyprctl reports no focused monitor, so the row has no contract"
     shown=$(awk -v s="$live" 'BEGIN { printf "%g", s + 0 }')
-    [[ "$(ipc settingsRows)" == *"fact|Scale|Read-only ${shown}x"* ]] \
+    [[ "$(ipc settingsRows)" == *"fact|Scale|${shown}x"* ]] \
         || fail "settings: the Scale row does not show the compositor's ${shown}x, got $(ipc settingsRows)"
 }
 
@@ -7203,7 +9751,7 @@ settings_menus() {
     settings_section menus
     [[ "$(ipc settingsTitleCentre)" == "$settings_title_on_display" ]] \
         || fail "settings: the card moved when Menus came up, title at $(ipc settingsTitleCentre) against $settings_title_on_display"
-    [[ "$(ipc settingsRows)" == *"master|All basic file actions|6 of 6"* ]] \
+    [[ "$(ipc settingsRows)" == *"group|Basic file actions|6 of 6"* ]] \
         || fail "settings: the master row does not start at six of six, got $(ipc settingsRows)"
     shot settings-menus
 
@@ -7212,7 +9760,7 @@ settings_menus() {
     settle
     key -k Space >/dev/null
     settle
-    [[ "$(ipc settingsRows)" == *"master|All basic file actions|5 of 6"* ]] \
+    [[ "$(ipc settingsRows)" == *"group|Basic file actions|5 of 6"* ]] \
         || fail "settings: switching one action off did not read as five of six"
     key -k Escape >/dev/null
     settle
@@ -7227,11 +9775,11 @@ settings_menus() {
     settle
     key -k Space >/dev/null
     settle
-    [[ "$(ipc settingsRows)" == *"master|All basic file actions|6 of 6"* ]] \
+    [[ "$(ipc settingsRows)" == *"group|Basic file actions|6 of 6"* ]] \
         || fail "settings: activating the partial master did not switch all six on"
     key -k Space >/dev/null
     settle
-    [[ "$(ipc settingsRows)" == *"master|All basic file actions|0 of 6"* ]] \
+    [[ "$(ipc settingsRows)" == *"group|Basic file actions|0 of 6"* ]] \
         || fail "settings: activating the checked master did not switch all six off"
     key -k Escape >/dev/null
     settle
@@ -7257,19 +9805,21 @@ settings_menus() {
     key j >/dev/null; key j >/dev/null; key j >/dev/null
     key -k Space >/dev/null
     settle
-    [[ "$(ipc settingsRows)" == *"master|All basic file actions|5 of 6"* ]] \
+    [[ "$(ipc settingsRows)" == *"group|Basic file actions|5 of 6"* ]] \
         || fail "settings: the panel did not end the Menus block with Paste alone switched off"
     key -k Escape >/dev/null
     settle
 }
 
-# Section selection survives a close; walk the current seven-row rail through real keys.
+# Section selection survives a close; walk the rail through real keys. The rail's own length is read
+# here rather than written down: case_settings above is where the inventory itself is asserted, and a
+# count in two places is a count that goes stale in one of them, which is how it did.
 settings_section() {
     local want="$1" sections down count step
     sections=$(ipc settingsSections)
     down=$(printf '%s' "$sections" | jq -r --arg id "$want" 'map(.id) | index($id) // empty')
     count=$(printf '%s' "$sections" | jq 'length')
-    [[ "$down" =~ ^[0-9]+$ && "$count" == 7 ]] || fail "settings: section inventory is not the seven boards: $sections"
+    [[ "$down" =~ ^[0-9]+$ ]] || fail "settings: the rail has no $want section, it carries $sections"
     if [[ "$(ipc settingsSide)" != "rail" ]]; then key -k Tab >/dev/null; settle; fi
     [[ "$(ipc settingsSide)" == "rail" ]] || fail "settings: Tab did not give the cursor to the rail"
     for (( step = 1; step < count; step++ )); do key k >/dev/null; done
@@ -7363,14 +9913,45 @@ rows_run_under() {
         || fail "clickthrough: the parked row 0 reaches under $label (rows 0 and 1 centres y ${first#* } ${second#* }, card top $cy)"
 }
 
+# A folder named at launch goes to the side of a saved dual view that had focus, and the other side
+# keeps its saved folder; before 0.3.3 the saved pair won and the named folder was dropped.
+case_duallaunch() {
+    local dir="$fixture_root/duallaunch" state="$fixture_root/duallaunch-state" side dual want_left want_right
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/left" "$dir/right" "$dir/asked"
+    : > "$dir/left/l.txt"; : > "$dir/right/r.txt"; : > "$dir/asked/a.txt"
+    for side in 0 1; do
+        seed_ui_state "$state-$side" "$(jq -cn --arg l "$dir/left" --arg r "$dir/right" --argjson f "$side" \
+            '{view:"dual",dual:{paths:[$l,$r],focus:$f}}')"
+        launch "$dir/asked"
+        want_left="$dir/asked"; want_right="$dir/right"
+        [[ "$side" == 1 ]] && { want_left="$dir/left"; want_right="$dir/asked"; }
+        for _attempt in $(seq 1 100); do
+            dual=$(ipc dualState)
+            [[ "$(jq -r '[.panes[].loading] | any' <<< "$dual")" == false && "$(jq -r '.panes[1].path' <<< "$dual")" != null ]] && break
+            sleep 0.05
+        done
+        [[ "$(jq -r '.active' <<< "$dual")" == true ]] || fail "duallaunch: the saved dual view did not open: $dual"
+        [[ "$(jq -r '.panes[0].path' <<< "$dual")" == "$want_left" && "$(jq -r '.panes[1].path' <<< "$dual")" == "$want_right" ]] \
+            || fail "duallaunch: focus $side opened $(jq -c '[.panes[].path]' <<< "$dual"), wanted $want_left and $want_right"
+        [[ "$(jq -r '.focused' <<< "$dual")" == "$side" ]] || fail "duallaunch: focus moved from side $side: $dual"
+        printf 'DUALLAUNCH focus=%s left=%s right=%s\n' "$side" "$(jq -r '.panes[0].path' <<< "$dual")" "$(jq -r '.panes[1].path' <<< "$dual")"
+        kill_flea
+    done
+}
+
 # The cursor parks on row 0 above the card, so a press that runs on from an overlay control to any row beneath moves it.
 case_clickthrough() {
     local dir="$fixture_root/clickthrough"
     sandbox_scratch "$dir"
     local i
-    for i in $(seq -w 1 40); do : > "$dir/f$i.txt"; done
+    # Eighty rows overflow the window at every density; forty stopped short of a compact screen's 43.
+    for i in $(seq -w 1 80); do : > "$dir/f$i.txt"; done
+    # Every menu row shown for Permissions, and a favourite that cannot open, so its click leaves the path; the suite's state home comes back after.
+    local suite_state_home="$XDG_STATE_HOME"
+    seed_ui_state "$fixture_root/clickthrough-state" '{"menu":{"hidden":[]},"places":{"favourites":[{"label":"Unopenable","path":"relative/unopenable"}]}}'
     launch "$dir"
-    wait_listing 40
+    wait_listing 80
     local parked; parked=$(ipc cursor)
     [[ "$parked" == "0" ]] || fail "clickthrough: the cursor did not start on row 0, it is on $parked"
 
@@ -7398,7 +9979,7 @@ case_clickthrough() {
     settle
     [[ "$(ipc settingsOpen)" == "true" ]] || fail "clickthrough: the comma key did not open settings"
     local section centre cx cy wx wy
-    for section in keys menus display; do
+    for section in keys menus display places; do
         rows_run_under "$(ipc settingsCardRect)" "the settings card"
         centre=$(ipc settingsRailRowCentre "$section")
         [[ -n "$centre" ]] || fail "clickthrough: the settings rail has no $section row"
@@ -7410,11 +9991,74 @@ case_clickthrough() {
         [[ "$(ipc cursor)" == "$parked" && "$(ipc path)" == "$dir" ]] \
             || fail "clickthrough: the $section rail row click reached the pane beneath, cursor $(ipc cursor), path $(ipc path)"
     done
+    clickthrough_click "$(ipc settingsRowCentre favourite:0)" "Places favourite" "$dir" "$parked"
+    [[ "$(ipc lastMessage)" == "Could not open Unopenable"* ]] \
+        || fail "clickthrough: the Places favourite did not take its click, the footer says $(ipc lastMessage)"
     key -k Escape >/dev/null
     settle
     [[ "$(ipc settingsOpen)" == "false" ]] || fail "clickthrough: Escape did not close settings"
-    printf 'CLICKTHROUGH chips=ok rail=ok cursor=%s\n' "$parked"
+    clickthrough_permissions "$dir" "$parked"
+    clickthrough_delete "$dir" "$parked"
+    printf 'CLICKTHROUGH chips=ok rail=ok favourite=ok permissions=ok close=ok delete=ok cursor=%s\n' "$parked"
     kill_flea
+    export XDG_STATE_HOME="$suite_state_home"
+}
+
+clickthrough_wait() {
+    local reader="$1" filter="$2" what="$3" end=$((SECONDS + 10))
+    while (( SECONDS < end )); do
+        ipc "$reader" | jq -e "$filter" >/dev/null && return
+        sleep 0.05
+    done
+    fail "clickthrough: $what; $reader answered $(ipc "$reader")"
+}
+
+# Clicks a control by the window-relative centre an IPC reader gave, then requires the parked row to stand.
+clickthrough_click() {
+    local centre="$1" what="$2" dir="$3" parked="$4" cx cy wx wy
+    [[ "$centre" =~ ^[0-9]+\ [0-9]+$ ]] || fail "clickthrough: $what has no centre, ipc answered [$centre]"
+    read -r cx cy <<< "$centre"
+    read -r wx wy _ww _wh < <(window_box) || fail "native window coordinates unavailable"
+    omarchy-drive click "$((cx + wx))" "$((cy + wy))" >/dev/null
+    settle
+    [[ "$(ipc cursor)" == "$parked" && "$(ipc path)" == "$dir" ]] \
+        || fail "clickthrough: the $what click reached the pane beneath, cursor $(ipc cursor), path $(ipc path)"
+}
+
+# Every Permissions checkbox and then its close mark, clicked over the rows its card covers: none lets a row beneath tap.
+clickthrough_permissions() {
+    local dir="$1" parked="$2" box name centre mode
+    local -a boxes
+    key m >/dev/null
+    settle
+    menu_seek Permissions
+    key -k Return >/dev/null
+    clickthrough_wait permissionsState '.opened and (.busy == false) and .editable' "Permissions did not open editable on row 0"
+    rows_run_under "$(ipc permissionsState | jq -r '.rect')" "the Permissions card"
+    # Sample reader row: "Owner read<TAB>612 388".
+    mapfile -t boxes < <(ipc permissionsState | jq -r '.controls[] | select(.bit != null) | [.name, .centre] | @tsv')
+    [[ "${#boxes[@]}" == 9 ]] || fail "clickthrough: Permissions drew ${#boxes[@]} checkboxes, not nine"
+    for box in "${boxes[@]}"; do
+        IFS=$'\t' read -r name centre <<< "$box"
+        mode=$(ipc permissionsState | jq -r '.mode')
+        clickthrough_click "$centre" "$name checkbox" "$dir" "$parked"
+        [[ "$(ipc permissionsState | jq -r '.mode')" != "$mode" ]] || fail "clickthrough: the $name checkbox did not take its click"
+    done
+    clickthrough_click "$(ipc permissionsState | jq -r '.controls[] | select(.name == "Close") | .centre')" "Permissions close mark" "$dir" "$parked"
+    clickthrough_wait permissionsState '.opened | not' "the close mark did not close Permissions"
+}
+
+# The permanent-deletion card's Delete button over the rows: row 0 goes, and the row under the button does not tap.
+clickthrough_delete() {
+    local dir="$1" parked="$2"
+    key -M shift -k Delete -m shift >/dev/null
+    clickthrough_wait menuDialogState '.confirmation.opened and .confirmation.count == 1' "Shift+Delete did not ask to delete row 0"
+    rows_run_under "$(ipc menuDialogState | jq -r '.confirmation.rect')" "the deletion card"
+    clickthrough_click "$(ipc menuDialogState | jq -r '.confirmation.danger.centre')" "Delete button" "$dir" "$parked"
+    wait_listing 79
+    [[ ! -e "$dir/f01.txt" ]] || fail "clickthrough: the Delete button did not delete row 0"
+    [[ "$(ipc cursor)" == "$parked" && "$(ipc path)" == "$dir" ]] \
+        || fail "clickthrough: after the deletion the cursor is $(ipc cursor) and the path $(ipc path)"
 }
 
 # The wheel over an open overlay stays with the overlay: the listing beneath a menu, a card or a
@@ -7492,11 +10136,12 @@ hover_row() {
 
 # ctrl-1 list, ctrl-2 columns, ctrl-3 grid, per keys.toml; the reader proves the switch landed.
 switch_view() {
-    local want="$1" chord
+    local want="$1" chord drew
     case "$want" in list) chord=1 ;; columns) chord=2 ;; grid) chord=3 ;; esac
     key -M ctrl -k "$chord" -m ctrl >/dev/null
     settle
-    [[ "$(ipc viewMode)" == "$want" ]] || fail "switch_view: ctrl-$chord left the view on $(ipc viewMode), not $want"
+    drew=$(ipc viewMode)
+    [[ "$drew" == "$want" ]] || fail "switch_view: ctrl-$chord left the view on '$drew', not $want"
 }
 
 # rect_is "x y w h" ex ey ew eh tol: every edge of the box within tol pixels of the expected one.
@@ -7507,6 +10152,24 @@ rect_is() {
     for d in $((x - $2)) $((y - $3)) $((w - $4)) $((h - $5)); do
         (( ${d#-} <= $6 )) || return 1
     done
+}
+
+# Presses row $1 beside the open menu: in columns the menu covers the row's centre, and a press there picks a menu row.
+click_row_beside_menu() {
+    local rx ry rw rh mx my mw mh inset px py wx wy
+    read -r rx ry rw rh <<< "$(ipc rowRect "$1")"
+    [[ -n "$rh" ]] || fail "click_row_beside_menu: row $1 has no box"
+    read -r mx my mw mh <<< "$(ipc contextMenuRect)"
+    [[ -n "$mh" ]] || fail "click_row_beside_menu: no open menu to press beside"
+    # Sample input: ipc metrics "13 12 14 37", the body and caption sizes, rowPaddingX, then the board's rowHeight.
+    inset=$(ipc metrics | cut -d' ' -f3)
+    [[ "$inset" =~ ^[0-9]+$ ]] || fail "click_row_beside_menu: ipc metrics gave no rowPaddingX, got [$inset]"
+    px=$((rx + inset)) py=$((ry + rh / 2))
+    (( px < rx + rw )) || fail "click_row_beside_menu: a press $inset px into row $1 falls past its $rw px width"
+    (( px < mx || px > mx + mw || py < my || py > my + mh )) \
+        || fail "click_row_beside_menu: the press at $px,$py on row $1 is under the menu at $mx $my $mw $mh"
+    read -r wx wy _ww _wh < <(window_box) || fail "native window coordinates unavailable"
+    omarchy-drive click "$((wx + px))" "$((wy + py))" "$2" >/dev/null
 }
 
 # A click at row i's height just right of the settings card: on the ground, and inside the row in every view (the middle column runs 200 px past the card).
@@ -7556,7 +10219,6 @@ case_overlays() {
         key -k Home >/dev/null
         settle
         n=$(( $(ipc visibleRows) - 3 ))
-        [[ "$mode" == "columns" ]] && n=8
         [[ -n "$(ipc rowRect "$n")" ]] || fail "$mode: row $n has no box, the reader answers nothing here"
         hover_row "$n"
         settle
@@ -7576,7 +10238,7 @@ case_overlays() {
         omarchy-drive scroll down 3 >/dev/null
         settle
         [[ "$(ipc viewContentY)" == "0" && "$(ipc contextMenuVisible)" == "true" ]] || fail "$mode: the wheel under the menu moved the view to $(ipc viewContentY) (menu $(ipc contextMenuVisible))"
-        click_row "$n" left
+        click_row_beside_menu "$n" left
         settle
         [[ "$(ipc contextMenuVisible)" == "false" && "$(ipc cursor)" == "2" ]] || fail "$mode: the click outside the menu left it $(ipc contextMenuVisible) and moved the cursor to $(ipc cursor)"
         key -k Home >/dev/null
@@ -7960,9 +10622,9 @@ case_previewviews() {
         for _attempt in $(seq 1 40); do [[ "$(ipc previewState)" == "image" ]] && break; sleep 0.1; done
         [[ "$(ipc previewOpen)" == "true" && "$(ipc previewKind)" == "image" && "$(ipc previewState)" == "image" ]] \
             || fail "$mode: Space on p.jpg: open $(ipc previewOpen), kind $(ipc previewKind), state $(ipc previewState)"
-        key -k Escape >/dev/null
+        key -k space >/dev/null
         settle
-        [[ "$(ipc previewOpen)" == "false" ]] || fail "$mode: Escape did not close the preview"
+        [[ "$(ipc previewOpen)" == "false" ]] || fail "$mode: Space did not close the p.jpg preview"
         switch_view list
         goto_row "$(row_index_of manual.pdf)"
         switch_view "$mode"
@@ -7970,6 +10632,30 @@ case_previewviews() {
         for _attempt in $(seq 1 40); do [[ "$(ipc previewState)" == "pdf" ]] && break; sleep 0.1; done
         [[ "$(ipc previewKind)" == "pdf" && "$(ipc previewState)" == "pdf" && "$(ipc previewPdfPage)" == "0" ]] \
             || fail "$mode: Space on manual.pdf: kind $(ipc previewKind), state $(ipc previewState), page $(ipc previewPdfPage)"
+        # Space closes a PDF Quick Look instead of paging or zooming it; the open page and zoom pin the old behaviour, cleared readers aside.
+        local page_before zoom_before page_after zoom_after
+        page_before=$(ipc previewPdfPage); zoom_before=$(ipc previewPdfZoom)
+        [[ "$page_before" == "0" && -n "$zoom_before" ]] \
+            || fail "$mode: manual.pdf opened on page $page_before zoom $zoom_before, not page 0"
+        # A reopen from page 0 proves nothing, so page off it first: the close must keep the page and the reopen must reset it.
+        key -k Right >/dev/null
+        settle
+        key -k Right >/dev/null
+        settle
+        [[ "$(ipc previewPdfPage)" == "1" ]] || fail "$mode: two Rights left manual.pdf on page $(ipc previewPdfPage), not the last page 1"
+        page_before=$(ipc previewPdfPage)
+        key -k space >/dev/null
+        settle
+        [[ "$(ipc previewOpen)" == "false" ]] || fail "$mode: Space did not close the manual.pdf preview"
+        page_after=$(ipc previewPdfPage); zoom_after=$(ipc previewPdfZoom)
+        [[ "$page_after" == "$page_before" || "$page_after" == "-1" ]] \
+            || fail "$mode: Space paged manual.pdf to $page_after instead of closing it"
+        [[ "$zoom_after" == "$zoom_before" || -z "$zoom_after" ]] \
+            || fail "$mode: Space zoomed manual.pdf to $zoom_after instead of closing it"
+        key -k space >/dev/null
+        for _attempt in $(seq 1 40); do [[ "$(ipc previewState)" == "pdf" ]] && break; sleep 0.1; done
+        [[ "$(ipc previewOpen)" == "true" && "$(ipc previewPdfPage)" == "0" ]] \
+            || fail "$mode: reopened manual.pdf shows open $(ipc previewOpen) on page $(ipc previewPdfPage), not an open preview on the first"
         key -k Right >/dev/null
         settle
         key -k Right >/dev/null
@@ -8100,8 +10786,10 @@ case_previewviews() {
 . "$repo/tests/ui-trash.sh"
 . "$repo/tests/ui-menus.sh"
 . "$repo/tests/ui-rename-design.sh"
+. "$repo/tests/ui-railpointer.sh"
 . "$repo/tests/ui-openwith-design.sh"
 . "$repo/tests/ui-providers.sh"
+. "$repo/tests/ui-rail.sh"
 . "$repo/tests/ui-dropbox-roots.sh"
 . "$repo/tests/ui-settings-layout.sh"
 . "$repo/tests/ui-settings-places.sh"
@@ -8113,9 +10801,14 @@ case_previewviews() {
 . "$repo/tests/ui-preview-policy.sh"
 . "$repo/tests/ui-operations-design.sh"
 . "$repo/tests/ui-convert-design.sh"
+. "$repo/tests/ui-dirsortstale.sh"
+. "$repo/tests/ui-makedefault.sh"
+. "$repo/tests/ui-noblank.sh"
+. "$repo/tests/ui-transfer-live.sh"
+. "$repo/tests/ui-columns-background.sh"
 
 declare -a wanted=("$@")
-[[ ${#wanted[@]} -eq 0 ]] && wanted=(cursor scroll terminal open rows click menu background hidden selection watch select colour lifted icons thumbs hashcache stale nosweep oem header overflow focus preview pdffocus network netmark networkauth networktimeout gvfs sharebrowser unmount eject rename renamelife taildrop providers grid columns operations tabs openterminal renderer settings clickthrough wheelunder overlays views formats previewviews hangshare openwithdesign)
+[[ ${#wanted[@]} -eq 0 ]] && wanted=(cursor scroll scrollbar terminal open rows click ctrlclick viewrestart dd ddclick collide sortrestart duallaunch dirsortstale editplace mute placemenu runscript unmounted sidebar menu background hidden selection watch optical select colour lifted icons thumbs hashcache stale nosweep oem header columnresize columnautofit overflow focus railpointer preview pdffocus network netmark networkauth networktimeout gvfs sharebrowser unmount phones trasharm eject rename renamelife taildrop providers grid columns columnsbackground operations tabs openterminal renderer settings makedefault scrolllane clickthrough wheelunder overlays views formats previewviews reclick colroot hangshare openwithdesign noblank previewswap transferlive)
 
 : > "$run_log"
 : > "$flea_log"
@@ -8172,13 +10865,14 @@ unreadable_warning2="$fixture_root/previewviews/shut.jpg"
 # case_settings and case_networkauth chmod 000 a fixture ui.json on purpose, so Quickshell reports
 # that it cannot watch it. How many times it says so is the watch's business, not this suite's.
 unreadable_state_warning="/flea/ui.json) failed: (Permission denied)"
-while IFS= read -r warning; do
+# A case registers a warning once for each time it causes it. Sample input, one uniq -c line: "      2 Process failed to start, ..."
+while read -r want warning; do
     count=$(grep -F -c -- "$warning" "$run_log" || true)
-    if [[ "$count" != 1 ]]; then
-        printf 'FAIL expected native warning count=%s: %s\n' "$count" "$warning"
+    if [[ "$count" != "$want" ]]; then
+        printf 'FAIL expected native warning count=%s, registered %s: %s\n' "$count" "$want" "$warning"
         failures=$((failures + 1))
     fi
-done < "$expected_warnings"
+done < <(sort "$expected_warnings" | uniq -c)
 if grep -F -v -e "$expected_warning" -e "$vaapi_warning" -e "$unreadable_warning" -e "$unreadable_warning2" \
     -e "$unreadable_state_warning" "$run_log" \
     | grep -F -v -f "$expected_warnings" | grep -E 'WARN|ERROR|TypeError|ReferenceError|Cannot open'; then

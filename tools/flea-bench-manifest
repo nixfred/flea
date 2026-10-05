@@ -150,6 +150,14 @@ if [ "$FIXTURE" = close ]; then
   say "column carrying CPU-seconds for one entrant and wall-seconds for the rest is the incomparable"
   say "rank this harness now refuses. It is on every row above."
   say ""
+  say "**It is read from a control group of the run's own.** Each entrant run is a leaf cgroup that"
+  say "the launching shell joins before it forks the entrant, and \`cpu_tree_s\` is that leaf's"
+  say "\`usage_usec\`, plus a declared helper living outside it (thunar's tumblerd). The older sum of"
+  say "reaped ticks is kept as \`cpu_reaped_s\` and is blind to a decode under bwrap: measured, ten"
+  say "sandboxed decodes added 0.01 s to it against 0.95 s run bare. A column from before 0.3.2 is"
+  say "that blind figure and compares only against \`cpu_reaped_s\`. A TUI row's group holds its"
+  say "terminal too, so that bracket's column includes kitty's own drawing, the same kitty for each."
+  say ""
   say "**What it does not yet include.** Flea thumbnails the viewport by design and every rival"
   say "thumbnails the directory, so this column is comparable in units and not in work until Flea is"
   say "driven through the whole listing. When that lands, the residual bias belongs here too: the"
@@ -200,6 +208,7 @@ say ""
 say "- date: $(date -Is)"
 say "- host: $(hostname), kernel $(uname -r)"
 say "- fixture: $FIXTURE"
+say "- fixture kind: ${FIXTURE_KIND:-btrfs}"
 say "- fixture payload: $(ls -U "$FIXTURE" | wc -l) visible entries, filesystem $(findmnt -no FSTYPE -T "$FIXTURE")"
 say "- TUI terminal: $TUI_TERMINAL $(pkg_version "$TUI_TERMINAL")"
 say "- flea launch line: ${FLEA_LAUNCH_LINE:-not recorded by the caller}"
@@ -208,6 +217,10 @@ say "- flea launch line: ${FLEA_LAUNCH_LINE:-not recorded by the caller}"
 # this window fails there and reads as an archive regression.
 say "- load average at start: $(cut -d' ' -f1-3 /proc/loadavg)"
 say "- waited $(( ${BENCH_IDLE_WAITED:-0} )) seconds for the box to go idle before starting"
+# The settle clock's shape, so a nas or usb row stays comparable to the run that produced it.
+say "- settle gap: ${SETTLE_GAP_MS:-500} ms of quiet ticks"
+say "- settle clock watches the entrant tree plus: ${SETTLE_WATCH_PIDS:-none}"
+if [ -n "${NET_IFACE:-}" ]; then say "- receive bytes counted on: $NET_IFACE"; fi
 say "- TUI preview target: ${PREVIEW_TARGET:-not recorded by the caller}"
 # This line WROTE "PASSED" from the mere presence of EXPECT_FILES and never compared it to the count
 # printed beside it, so it recorded a claim instead of making a check. It was true only because

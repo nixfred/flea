@@ -11,6 +11,8 @@ Item {
     id: root
 
     property var entries: []
+    // RailAdditions rule 1's switch, on by default from 0.3.3; off answers 0.2.1's rows, and the state document is read elsewhere.
+    property bool showUnmounted: true
 
     signal opened(string path)
     signal message(string text, bool isError)
@@ -37,6 +39,8 @@ Item {
     // The device a mount was asked for; rebuild() opens it the moment lsblk reports its mountpoint.
     property string _pendingOpenDevice: ""
     property string _pendingOpenLabel: ""
+    // The volume an unmount was asked for, so its refusal can name it.
+    property string _unmountLabel: ""
     // The device whose eject awaits its verdict, "" when none. The listing taken after gio exits is
     // the only witness: gio's own exit code has been 0 over a volume that was still mounted.
     property string _ejectDevice: ""
@@ -52,6 +56,8 @@ Item {
     // Cleared only when the next listing starts, which onExited's own release of _streamPending
     // guarantees cannot happen until the ended listing is fully done with.
     property bool _listTimedOut: false
+    // The rail's DEVICES gate: true once the first listing answered, timed out or not, without replacing anything.
+    property bool firstAnswered: false
 
     // The internal disk row reads the hostname alone (GM, 2026-09-08; the canvas drew "<host> · <kernel name>"), and /etc/hostname is the
     // one source for that host name that costs no process.
@@ -102,14 +108,14 @@ Item {
     }
 
     function rebuild() {
-        var rows = Devices.parseDevices(root._listing)
+        var rows = Devices.parseDevices(root._listing, root.showUnmounted)
         var out = []
         for (var i = 0; i < rows.length; i++) {
             var r = rows[i]
             var label = r.kind === "disk" ? root.hostLabel(r.label) : r.label
             out.push({ path: r.path, label: label, group: "device", kind: r.kind,
                        device: r.device, mounted: r.mounted, removable: r.removable, size: r.size,
-                       glyph: "drive" })
+                       volumeMenu: r.volumeMenu === true, glyph: "drive" })
         }
         // Same rule as ui/NetworkMounts.qml's: an unchanged poll assigns nothing, see Mounts.sameEntries.
         if (!Mounts.sameEntries(root.entries, out))
@@ -154,6 +160,18 @@ Item {
         mountProcess.command = ["gio", "mount", "-d", e.device]
         mountProcess.running = true
         mountTimeout.restart()
+    }
+
+    // RailAdditions rule 2's Unmount, which is not Eject: a fixed disk stays where it is and only
+    // its filesystem goes away. gio is handed the mount point, the way eject below is, and the poll
+    // that follows is what redraws the row as unmounted.
+    function unmount(index) {
+        var e = root.entries[index]
+        if (!e || e.kind !== "volume" || !e.mounted || unmountProcess.running)
+            return
+        root._unmountLabel = e.label
+        unmountProcess.command = ["gio", "mount", "-u", e.path]
+        unmountProcess.running = true
     }
 
     // Eject goes through the mount point. gio mount dispatches on --device before it ever reads
@@ -227,7 +245,11 @@ Item {
         // PATH because a device-mapper leaf is not "/dev/" plus its kernel name, and MOUNTPOINTS
         // because one btrfs device carries several and the plain column shows whichever it likes,
         // which hid / behind /home here and left the system disk unidentifiable.
-        command: ["lsblk", "--bytes", "--json", "-o", "NAME,PATH,LABEL,MOUNTPOINTS,RM,SIZE,TYPE,MODEL"]
+        // TRAN is the transport, asked for because RM alone misses a USB bridge: a WD My Passport
+        // reports rm=false with tran=usb, and a drive you can unplug has to offer Eject (PR 74).
+        // FSTYPE and PARTTYPENAME are RailAdditions rule 1's three exceptions: swap, the EFI system
+        // partition and a volume with no filesystem are the rows an unmounted sweep must not draw.
+        command: ["lsblk", "--bytes", "--json", "-o", "NAME,PATH,LABEL,MOUNTPOINTS,RM,TRAN,SIZE,TYPE,MODEL,FSTYPE,PARTTYPENAME"]
         stdout: StdioCollector {
             id: listOut
             waitForEnd: true
@@ -248,10 +270,12 @@ Item {
             // guard is released here because a stream this timer cut off may never finish on its own.
             if (root._listTimedOut) {
                 root._streamPending = false
-                return
+            } else {
+                root._listing = listOut.text || root._listOutput || ""
+                root.rebuild()
             }
-            root._listing = listOut.text || root._listOutput || ""
-            root.rebuild()
+            // Last, so anything waiting on the first answer reads the listing it answered with.
+            root.firstAnswered = true
         }
     }
 
@@ -264,7 +288,16 @@ Item {
             }
             mountTimeout.stop()
             root._pendingOpenDevice = ""
-            root.message(root._pendingOpenLabel + " could not be mounted; unplug it and plug it back in.", true)
+            root.message(root._pendingOpenLabel + " could not be mounted.", true)
+        }
+    }
+
+    Process {
+        id: unmountProcess
+        onExited: function (exitCode) {
+            if (exitCode !== 0)
+                root.message(root._unmountLabel + " could not be unmounted; something is still using it.", true)
+            root.poll()
         }
     }
 

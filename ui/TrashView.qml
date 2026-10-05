@@ -5,6 +5,9 @@ import "." as Flea
 import "js/Format.js" as Format
 import "js/Icons.js" as Icons
 import "js/Keymap.js" as Keymap
+import "js/Ops.js" as Ops
+import "js/Buttons.js" as Buttons
+import "js/Tap.js" as Tap
 import "js/TrashDates.js" as Trash
 import "js/Trash.js" as TrashKeys
 
@@ -66,7 +69,6 @@ FocusScope {
     anchors.fill: parent
     visible: opened
     onActiveFocusChanged: if (!activeFocus) root.trashArmedAt = 0
-
     function send(op, fields) {
         var message = fields || {}
         message.c = "trashbrowse"
@@ -217,7 +219,7 @@ FocusScope {
                 if ((message.recoveryErrors || []).length > 0)
                     operationResult("Interrupted file operation needs attention", message.recoveryErrors.join("\n"), true)
                 else if (message.recoveredCount > 0)
-                    operationResult("Recovered " + message.recoveredCount + " interrupted file operations", "", false)
+                    operationResult("Recovered " + message.recoveredCount + " interrupted file " + Ops.pluralWord(message.recoveredCount, "operation", "operations"), "", false)
                 errorText = ""
                 var kept = ({})
                 var keptIdentities = ({})
@@ -263,8 +265,8 @@ FocusScope {
             }
             selectionIdentities = identities
             allSelected = false; selectionToken = 0; selectionCount = 0; selected = next
-            var text = (message.op === "restore" ? "Restored " : "Deleted ") + message.done + " of " + (message.done + failed)
-            if (failed) text += " · " + failed + " failed"
+            var text = Ops.doneOf(message.op === "restore" ? "Restored" : "Deleted", message.done, message.done + failed)
+            if (failed) text += " · " + Format.count(failed) + " failed"
             var detail = failures.map(function(item) { return (item.name || item.uri) + " failed: " + item.error }).join("\n")
             operationResult(text, detail, failed > 0)
             refresh()
@@ -315,22 +317,29 @@ FocusScope {
                     id: backButton
                     width: Theme.hitMin; height: parent.height; maxSize: Theme.chromeMarkSize
                     name: "arrow-left"; color: Theme.color.foreground
+                    scale: backTap.pressed && !Theme.reducedMotion ? Buttons.PRESS_SCALE : 1
                     Accessible.role: Accessible.Button
                     Accessible.name: "Back"
                     Accessible.onPressAction: root.close()
-                    TapHandler { onTapped: root.close() }
+                    Behavior on scale {
+                        enabled: !Theme.reducedMotion
+                        NumberAnimation { duration: Buttons.PRESS_MS; easing.type: Easing.OutQuad }
+                    }
+                    TapHandler { id: backTap; onTapped: root.close() }
                 }
                 Flea.Glyph {
                     id: upButton
                     width: Theme.hitMin; height: parent.height; maxSize: Theme.chromeMarkSize
                     name: "arrow-up"; color: Theme.color.muted
+                    // Dead by design: a history has no parent, so it dims like any disabled control.
+                    opacity: Theme.disabledOpacity
                     Accessible.role: Accessible.Button
                     Accessible.name: "Up unavailable in Trash"
                     Accessible.ignored: false
                     enabled: false
                 }
                 Text {
-                    width: Math.max(0, parent.width - 2 * Theme.hitMin - countLabel.width - emptyAction.width - 4 * parent.spacing)
+                    id: trashTitle
                     anchors.verticalCenter: parent.verticalCenter
                     text: "Trash"
                     textFormat: Text.PlainText
@@ -340,18 +349,16 @@ FocusScope {
                 }
                 Text {
                     id: countLabel
-                    width: Math.min(implicitWidth, parent.width / 2)
+                    // Both board cells put the count against the title and the action at the far edge, so this row's spare width rides here rather than under the title.
+                    width: Math.max(implicitWidth, parent.width - 2 * Theme.hitMin - trashTitle.width - emptyAction.width - 4 * parent.spacing)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: root.total + (root.total === 1 ? " item" : " items") + (root.bytesReady ? " · " + (root.bytesPartial ? "≥ " : "") + Format.size(root.totalBytes) : "")
+                    text: Format.count(root.total) + (root.total === 1 ? " item" : " items") + (root.bytesReady ? " · " + (root.bytesPartial ? "≥ " : "") + Format.size(root.totalBytes) : "")
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
                     color: Theme.color.foreground
                     font { family: Theme.font.family; pixelSize: Theme.font.caption }
                 }
-                // Emptying the Trash was reachable only by right-clicking the rail row. It addresses
-                // the whole Trash, which is what the count beside it describes, so it belongs here.
-                // It opens the confirmation the menu row opens: the boundary is unchanged and no key
-                // is bound to it. Disabled exactly where ui/js/Menu.js disables the row.
+                // Emptying the Trash was reachable only by right-clicking the rail row. It addresses the whole Trash, which is what the count beside it describes, so it belongs here. It opens the confirmation the menu row opens: the boundary is unchanged and no key is bound to it. Disabled exactly where ui/js/Menu.js disables the row.
                 Flea.ChromeAction {
                     id: emptyAction
                     anchors.verticalCenter: parent.verticalCenter
@@ -380,7 +387,7 @@ FocusScope {
                 color: Theme.color.foreground
                 font { family: Theme.font.family; pixelSize: Theme.font.caption }
             }
-            // TrashSidebar's fixed columns are 210/110 at bodySmall 13, then clamp to preserve the name.
+            // The location column is 210 at bodySmall 13; Deleted takes its own body-measured token. Both clamp to preserve the name.
             Text {
                 id: locationTitle
                 width: Math.min(Math.round(210 * Theme.font.bodySmall / 13), root.width * 0.35)
@@ -394,7 +401,7 @@ FocusScope {
             }
             Text {
                 id: deletedTitle
-                width: Math.min(Math.round(110 * Theme.font.bodySmall / 13), root.width * 0.2)
+                width: Math.min(Theme.column.trashDate, root.width * 0.2)
                 anchors.verticalCenter: parent.verticalCenter
                 horizontalAlignment: Text.AlignRight
                 text: "Deleted"
@@ -417,12 +424,13 @@ FocusScope {
             TapHandler {
                 acceptedButtons: Qt.RightButton
                 onTapped: function(point) {
-                    if (listing.indexAt(point.position.x, point.position.y + listing.contentY) >= 0) return
-                    var at = root.mapFromItem(listing, point.position.x, point.position.y)
+                    if (!Tap.onBackground(listing, point)) return
+                    var at = root.mapFromItem(listing.contentItem, point.position.x, point.position.y)
                     root.contextRequested(at.x, at.y, root.selectedCount > 0)
                 }
             }
             Flea.FastScrollHandler { flickable: listing }
+            Flea.ViewportScrollBar { parent: listing; anchors.top: parent.top; anchors.right: parent.right; flickable: listing }
             delegate: Rectangle {
                 id: itemRow
                 required property int index
@@ -430,7 +438,8 @@ FocusScope {
                 readonly property bool selected: item && root.isSelected(item.uri)
                 width: listing.width
                 height: Theme.fileRowHeight
-                color: selected ? Qt.alpha(Theme.color.accent, 0.14) : hover.hovered ? Style.hoverFill : "transparent"
+                // HANDOFF rule 7: a marked row takes the OEM's own selection rung, the one ui/Row.qml draws in every listing, rather than an accent wash this surface mixed for itself.
+                color: selected ? Style.selectionFill : hover.hovered ? Style.hoverFill : "transparent"
                 Rectangle { width: Theme.spacing.hairline * 2; height: parent.height; visible: itemRow.selected; color: Theme.color.accent }
                 Row {
                     anchors.fill: parent
@@ -440,7 +449,7 @@ FocusScope {
                     Flea.Glyph { width: Theme.markSize; height: parent.height; name: itemRow.item ? (itemRow.item.directory ? "folder" : Icons.glyphFor(itemRow.item.icon)) : "file"; color: Theme.color.foreground }
                     Text { width: Math.max(0, parent.width - Theme.markSize - original.width - deleted.width - 3 * parent.spacing); anchors.verticalCenter: parent.verticalCenter; text: itemRow.item ? itemRow.item.original.split("/").pop() : ""; textFormat: Text.PlainText; elide: Text.ElideRight; color: Theme.color.foreground; font { family: Theme.font.family; pixelSize: Theme.font.body } }
                     Text { id: original; width: locationTitle.width; anchors.verticalCenter: parent.verticalCenter; text: itemRow.item ? Trash.location(itemRow.item.original, root.home) : ""; textFormat: Text.PlainText; elide: Text.ElideLeft; horizontalAlignment: Text.AlignRight; color: Theme.color.foreground; font { family: Theme.font.family; pixelSize: Theme.font.body } }
-                    Text { id: deleted; width: deletedTitle.width; anchors.verticalCenter: parent.verticalCenter; text: itemRow.item ? Trash.deleted(itemRow.item.deleted, Date.now()) : ""; textFormat: Text.PlainText; elide: Text.ElideRight; horizontalAlignment: Text.AlignRight; color: Theme.color.foreground; font { family: Theme.font.family; pixelSize: Theme.font.body } }
+                    Text { id: deleted; width: deletedTitle.width; anchors.verticalCenter: parent.verticalCenter; text: itemRow.item ? Trash.deleted(itemRow.item.deleted) : ""; textFormat: Text.PlainText; elide: Text.ElideRight; horizontalAlignment: Text.AlignRight; color: Theme.color.foreground; font { family: Theme.font.family; pixelSize: Theme.font.body } }
                 }
                 HoverHandler { id: hover }
                 Accessible.role: Accessible.ListItem

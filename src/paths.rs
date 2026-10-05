@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-// An empty FLEA_UI would resolve shell.qml against the working directory, so it is no candidate.
+// An empty FLEA_UI would resolve the entry against the working directory, so it is no candidate.
 fn env_ui_dir() -> Option<PathBuf> {
     let value = std::env::var("FLEA_UI").ok()?;
     if value.is_empty() {
@@ -9,21 +9,36 @@ fn env_ui_dir() -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
+// The Quickshell entry, in its own directory so ui/qmldir's singletons stay off the startup path.
+pub const ENTRY: &str = "boot/shell.qml";
+
+// The chooser's own entry, beside it; see AGENTS.md "The first window".
+pub const PICKER_ENTRY: &str = "boot/picker.qml";
+
+// The ShellId pragmas in ui/boot/shell.qml and ui/boot/picker.qml; qsregistry prunes only these.
+pub const SHELL_ID: &str = "flea";
+pub const PICKER_SHELL_ID: &str = "fleapicker";
+
+// Issue 216: names the entry file sought, since a package missing ui/boot reads as a missing dir.
+pub fn missing_ui_message() -> String {
+    format!("flea: the shell config is missing: /usr/share/flea/ui/{} was not found; set FLEA_UI or reinstall flea", ENTRY)
+}
+
 // The UI ships as data, so it is found the same way FLEA_BIN finds the binary.
 pub fn ui_dir() -> Option<PathBuf> {
     if let Some(p) = env_ui_dir() {
-        if p.join("shell.qml").is_file() {
+        if p.join(ENTRY).is_file() {
             return Some(p);
         }
     }
     let packaged = PathBuf::from("/usr/share/flea/ui");
-    if packaged.join("shell.qml").is_file() {
+    if packaged.join(ENTRY).is_file() {
         return Some(packaged);
     }
     // The dev tree keeps ui/ beside target/, so walk up from the binary.
     let exe = std::env::current_exe().ok()?;
     let dev = exe.parent()?.parent()?.parent()?.join("ui");
-    if dev.join("shell.qml").is_file() {
+    if dev.join(ENTRY).is_file() {
         return Some(dev);
     }
     None
@@ -67,6 +82,14 @@ fn hex_digit(b: u8) -> Option<u8> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_missing_ui_message_names_the_entry_file_it_looked_for() {
+        assert_eq!(
+            missing_ui_message(),
+            "flea: the shell config is missing: /usr/share/flea/ui/boot/shell.qml was not found; set FLEA_UI or reinstall flea"
+        );
+    }
+
     // Both cases sit in one test because FLEA_UI is process wide and cargo runs tests in threads.
     #[test]
     fn an_empty_flea_ui_is_not_a_candidate() {
@@ -97,5 +120,16 @@ mod tests {
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(percent_decode("100%2"), "100%2");
         assert_eq!(percent_decode("a%zzb"), "a%zzb");
+    }
+
+    // Sample file line: `//@ pragma ShellId flea` in ui/boot/shell.qml.
+    fn shell_id_of(text: &str) -> Option<&str> {
+        text.lines().find_map(|line| line.trim_start().strip_prefix("//@ pragma ShellId "))
+    }
+
+    #[test]
+    fn the_shell_ids_match_the_boot_pragmas() {
+        assert_eq!(shell_id_of(include_str!("../ui/boot/shell.qml")), Some(SHELL_ID));
+        assert_eq!(shell_id_of(include_str!("../ui/boot/picker.qml")), Some(PICKER_SHELL_ID));
     }
 }

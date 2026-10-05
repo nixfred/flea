@@ -71,7 +71,7 @@ pdf_controls() {
 }
 
 case_pdffocus() {
-    local dir="$fixture_root/pdffocus" state="$fixture_root/pdffocus-state" preset mode cx cy wx wy ww wh addr
+    local dir="$fixture_root/pdffocus" state="$fixture_root/pdffocus-state" preset mode last_row selected_row cx cy wx wy ww wh addr
     sandbox_scratch "$dir"
     sandbox_scratch "$state"
     mkdir -p "$state/flea"
@@ -128,7 +128,21 @@ case_pdffocus() {
         jq -n --arg mode "$mode" '{view:$mode,keys:"default",preview:{column:true,loadOn:"automatic"}}' > "$state/flea/ui.json"
         launch "$dir"
         wait_listing 2
-        open_row manual.pdf
+        if [[ "$mode" == grid ]]; then
+            [[ "$(ipc viewMode)" == grid ]] || fail "PDF grid entry started in $(ipc viewMode), not grid"
+            last_row=$(( $(ipc total) - 1 ))
+            [[ "$last_row" -ge 1 && "$(ipc rowAt "$last_row")" == manual.pdf\|* ]] \
+                || fail "PDF grid fixture order put $(ipc rowAt "$last_row") last, not manual.pdf"
+            key -k End >/dev/null
+            settle
+            selected_row=$(ipc rowAt "$(ipc cursor)")
+            [[ "$(ipc cursor)" == "$last_row" && "$selected_row" == manual.pdf\|* ]] \
+                || fail "PDF grid End selected row $(ipc cursor): $selected_row, not manual.pdf at $last_row"
+            key -k space >/dev/null
+            settle
+        else
+            open_row manual.pdf
+        fi
         pdf_expect true '.focused and .pages == 3' "$mode Quick Look entry"
         key e >/dev/null
         [[ "$(ipc previewExpanded)" == true ]] || fail "PDF e did not expand in $mode"
@@ -146,6 +160,16 @@ case_pdffocus() {
         [[ "$cx" =~ ^[0-9]+$ && "$cy" =~ ^[0-9]+$ ]] || fail "PDF missing native Next centre"
         omarchy-drive click "$((wx + cx))" "$((wy + cy))" left >/dev/null
         pdf_expect true '.page == 1' "$mode pointer Next"
+        # Expanded, the toolbar lies on the chrome strip: at 800 px Next sits on a crumb and zoom in on a view button.
+        [[ "$(ipc path)" == "$dir" && "$(ipc viewMode)" == "$mode" ]] \
+            || fail "PDF $mode pointer Next reached the chrome beneath: path $(ipc path), view $(ipc viewMode)"
+        # Sample input: pdfState .controls[] entries like {"name":"Zoom in","enabled":true,"visible":true,"centre":"412 38"}.
+        read -r cx cy <<< "$(ipc pdfState true | jq -r '.controls[] | select(.name == "Zoom in") | .centre')"
+        [[ "$cx" =~ ^[0-9]+$ && "$cy" =~ ^[0-9]+$ ]] || fail "PDF missing native Zoom in centre"
+        omarchy-drive click "$((wx + cx))" "$((wy + cy))" left >/dev/null
+        pdf_expect true '.zoom == 1.25' "$mode pointer zoom in"
+        [[ "$(ipc path)" == "$dir" && "$(ipc viewMode)" == "$mode" ]] \
+            || fail "PDF $mode pointer zoom in reached the chrome beneath: path $(ipc path), view $(ipc viewMode)"
         key -k Escape >/dev/null
         if [[ "$mode" != columns ]]; then
             [[ "$(ipc pdfState false)" == null ]] || fail "PDF $mode unexpectedly has an inline preview"

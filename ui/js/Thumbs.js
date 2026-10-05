@@ -1,7 +1,15 @@
 .pragma library
 
 // A row this listing has dealt with: null means asked and waiting, a string is the answer.
+// A cache-only ask carries a mark, so its empty answer means "not tried" and a class switch forgets it.
 var ASKED = null
+var CACHE_ASKED = "cache-asked"
+var CACHE_MISS = "cache-missed"
+
+// Asked and not answered yet, a plain ask or a cache-only one; only these have a job to cancel.
+function pending(value) {
+    return value === ASKED || value === CACHE_ASKED
+}
 
 function empty() {
     return { file: {}, order: [] }
@@ -29,7 +37,7 @@ function plan(state, rows, held, first, last, mode) {
     }
     var drop = []
     for (var key in state.file) {
-        if (state.file[key] !== ASKED) {
+        if (!pending(state.file[key])) {
             continue
         }
         var at = Number(key)
@@ -54,8 +62,9 @@ function applied(state, work) {
     for (var i = 0; i < work.drop.length; i++) {
         forget(state, work.drop[i])
     }
+    var mark = work.cacheOnly === true ? CACHE_ASKED : ASKED
     for (var j = 0; j < work.ask.length; j++) {
-        state.file[work.ask[j]] = ASKED
+        state.file[work.ask[j]] = mark
         state.order.push(work.ask[j])
     }
     return { file: state.file, order: state.order }
@@ -66,7 +75,8 @@ function remember(state, row, file, cap) {
     if (state.file[row] === undefined) {
         state.order.push(row)
     }
-    state.file[row] = file
+    // An empty answer to a cache-only ask was never a decode, so it keeps its mark.
+    state.file[row] = (file === "" && state.file[row] === CACHE_ASKED) ? CACHE_MISS : file
     while (state.order.length > cap) {
         delete state.file[state.order.shift()]
     }
@@ -75,6 +85,7 @@ function remember(state, row, file, cap) {
 
 function fileFor(state, row) {
     var value = state.file[row]
+    if (value === CACHE_ASKED || value === CACHE_MISS) return ""
     return typeof value === "string" ? value : ""
 }
 
@@ -82,6 +93,26 @@ function fileFor(state, row) {
 // read the file reports an empty name, and only once that has arrived is it honest to say so.
 function refused(state, row) {
     return state.file[row] === ""
+}
+
+// src/backend/thumbs.rs THUMB_SIZE: the longest side of a cache file made from a larger original.
+var CACHE_SIZE = 256
+
+// How much a picture may be enlarged to fit its box, and never past limit: 1 for an original, which
+// draws at its own size when it is smaller than the box (GM, 2026-09-24). Sample input: (754, 471, 120, 68, 1) is 1.
+function fitScale(boxWidth, boxHeight, width, height, limit) {
+    return Math.min(limit, boxWidth / Math.max(1, width), boxHeight / Math.max(1, height))
+}
+
+// A cache file stands in for its original, so it is enlarged at most to the original's own size. The
+// longest side is compared because EXIF can turn either one. Unknown dimensions leave a full-size cache
+// file free to fill the box, while a smaller one already is the original. Sample input: (256, 171, 300, 200) is 300/256.
+function thumbLimit(thumbWidth, thumbHeight, originalWidth, originalHeight) {
+    var thumbLongest = Math.max(1, thumbWidth, thumbHeight)
+    var originalLongest = Math.max(Number(originalWidth) || 0, Number(originalHeight) || 0)
+    if (originalLongest > 0)
+        return originalLongest / thumbLongest
+    return thumbLongest < CACHE_SIZE ? 1 : Infinity
 }
 
 // Backend icon identity distinguishes image thumbnails from video without opening any extra file.

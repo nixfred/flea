@@ -4,6 +4,8 @@
 .import "Filter.js" as Filter
 .import "Kinds.js" as Kinds
 .import "Thumbs.js" as Thumbs
+.import "Search.js" as Search
+.import "ColumnMenu.js" as ColumnMenu
 
 // Where the pane has been and how it gets back, taking ui/Pane.qml's root the way Search.js and
 // Ops.js do: the pane holds the state, this holds what the state does.
@@ -58,8 +60,8 @@ function forward(pane) {
 function mouseBack(pane) {
     // The pane's own context menu covers the listing and no navigation closes it, so a press behind
     // one left the menu standing over another directory's rows and its next row acted on whichever
-    // file had arrived at that index. ui/shell.qml refuses the overlays the window itself holds.
-    if (pane.menuVisible) {
+    // file had arrived at that index. ui/shell.qml refuses the window's overlays; the collision card is the pane's.
+    if (pane.menuVisible || pane.collide.opened) {
         return
     }
     if (pane.history.length > 0) {
@@ -69,16 +71,44 @@ function mouseBack(pane) {
     parent(pane)
 }
 
-// Everything a fresh listing has to forget. Called by open, by refresh and by the hidden toggle, so
-// the reset is written once and no caller can half-do it.
-function openWithoutHistory(pane, newPath) {
+// Every listing the pane asks for; of options, ui/Pane.qml reads keepHidden and ui/js/Swap.js begin() the rest.
+// A walk owns the rows until this lands, so leaving it is the shared step with the tabs:
+// tab switches, Back, Up, rail clicks and jumps all funnel through here.
+function openWithoutHistory(pane, newPath, options) {
     if (pane.listInFlight) {
         pane.message("A directory is already loading.", false)
         return
     }
+    // A hop elsewhere drops a waiting background menu, while the armed hop keeps its own request.
+    if (pane.pendingBackground && pane.pendingBackground.length > 0 && !ColumnMenu.samePath(newPath, pane.pendingBackground))
+        clearPendingBackground(pane)
+    Search.leaveWalk(pane)
     pane.listInFlight = true
     pane.listedSeen = false
-    pane.path = newPath
+    // The path is not written here. A refused listing never answers a listed line, so leaving the
+    // pane's own path alone is what keeps a refused hop from moving the breadcrumb onto a directory
+    // nobody could read; ui/PaneSwap.qml applyListed takes it from the answer instead. The directory
+    // asked for is recorded, because a drop landing while the reply is out means that one and not
+    // the directory being left; ui/Pane.qml dropPath reads it and only while this listing is out.
+    pane.listingPath = newPath
+    // The class below is the directory being left until fsinfo answers for this one, and a
+    // settle firing in between would spend it; a re-read of the same path keeps its class.
+    if (newPath !== pane.path) { pane.storageClass = ""; pane.storageKnown = false }
+    var ask = options || {}
+    // A settled listing stays drawn until the new rows land, see AGENTS.md "The listing swap".
+    if (!pane.swap.hold(ask))
+        forget(pane, ask.keptQuery)
+    // A filter line held with its rows gives up the caret, so keys typed meanwhile meet the gate, not a query the swap forgets.
+    else if (pane.filterTyping)
+        Filter.commit(pane)
+    pane.appliedListingPreferences = pane.listingPreferences
+    pane.backend.list(newPath, pane.windowSize, pane.showHidden)
+    // One statfs per directory, not per row: the bar's right half only changes when the pane moves.
+    pane.backend.askFsInfo()
+}
+
+// Everything a fresh listing forgets, written once: at the request, or by ui/PaneSwap.qml when held rows go.
+function forget(pane, keptQuery) {
     pane.total = 0
     pane.held = 0
     pane.rows = []
@@ -90,17 +120,15 @@ function openWithoutHistory(pane, newPath) {
     // The row the editor sat on belongs to the listing being replaced, so the rename goes with it:
     // leaving the index set opened an empty editor over whatever file arrived at that row instead.
     pane.renamingIndex = -1
-    // A filter narrows the rows already listed, so a new listing is exactly what forgets it.
+    // A filter narrows the rows already listed, so a new listing forgets it unless ui/js/Anchor.js hands it back.
     Filter.close(pane)
+    if (keptQuery)
+        pane.filterQuery = keptQuery
     pane.listingState = "loading"
     pane.stateMessage = ""
     pane.lockedMode = 0
     pane.clearSelection()
     pane.listArea.primeSettle()
-    pane.appliedListingPreferences = pane.listingPreferences
-    pane.backend.list(newPath, pane.windowSize, pane.showHidden)
-    // One statfs per directory, not per row: the bar's right half only changes when the pane moves.
-    pane.backend.askFsInfo()
 }
 
 // Which row the listing re-reveals after a rename. A rename the pointer committed keeps the row the
@@ -120,6 +148,7 @@ function renameRefreshTarget(pane, path) {
 function refresh(pane, selectPath) {
     pane.pendingSelect = selectPath ? selectPath : ""
     pane.pendingMenu = false
+    clearPendingBackground(pane)
     pane.openWithoutHistory(pane.path)
 }
 
@@ -149,6 +178,12 @@ function applyPendingSelect(pane) {
     pane.pendingMenu = false
 }
 
+// A failed listing drops the deferred background menu, so no later rows open it.
+function clearPendingBackground(pane) { ColumnMenu.clearPendingBackground(pane) }
+
+// The deferred neighbour background, consumed on every landing by identity.
+function applyPendingBackground(pane) { ColumnMenu.applyPendingBackground(pane) }
+
 // Enter on the cursor row: a directory navigates, an archive opens Flea's own view, anything else
 // goes to the opener. The in-flight guard is what stops a second Enter queueing a second listing.
 function openCursor(pane, opener) {
@@ -156,14 +191,13 @@ function openCursor(pane, opener) {
         pane.message("A directory is already loading.", false)
         return
     }
-    // -1 from viewOf is a row the filter hides; a null list is no filter and answers the row itself.
-    if (Filter.viewOf(pane.shown === undefined ? null : pane.shown, pane.cursorIndex) < 0) {
-        pane.message("That row is hidden by the filter.", false)
-        return
-    }
     var row = pane.rowFor(pane.cursorIndex)
     if (!row) {
         pane.message("That row has not loaded yet.", false)
+        return
+    }
+    if (!Filter.cursorShown(pane)) {
+        pane.message("That row is hidden by the filter.", false)
         return
     }
     var path = pane.join(pane.path, row.n)
@@ -173,16 +207,32 @@ function openCursor(pane, opener) {
     }
     // Handing an archive on opens another file manager, and this is ui/Preview.qml's own classifier.
     if (Kinds.quickLookKind(row.i, path) === Kinds.ARCHIVE) {
-        pane.preview.open(path, row.i, row.s)
+        pane.preview.open(path, row.i, row.s, pane.kindNames[row.k] || "")
         return
     }
     opener.open(path)
 }
 
+// The folder the Locked tile names, for its own menu and every row that menu offers: the
+// directory asked for while its tile is up, which is the parent's own path when the folder
+// failed on its own re-read. "" while no Locked tile is drawn, so the background menu stands.
+function lockedTarget(pane) {
+    if (pane.listingState !== "locked") return ""
+    var asked = pane.listingPath || ""
+    return asked.length > 0 ? trimSlash(asked) : pane.path
+}
+
 // The path helpers the columns view needs. A root has no parent and no leaf of its own.
+function trimSlash(path) {
+    // A bookmark can carry one trailing slash, which no row name ever has; "/" alone keeps its own.
+    var text = String(path)
+    return text.length > 1 && text.charAt(text.length - 1) === "/" ? text.substring(0, text.length - 1) : text
+}
+
 function parentOf(path) {
-    var cut = String(path).lastIndexOf("/")
-    return cut <= 0 ? "/" : String(path).substring(0, cut)
+    var text = trimSlash(path)
+    var cut = text.lastIndexOf("/")
+    return cut <= 0 ? "/" : text.substring(0, cut)
 }
 
 function leafOf(path) {
@@ -191,47 +241,50 @@ function leafOf(path) {
     return cut < 0 || cut === text.length - 1 ? text : text.substring(cut + 1)
 }
 
-// Issue 45: the chrome's path as the pieces a click can land on. text is what is drawn, including
-// the separator that follows it, so the pieces concatenate to exactly the one line they replace;
-// path is the directory the piece names, which is what ui/ChromeBar.qml hands to pathEntered. The
-// home test is on whole components, the same one Format.tilde and ui/js/Search.js scopeRoot make,
-// because a crumb built on a bare prefix would carry a click on /home/gmx to /home/gm, another directory.
-function crumbs(path, home) {
-    var text = String(path)
-    var base = String(home)
-    var inHome = base.length > 0 && (text === base || text.indexOf(base + "/") === 0)
-    var display = inHome ? "~" + text.substring(base.length) : text
-    var parts = display.split("/")
-    var walked = inHome ? base : ""
-    // The leading "~" and the leading "/" are each a crumb of their own: one names home and the
-    // other names the root, and neither is a component the split hands back.
-    var out = [{ text: parts.length > 1 ? parts[0] + "/" : parts[0],
-                 path: walked.length > 0 ? walked : "/", last: false }]
-    for (var i = 1; i < parts.length; i++) {
-        if (parts[i].length === 0) {
-            continue
-        }
-        walked = walked + "/" + parts[i]
-        out.push({ text: parts[i] + "/", path: walked, last: false })
-    }
-    // Only a crumb with another after it carries a separator, so the last one gives its own back.
-    var end = out[out.length - 1]
-    if (out.length > 1) {
-        end.text = end.text.substring(0, end.text.length - 1)
-    }
-    end.last = true
-    return out
-}
-
-// Backspace and the chrome's up arrow: the root has no parent, so it is where climbing stops.
+// Backspace, h, and the chrome's up arrow. The root has no parent, so it is where climbing stops.
+// pendingSelect is the directory being left, so the parent listing puts the cursor on it rather than
+// on its first row; applyPendingSelect reads the window the listing answered with, so a child
+// sorted past that first screenful is not found and the cursor stays where a climb always left it.
 function parent(pane) {
     if (pane.listInFlight) {
         pane.message("A directory is already loading.", false)
         return
     }
+    // Issue 193: a refused hop climbs from the folder it asked for, trailing slash trimmed, selecting the refused row.
+    if (pane.listingState === "locked" && pane.listingPath !== pane.path) {
+        pane.pendingSelect = trimSlash(pane.listingPath)
+        pane.open(parentOf(pane.listingPath))
+        return
+    }
     if (pane.path === "/") {
         return
     }
-    var cut = pane.path.lastIndexOf("/")
-    pane.open(cut <= 0 ? "/" : pane.path.substring(0, cut))
+    var here = pane.path
+    var cut = here.lastIndexOf("/")
+    pane.pendingSelect = here
+    pane.open(cut <= 0 ? "/" : here.substring(0, cut))
+}
+
+// A click on the folder already shown is a no-op, so the rail and columns routes land here.
+function showing(pane, path) {
+    if (trimSlash(path) !== pane.path) return false
+    if (pane.listInFlight) return false
+    if ((pane.searchMode || "").length > 0) return false
+    if (!pane.trash || pane.trash.opened) return false
+    return pane.listingState === "ready" || pane.listingState === "empty"
+}
+
+// Same-path Enter re-lists only a failed or locked listing; Trash, search and in-flight stay a no-op.
+function pathFailed(pane) {
+    if (!pane || pane.listInFlight) return false
+    if ((pane.searchMode || "").length > 0) return false
+    if (!pane.trash || pane.trash.opened) return false
+    return pane.listingState === "error" || pane.listingState === "locked"
+}
+
+// The rail's and the columns view's route in: the shown folder returns false and lists nothing.
+function openPlace(pane, path) {
+    if (showing(pane, path)) return false
+    pane.open(path)
+    return true
 }

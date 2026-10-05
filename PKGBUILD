@@ -1,7 +1,7 @@
 # Maintainer: GM <gianmarcomorales@icloud.com>
 
 pkgname=flea
-pkgver=0.2.1
+pkgver=0.3.7
 pkgrel=1
 pkgdesc='Fast, keyboard-first file manager for Omarchy'
 arch=('x86_64' 'aarch64')
@@ -22,7 +22,11 @@ license=('MIT')
 # python is the interpreter of two scripts this package installs and D-Bus activates at runtime, so
 # it is a runtime dependency rather than only the checkdepend the sandboxed child needs.
 # kimageformats with libheif is Qt's HEIC decoder: without it the Space preview of a phone photo is a sentence, not a picture.
-depends=('bubblewrap' 'expect' 'gcc-libs' 'glib2' 'glibc' 'gvfs' 'gvfs-dnssd' 'gvfs-nfs' 'gvfs-smb' 'hicolor-icon-theme' 'kimageformats' 'libheif' 'omarchy' 'python' 'python-gobject' 'qt6-multimedia' 'qt6-webengine' 'quickshell' 'shared-mime-info' 'util-linux' 'wl-clipboard' 'xdg-terminal-exec' 'xdg-utils')
+# gvfs-mtp, gvfs-gphoto2 and gvfs-afc are the three phone backends the rail reads, and usbmuxd is
+# what AFC talks to. Stock Omarchy installs gvfs-mtp, gvfs-nfs and gvfs-smb only, so on a clean box
+# an Android phone lists and nothing else does. Measured on an iPhone (iOS 26.6.2): its PTP leg mounts
+# and answers zero folders, and AFC is the one that lists DCIM, so the iPhone needs both.
+depends=('bubblewrap' 'expect' 'gcc-libs' 'glib2' 'glibc' 'gvfs' 'gvfs-afc' 'gvfs-dnssd' 'gvfs-gphoto2' 'gvfs-mtp' 'gvfs-nfs' 'gvfs-smb' 'hicolor-icon-theme' 'kimageformats' 'libheif' 'omarchy' 'python' 'python-gobject' 'qt6-multimedia' 'qt6-webengine' 'quickshell' 'shared-mime-info' 'usbmuxd' 'util-linux' 'wl-clipboard' 'xdg-terminal-exec' 'xdg-utils')
 makedepends=('cargo')
 # Both packages own /usr/bin/flea, so pacman refuses the pair rather than leaving one half-installed.
 conflicts=('flea-git')
@@ -31,7 +35,9 @@ optdepends=('libarchive: archive listing and extraction'
             'imagemagick: image conversion'
             'tailscale: Taildrop sharing'
             'ffmpeg: media metadata in the preview column'
-            'dropbox-cli: Dropbox share links')
+            'ffmpegthumbnailer: video thumbnails, made by one pre-linked worker through libffmpegthumbnailer.so.4, or by the ffmpegthumbnailer program per video when that library will not load'
+            'dropbox-cli: Dropbox share links'
+            'zoxide: frecent folders in the folder jump of the path bar')
 # The release profile strips, so a debug package would have nothing to hold.
 options=('!debug')
 # Empty on purpose: with no source array makepkg builds from $startdir, so a clone is the source.
@@ -73,11 +79,22 @@ package() {
   install -Dm644 packaging/com.thisisgm.flea.desktop -t "$pkgdir/usr/share/applications"
   install -Dm644 packaging/com.thisisgm.flea.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps"
   install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+  # Issue 173: a tracked alpm hook, not a scriptlet, that prints the per-user undo commands on removal.
+  install -Dm644 packaging/flea.hook -t "$pkgdir/usr/share/libalpm/hooks"
 
-  # paths.rs looks for /usr/share/flea/ui/shell.qml, so the UI ships as data beside the binary.
+  # paths.rs looks for /usr/share/flea/ui/boot/shell.qml, so the UI ships as data beside the binary.
   install -Dm644 ui/qmldir ui/*.qml -t "$pkgdir/usr/share/flea/ui"
   install -Dm644 ui/js/*.js -t "$pkgdir/usr/share/flea/ui/js"
-  # Commons and Ui are Omarchy's own, reached as qs.Commons: the checkout links them and so does the package.
+  # The two Quickshell entries, in their own directory so ui/qmldir's singletons stay off the startup path.
+  install -Dm644 ui/boot/shell.qml ui/boot/picker.qml -t "$pkgdir/usr/share/flea/ui/boot"
+  # B1: the bar plugin ships as data too, and Flea's own Enable shelf switch copies it from here into
+  # the user's plugin directory. The folder is flat, which is what src/shelfplugin.rs installs.
+  install -Dm644 shelf/manifest.json shelf/README.md shelf/*.qml shelf/*.js -t "$pkgdir/usr/share/flea/shelf"
+  # Commons and Ui are Omarchy's own, reached as qs.Commons: the checkout links them and so does the
+  # package. Both directories get the pair, because that import resolves against the config root and
+  # ui/boot is the config root the entries are launched from.
   ln -s /usr/share/omarchy/shell/Commons "$pkgdir/usr/share/flea/ui/Commons"
   ln -s /usr/share/omarchy/shell/Ui "$pkgdir/usr/share/flea/ui/Ui"
+  ln -s /usr/share/omarchy/shell/Commons "$pkgdir/usr/share/flea/ui/boot/Commons"
+  ln -s /usr/share/omarchy/shell/Ui "$pkgdir/usr/share/flea/ui/boot/Ui"
 }

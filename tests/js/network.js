@@ -1,4 +1,6 @@
 .import "../../ui/js/Mounts.js" as Mounts
+.import "../../ui/js/RailMenu.js" as RailMenu
+.import "../../ui/js/Eject.js" as Eject
 .import "../../ui/js/Protocols.js" as Protocols
 
 // Issue #36 (@janoguerra): every network decision resolves from the mount's own URI, or from gio
@@ -21,9 +23,13 @@ function run(check) {
     var onTuesdayOnNas = 'Mount(0): backup on tuesday on nas -> smb://nas/backup%20on%20tuesday/\n'
     check("and loses only the host when it really is share-on-host",
           Mounts.parseMounts(onTuesdayOnNas)[0].label, "backup on tuesday")
+    // A phone's shadow mount is DEVICES territory: ui/js/Phones.js builds its row off the volume
+    // block, so parseMounts skips the uri the way it already skips file://.
     var phone = 'Mount(0): Pixel 7 -> mtp://Google_Pixel_7_1A2B/\n'
+    check("an mtp mount is a phone row's shadow, not a share", Mounts.parseMounts(phone).length, 0)
+    var mediaLibrary = 'Mount(0): media library -> dav://nas.local/media/\n'
     check("a label that is not share-on-host keeps the name gio gave it",
-          Mounts.parseMounts(phone)[0].label, "Pixel 7")
+          Mounts.parseMounts(mediaLibrary)[0].label, "media library")
     var bareRoot = 'Mount(0): nas -> smb://nas/\n'
     check("a server root's own name is never cut down to nothing",
           Mounts.parseMounts(bareRoot)[0].label, "nas")
@@ -154,21 +160,29 @@ function run(check) {
     var mounted = { path: "", label: "isos", group: "network", kind: "share", uri: "smb://nas/isos/", mounted: true }
     var saved = { path: "", label: "NAS", group: "network", kind: "share", uri: "smb://nas/", mounted: false }
     var volume = { path: "/run/media/gm/128GB", label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", mounted: true, removable: true }
-    var favourite = { path: "/home/gm", label: "Home", group: "favorite", kind: "favorite", mounted: false }
-    function labels(rows) { return rows.map(function (r) { return r.label }).join("|") }
-    check("a mounted share releases first, then offers the two the place itself owns",
-          labels(Mounts.rowMenu(mounted)), "Unmount|Rename|Remove")
-    check("and Ctrl+E still reads the release row alone",
-          Mounts.railMenu(mounted).length + "|" + Mounts.railMenu(mounted)[0].action, "1|unmount")
-    check("a bookmark nothing has mounted offers the two that need no mount",
-          labels(Mounts.rowMenu(saved)), "Rename|Remove")
-    check("so it opens a menu where it used to open an empty one", Mounts.rowMenu(saved).length, 2)
-    check("but it has nothing to release, so Ctrl+E still says so", Mounts.railMenu(saved).length, 0)
-    check("a removable volume's menu is untouched", labels(Mounts.rowMenu(volume)), "Eject")
-    check("a favourite still opens no menu at all", Mounts.rowMenu(favourite).length, 0)
+    var favourite = { path: "/home/gm", label: "Home", group: "favourite", kind: "favourite", mounted: false }
+    function labels(rows) { return rows.filter(function (r) { return !r.separator }).map(function (r) { return r.label }).join("|") }
+    check("a mounted share releases first, then offers the three the place itself owns", labels(Mounts.rowMenu(mounted)), "Open|Unmount|Rename|Edit address|Remove from Network")
+    check("and Ctrl+E picks the release out of those rows, never the first one", Eject.releaseFromRows(Mounts.railMenu(mounted)), "unmount")
+    check("a bookmark nothing has mounted offers the three that need no mount",
+          labels(Mounts.rowMenu(saved)), "Rename|Edit address|Remove from Network")
+    check("so it opens a menu where it used to open an empty one", Mounts.rowMenu(saved).filter(function (r) { return !r.separator }).length, 3)
+    check("but it has nothing to release, so Ctrl+E still says so", Eject.releaseFromRows(Mounts.railMenu(saved)), "")
+    check("a removable volume's menu is untouched", labels(Mounts.rowMenu(volume)), "Open|Eject")
+    check("and Ctrl+E picks Eject out of it", Eject.releaseFromRows(Mounts.railMenu(volume)), "eject")
+    // With showUnmounted on a removable volume offers both releases, and Ctrl+E takes Eject first.
+    var bothVolume = { path: "/run/media/gm/128GB", label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", mounted: true, removable: true, volumeMenu: true }
+    function entries(rows) { return rows.map(function (r) { return r.separator ? "-" : r.label }).join("|") }
+    check("a volume offering both releases draws Open, Unmount and Eject", entries(Mounts.rowMenu(bothVolume)), "Open|-|Unmount|Eject")
+    check("railMenu offers Ctrl+E those same rows", entries(Mounts.railMenu(bothVolume)), "Open|-|Unmount|Eject")
+    check("and Ctrl+E picks eject over unmountVolume", Eject.releaseFromRows(Mounts.railMenu(bothVolume)), "eject")
+    check("a favourite offers INVENTORY's own Remove from Favorites", labels(Mounts.rowMenu(favourite)), "Remove from Favorites")
     check("no entry at all offers nothing rather than throwing", Mounts.rowMenu(null).length, 0)
-    check("Remove draws the minus mark, because forgetting a place trashes nothing",
-          Mounts.rowMenu(saved)[1].glyph, "minus")
+    check("Remove from Network draws the minus mark, because forgetting a place trashes nothing",
+          Mounts.rowMenu(saved).filter(function (r) { return !r.separator })[2].glyph, "minus")
+    // Issue 21, TomFaulkner: Rename is the label and Edit address is the address, so they are two rows.
+    check("Rename is offered before Edit address, and the address is what it changes",
+          Mounts.rowMenu(saved).filter(function (r) { return !r.separator })[0].action + "|" + Mounts.rowMenu(saved).filter(function (r) { return !r.separator })[1].action, "rename|editPlace")
 
     // A chosen row arrives as its key, never its position: the rail rebuilds on a five second poll.
     function chose(action, key, entries) {
@@ -178,7 +192,7 @@ function run(check) {
         var mounts = { unmount: function (i) { log.push("unmount" + i) },
                        forget: function (uri) { log.push("forget " + uri) } }
         var devices = { eject: function (i) { log.push("eject" + i) } }
-        Mounts.release(action, key, devices, mounts, sidebar)
+        RailMenu.release(action, key, devices, mounts, sidebar)
         return log.join(",")
     }
     check("Rename resolves the network row past Places, including Trash",
@@ -191,6 +205,66 @@ function run(check) {
           chose("unmount", "smb://nas/isos/", [mounted, saved]), "unmount0")
     check("Eject still resolves through the device Service",
           chose("eject", "/dev/sda1", [mounted, saved]), "eject0")
+
+    // Issue 21: Edit asks the dialog to open over the place, and only a different address that
+    // actually mounted rewrites its line; a refused connect leaves the saved place exactly as it was.
+    function edited(uri, success, mountedUri) {
+        var asked = []
+        var sidebar = { placesEntries: [favourite, { kind: "trash" }], networkEntries: [mounted, saved],
+                        deviceEntries: [volume], editingPlace: "", navigationPane: "pane",
+                        startRename: function () {},
+                        editRequested: function (u, label, password, reason, failed, origin) {
+                            asked.push("open " + u + " as " + label + " over " + origin + ": " + reason)
+                        } }
+        var mounts = { unmount: function () {}, forget: function () {},
+                       replacePlace: function (was) { asked.push("replace " + was) } }
+        RailMenu.release("editPlace", uri, { eject: function () {} }, mounts, sidebar)
+        RailMenu.placeSubmitted(sidebar, "r1")
+        RailMenu.placeSaved(sidebar, mounts, "r1", mountedUri, success)
+        return asked
+    }
+    check("Edit opens the dialog over the place, with the line that says what to do",
+          edited("smb://nas/", false, "")[0],
+          "open smb://nas/ as NAS over pane: Edit this address, then connect and save.")
+    check("and the corrected address rewrites that place's own line",
+          edited("smb://nas/", true, "smb://nas2/data")[1], "replace smb://nas/")
+    check("an address that did not change rewrites nothing",
+          edited("smb://nas/", true, "smb://nas/").length, 1)
+    check("and a refused connect leaves the saved place alone",
+          edited("smb://nas/", false, "smb://nas2/data").length, 1)
+
+    // A refused connect is what this feature exists for, so the arm survives it: the same dialog is
+    // still open, and the attempt that finally mounts is the one that rewrites the line.
+    var armed = { placesEntries: [favourite, { kind: "trash" }], networkEntries: [mounted, saved],
+                  deviceEntries: [volume], editingPlace: "", navigationPane: "pane",
+                  startRename: function () {}, editRequested: function () {} }
+    var wrote = []
+    var writer = { unmount: function () {}, forget: function () {},
+                   replacePlace: function (was) { wrote.push(was) } }
+    RailMenu.release("editPlace", "smb://nas/", { eject: function () {} }, writer, armed)
+    // Only this edit's own attempt answers for it: a mount in flight when the rail armed carries
+    // another request, and so does one started from the dialog after this attempt was refused.
+    RailMenu.placeSaved(armed, writer, "older-request", "smb://stranger/share", true)
+    check("a mount already in flight when Edit armed rewrites nothing", wrote.join(","), "")
+    RailMenu.placeSubmitted(armed, "r0")
+    RailMenu.placeSaved(armed, writer, "another-request", "smb://stranger/share", true)
+    check("and neither does one that is not the attempt this dialog made", wrote.join(","), "")
+    check("both of which leave the place armed", armed.editingPlace, "smb://nas/")
+    RailMenu.placeSubmitted(armed, "r1")
+    RailMenu.placeSaved(armed, writer, "r1", "smb://nas2/data", false)
+    check("a refused attempt keeps the place armed", armed.editingPlace, "smb://nas/")
+    RailMenu.placeSubmitted(armed, "r2")
+    RailMenu.placeSaved(armed, writer, "r2", "smb://nas2/data", true)
+    check("and the attempt that mounts is the one that rewrites it", wrote.join(","), "smb://nas/")
+    check("which disarms it, so a later unrelated mount rewrites nothing", armed.editingPlace, "")
+    RailMenu.placeSaved(armed, writer, "r3", "smb://stranger/share", true)
+    check("proved by that later mount", wrote.join(","), "smb://nas/")
+    // ui/WindowBody.qml clears editingPlace when the dialog closes, so an abandoned Edit disarms too.
+    RailMenu.release("editPlace", "smb://nas/", { eject: function () {} }, writer, armed)
+    armed.editingPlace = ""
+    RailMenu.placeSubmitted(armed, "r4")
+    RailMenu.placeSaved(armed, writer, "r4", "smb://stranger/share", true)
+    check("an Edit nobody finished rewrites nothing either", wrote.join(","), "smb://nas/")
 
     // Sample input: the operator's own bookmarks file, favourites and places in one list.
     var body = "file:///home/gm/Downloads Downloads\nsmb://nas:445/isos NAS isos\nsmb://other/data Other\n"
@@ -206,4 +280,27 @@ function run(check) {
           Mounts.removeBookmark("  smb://nas/isos NAS\n", "smb://nas/isos"), "")
     check("an empty uri never empties the file", Mounts.removeBookmark(body, ""), body)
     check("no body at all answers nothing rather than throwing", Mounts.removeBookmark("", "smb://nas/isos/"), "")
+
+    // The two predicates that decide whether a password is demanded before a mount is attempted:
+    // credentialed says one may be given, keyless says one may not be needed at all. A public key
+    // opening a saved sftp place is the whole reason they differ; see AGENTS.md.
+    check("a user in the authority is what makes a place able to take a password",
+          Mounts.credentialed("sftp://tom@nas.test/home"), true)
+    check("and an sftp place without one has no password to belong to",
+          Mounts.credentialed("sftp://nas.test/home"), false)
+    check("every credentialed scheme but sftp has no keyless route to try first",
+          ["smb://tom@nas.test/data", "ftp://tom@nas.test/", "davs://tom@nas.test/d"].map(
+              function (uri) { return Mounts.keyless(uri) }).join("|"), "false|false|false")
+    check("sftp is the one scheme a key or an agent can answer, with or without a user",
+          [Mounts.keyless("sftp://tom@nas.test/home"), Mounts.keyless("sftp://nas.test/")].join("|"),
+          "true|true")
+    check("a scheme that is not network at all answers neither",
+          [Mounts.credentialed("file:///home/tom"), Mounts.keyless("file:///home/tom")].join("|"),
+          "false|false")
+    // Issue 194: dan's mount keeps its user; gio info may drop ,user=dan, so the repair scan picks the folder.
+    check("dan@ survives mount lines, rail keys, gio info and the FUSE match", [Mounts.parseMounts("Mount(0): test on 192.168.1.75 -> smb://dan@192.168.1.75/test/\n")[0].uri, Mounts.normalize("smb://dan@192.168.1.75/test/") === Mounts.normalize("smb://dan@192.168.1.75/test"), Mounts.localPath("uri: smb://dan@192.168.1.75/test/\nlocal path: /run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan\n"), Protocols.smbFuseMatches("smb://dan@192.168.1.75/test", "/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan"), Protocols.smbFuseMatches("smb://dan@192.168.1.75/test", "/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test"), Protocols.smbFuseMatches("smb://dan@192.168.1.75/Test", "/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan")].join("|"), "smb://dan@192.168.1.75/test/|true|/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan|true|false|true")
+    check("the user=dan folder answers though gio info dropped the user", Protocols.smbResolve("smb://dan@192.168.1.75/test", ["/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan"], "sam").path, "/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan")
+    check("a URI with no user takes the single matching entry", Protocols.smbResolve("smb://192.168.1.75/test", ["/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan"], "sam").path, "/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan")
+    check("several users prefer the desktop login", Protocols.smbResolve("smb://192.168.1.75/test", ["/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan", "/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=sam"], "sam").path, "/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=sam")
+    check("and name themselves when the login matches none", Protocols.smbResolve("smb://192.168.1.75/test", ["/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=dan", "/run/user/1000/gvfs/smb-share:server=192.168.1.75,share=test,user=sam"], "nobody").users.join(","), "dan,sam")
 }

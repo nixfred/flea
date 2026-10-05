@@ -13,8 +13,19 @@ pub struct Entry {
     pub uri: String,
 }
 
+// A test stands in for gio on its own thread, because a build container has no trash:// to list or restore.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STAND_IN: std::cell::RefCell<Option<std::rc::Rc<dyn Fn(&[&str]) -> Option<std::process::Output>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 // corner: gio on an unresponsive network mount can hang, which stalls this operation's own thread and nothing else.
 fn gio(args: &[&str]) -> Option<std::process::Output> {
+    #[cfg(test)]
+    if let Some(stand_in) = STAND_IN.with(|slot| slot.borrow().clone()) {
+        return stand_in(args);
+    }
     Command::new("gio").args(args).output().ok()
 }
 
@@ -54,15 +65,15 @@ pub fn trash(paths: &[PathBuf]) -> (Vec<Entry>, usize) {
 
 pub(crate) fn trash_checked(paths: &[PathBuf], selection: Option<&[super::menu_actions::Selected]>) -> Result<(Vec<Entry>, usize), String> {
     super::menu_actions::validate_sources(selection, paths)?;
-    // A path that is not on disk before the call is nothing this call trashed, so it is counted failed
-    // and never journaled: read as "gone, so it went" it became a Trashed step with no URI, and undo
-    // stopped on that step and left the rest of the batch in the trash. A stale listing is where such
-    // a path comes from, and the changed line is what refreshes it.
+    if paths.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    // Issue 88, nixfred: a path already gone before the call read as trashed afterwards and was
+    // journaled as a step with no trash entry, which is where undo stopped, so it is a failure here.
     let (present, missing): (Vec<&PathBuf>, Vec<&PathBuf>) =
         paths.iter().partition(|p| p.symlink_metadata().is_ok());
-    let mut failed = missing.len();
     if present.is_empty() {
-        return Ok((Vec::new(), failed));
+        return Ok((Vec::new(), missing.len()));
     }
     let before = list();
     let mut argv: Vec<String> = vec!["trash".to_string(), "--".to_string()];
@@ -75,6 +86,7 @@ pub(crate) fn trash_checked(paths: &[PathBuf], selection: Option<&[super::menu_a
     let _ = gio(&refs);
     let after = list();
     let mut ok = Vec::new();
+    let mut failed = missing.len();
     for p in present {
         if p.symlink_metadata().is_ok() {
             failed += 1;
@@ -83,7 +95,7 @@ pub(crate) fn trash_checked(paths: &[PathBuf], selection: Option<&[super::menu_a
         match newest_entry_for(&before, &after, p) {
             Some(e) => ok.push(e),
             // corner: the file went but gio listed no entry for it, so it is gone and simply not reversible.
-            None => ok.push(Entry { original: p.clone(), uri: String::new() }),
+            None => ok.push(Entry { original: (*p).clone(), uri: String::new() }),
         }
     }
     Ok((ok, failed))
@@ -118,16 +130,15 @@ fn err(msg: &str) -> FleaError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::testdir::TestDir;
 
-    // No gio runs for this one, because there is nothing on disk to hand it, so the test needs no trash.
+    // Issue 88, nixfred: a path the user's listing still names and the filesystem no longer has is a
+    // failure, so it never becomes a journal step that undo cannot reverse. tests/ops.sh drives the pair.
     #[test]
-    fn a_path_that_was_already_gone_is_a_failure_and_not_a_step_to_undo() {
-        let d = TestDir::new("trashgone");
-        let gone = d.join("never-existed.txt");
-        let (entries, failed) = trash(&[gone.clone(), d.join("nor-this")]);
-        assert!(entries.is_empty(), "nothing this call did not do can be undone");
-        assert_eq!(failed, 2);
+    fn paths_that_are_already_gone_are_failures_rather_than_trashed() {
+        let gone = vec![PathBuf::from("/nonexistent/flea-88-a.txt"), PathBuf::from("/nonexistent/flea-88-b.txt")];
+        let (entries, failed) = trash_checked(&gone, None).expect("a batch of missing paths is not an error");
+        assert!(entries.is_empty(), "nothing was trashed, so nothing is journaled");
+        assert_eq!(failed, 2, "both are counted as failures rather than as trashed");
     }
 
     #[test]

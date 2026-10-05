@@ -5,6 +5,13 @@
 // Split out of ui/js/Nav.js, which sits at the 300-line JS cap, the same way tests/js/watch.js was
 // split out of tests/js/nav.js; ui/js/Nav.js keeps navigation and this keeps the return.
 
+// ui/PaneWire.qml watchBusy: a re-read renumbers every row, so it waits while anything names a row by index or holds one open, the collision card's transfer too.
+function busy(pane) {
+    return !pane || pane.listInFlight || pane.renamingIndex >= 0 || pane.renamePending
+        || pane.menuVisible || pane.menuActions.opened || pane.filterTyping || pane.searchMode.length > 0
+        || pane.selectionCount() > 0 || pane.selectionBand !== null || pane.collide.pending !== null
+}
+
 // A change another program made under the open listing, unlike ui/js/Nav.js refresh() which follows
 // Flea's own write. The rows are read again and the cursor is put back on the file it was on by name,
 // because a create above it renumbers every row below and a listing that jumped back to the top
@@ -19,7 +26,12 @@ function watched(pane) {
 // follows without reaching for the mouse; reported 2026-09-11, "deleting one refreshes the entire
 // file list and loses my selection, so I have to start over". A delete that failed leaves the row
 // standing, and then the name matches and the cursor goes back exactly where it was.
-function afterDelete(pane) {
+function afterDelete(pane, landed) {
+    // A block leaves as a block, so the cursor belongs on the row the block left rather than on the
+    // row below wherever it sat inside it; a delete that failed keeps the row it was already on.
+    if (landed && pane.trashedFirst >= 0)
+        pane.cursorIndex = pane.trashedFirst
+    pane.trashedFirst = -1
     return anchoredRefresh(pane, true)
 }
 
@@ -32,11 +44,9 @@ function anchoredRefresh(pane, select) {
     // two below would otherwise put this directory's cursor row onto the next directory's listing.
     var anchor = { name: row ? String(row.n) : "", index: pane.cursorIndex, start: pane.held,
                    path: pane.path, select: select === true }
-    var query = pane.filterQuery
-    pane.openWithoutHistory(pane.path)
     // A filter narrows the rows the pane holds rather than choosing which directory it holds, so it
     // survives a re-read of the same directory; every other caller of openWithoutHistory drops it.
-    pane.filterQuery = query
+    pane.openWithoutHistory(pane.path, { keptQuery: pane.filterQuery })
     // The re-read answers from row 0, so a cursor deep in a large directory needs its own window back
     // before the anchor's name can be looked for anywhere near where it was.
     if (anchor.start > 0) {

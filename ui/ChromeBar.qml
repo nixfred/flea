@@ -1,7 +1,8 @@
 import QtQuick
 import qs.Commons
 import "." as Flea
-import "js/Nav.js" as Nav
+import "js/Buttons.js" as Buttons
+import "js/Crumbs.js" as Crumbs
 import "js/PathBar.js" as PathBar
 
 // The window's top chrome, per the canvas: where you are on the left, how you are looking at it on
@@ -10,6 +11,8 @@ Item {
     id: root
 
     property string path: ""
+    // True only when the drawn path's listing failed, so retyping it retries and all else is a no-op.
+    property bool pathFailed: false
     property string home: ""
     property bool canGoBack: false
     property bool canGoUp: false
@@ -20,6 +23,8 @@ Item {
     property bool showHidden: false
     property bool canFilter: false
     property bool canSort: false
+    // False while Quick Look is open: Qt 6 still hands a press beneath an accepted shield, so only handlers stop, never Item.enabled.
+    property bool inputLive: true
 
     signal backRequested()
     signal upRequested()
@@ -34,6 +39,14 @@ Item {
     signal editClosed()
     signal completeRequested(string dir, bool hidden)
     signal said(string text)
+    // The folder jump's one read per open, carried to the pane's backend like Tab's peek; see ui/PathJump.qml.
+    signal jumpRequested(int id, var favourites, var recent)
+    // Built by the first edit and kept for the window's life, so a bar never opened compiles none of it.
+    property bool jumpBuilt: false
+    readonly property var jump: jumpLoader.item
+    readonly property bool jumpShown: jumpLoader.item !== null && jumpLoader.item.shown
+    // Its dropdown hangs below the strip, so the strip rises over the tab bar and the listing while it shows.
+    z: root.jumpShown ? 1 : 0
     // The settings panel's pointer door, beside the comma key; see ui/shell.qml for the third.
     signal settingsRequested()
 
@@ -43,8 +56,15 @@ Item {
     // What the seam reads: the line as it stands, and the box a test double-clicks to open the bar.
     readonly property alias editText: field.text
     readonly property alias pathArea: pathArea
-    // The elided head's own marker, so a test can click the one spot the crumbs slide underneath.
-    readonly property alias elisionMarker: elision
+    // The collapsed middle's own crumb, so a test can press the one segment that names no directory. Its index moves with the room, because the crumbs nearest the root are put back before it.
+    readonly property int elisionIndex: {
+        for (var i = 0; i < crumbs.model.length; i++)
+            if (crumbs.model[i].elided)
+                return i
+        return -1
+    }
+    // itemAt is a call and not a property, so the model is named here too: without it a width that keeps the same index hands back the item the model before it built, which is by then destroyed.
+    readonly property var elisionMarker: root.elisionIndex >= 0 && crumbs.model ? crumbs.itemAt(root.elisionIndex) : null
     // Issue 45's segments as items, so tests/ui.sh can press one the way it presses a tab.
     readonly property alias crumbItems: crumbs
     // The directory a Tab is waiting on, and the one that came back. Both are keyed by the hidden
@@ -59,6 +79,8 @@ Item {
         if (root.editing) {
             return
         }
+        // The Loader below is synchronous, so the jump stands before this returns.
+        root.jumpBuilt = true
         root.editing = true
         // The trailing slash is what makes typing a child the natural next keystroke, and the line
         // opens selected, so a name typed straight away replaces it instead of joining onto it.
@@ -85,9 +107,8 @@ Item {
         var typed = field.text
         var target = PathBar.resolve(typed, root.path, root.home)
         root.closeEdit()
-        // An empty line closes the bar and nothing else, and so does the path already being shown:
-        // re-listing the directory under the cursor would drop the selection for no navigation.
-        if (target.length > 0 && target !== root.path) {
+        // An empty line closes the bar, and a settled path stays a no-op to keep the selection, while a failed or locked one retries.
+        if (PathBar.shouldNavigate(target, root.path, root.pathFailed)) {
             root.pathEntered(target)
             return
         }
@@ -159,7 +180,7 @@ Item {
 
     // A test drives these by coordinate, because a glyph button carries no text to find on screen.
     function buttonFor(glyph) {
-        var groups = [nav, views]
+        var groups = [nav, views, modes]
         for (var g = 0; g < groups.length; g++) {
             var kids = groups[g].children
             for (var i = 0; i < kids.length; i++) {
@@ -178,12 +199,14 @@ Item {
         spacing: Theme.spacing.gap
 
         Flea.ChromeButton {
+            inputLive: root.inputLive
             glyph: "arrow-left"
             enabled: root.canGoBack
             onActivated: root.backRequested()
         }
 
         Flea.ChromeButton {
+            inputLive: root.inputLive
             glyph: "arrow-up"
             enabled: root.canGoUp
             onActivated: root.upRequested()
@@ -221,7 +244,16 @@ Item {
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideLeft
             textFormat: Text.PlainText
-            TapHandler { onDoubleTapped: root.startEdit() }
+            TapHandler { enabled: root.inputLive; onDoubleTapped: root.startEdit() }
+        }
+
+        // One glyph's advance is every glyph's advance in this face, so the crumbs are fitted by
+        // character count rather than by a layout pass that would feed its own width back in.
+        TextMetrics {
+            id: crumbMetrics
+            font.family: Theme.font.family
+            font.pixelSize: Theme.font.caption
+            text: "0"
         }
 
         Item {
@@ -233,42 +265,19 @@ Item {
             Row {
                 id: crumbRow
                 anchors.verticalCenter: parent.verticalCenter
-                x: Math.min(0, crumbSlot.width - crumbRow.width)
 
                 Repeater {
                     id: crumbs
-                    model: Nav.crumbs(root.path, root.home)
+                    model: Crumbs.fitCrumbs(Crumbs.crumbs(root.path, root.home),
+                                         Math.floor(crumbSlot.width / crumbMetrics.advanceWidth))
 
-                    // corner: a path is arbitrary text, so PlainText, the same rule every filename on this surface follows.
-                    delegate: Text {
-                        id: crumb
-                        required property var modelData
-                        text: crumb.modelData.text
-                        color: crumb.modelData.last ? Theme.color.foreground : Theme.color.muted
-                        font.family: Theme.font.family
-                        font.pixelSize: Theme.font.caption
-                        textFormat: Text.PlainText
-                        // The box is the strip's height with the glyphs centred in it, because the
-                        // handlers below are the path area's whole gesture and a text-tall box left
-                        // 11 of the strip's 27 px dead, measured at the window.
+                    delegate: Flea.Crumb {
+                        inputLive: root.inputLive
+                        // The strip's height with the glyphs centred, because the crumb's handlers are the path area's
+                        // whole gesture and a text-tall box left 11 of the strip's 27 px dead, measured at the window.
                         height: crumbSlot.height
-                        verticalAlignment: Text.AlignVCenter
-
-                        HoverHandler {
-                            cursorShape: crumb.modelData.last ? Qt.IBeamCursor : Qt.PointingHandCursor
-                        }
-
-                        // Both flags together, measured on Qt 6.11.2: one of them alone suppresses
-                        // the other signal instead of waiting, and only the pair makes the tap count
-                        // decide, so a double click types the path rather than also navigating.
-                        // The gesture is on the crumb and not on the strip because a TapHandler on a
-                        // parent item takes the second tap away from the child under the pointer.
-                        TapHandler {
-                            acceptedButtons: Qt.LeftButton
-                            exclusiveSignals: TapHandler.SingleTap | TapHandler.DoubleTap
-                            onSingleTapped: if (!crumb.modelData.last) root.pathEntered(crumb.modelData.path)
-                            onDoubleTapped: root.startEdit()
-                        }
+                        onChosen: function (path) { root.pathEntered(path) }
+                        onEditRequested: root.startEdit()
                     }
                 }
             }
@@ -283,59 +292,39 @@ Item {
                 anchors.bottom: parent.bottom
 
                 HoverHandler {
+                    enabled: root.inputLive
                     cursorShape: Qt.IBeamCursor
                 }
 
                 TapHandler {
+                    enabled: root.inputLive
                     acceptedButtons: Qt.LeftButton
                     onDoubleTapped: root.startEdit()
                 }
             }
 
-            // The head that ran off the left, marked where the elided Text drew its own ellipsis; the
-            // fill behind it is the chrome's own colour, because the crumbs slide underneath it. It
-            // is the marker's box, and that box is the strip's height for the same reason a crumb's is.
-            Rectangle {
-                visible: elision.visible
-                anchors.fill: elision
-                color: Theme.color.surface
-
-                // The crumbs slide under this fill, so without a gesture of its own a press here
-                // opened whichever one had scrolled behind it, a directory nobody could see. A
-                // MouseArea and not a TapHandler: the default DragThreshold policy takes a passive
-                // grab, so the crumb underneath still tapped, measured on the box.
-                MouseArea {
-                    anchors.fill: parent
-                    onDoubleClicked: root.startEdit()
-                }
-            }
-
-            Text {
-                id: elision
-                visible: crumbRow.width > crumbSlot.width
-                anchors.left: parent.left
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                verticalAlignment: Text.AlignVCenter
-                text: "\u2026"
-                color: Theme.color.muted
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.caption
-                textFormat: Text.PlainText
-            }
         }
 
-        // The rename editor's own frame, at chrome scale: the accent says which strip has the
-        // keyboard, and the fill covers the two Texts underneath rather than relying on their visible.
+        // The rename editor's own frame covers the two Texts underneath at chrome scale.
         Rectangle {
             visible: root.editing
             anchors.fill: parent
             anchors.topMargin: Theme.spacing.hairline * 2
-            anchors.bottomMargin: Theme.spacing.hairline * 2
+            // One below against two above centres the field in the strip, which is the flush dropdown the Jump board draws.
+            anchors.bottomMargin: Theme.spacing.hairline
             color: Theme.color.background
             radius: Style.cornerRadius
             border.width: Theme.spacing.hairline
-            border.color: Theme.color.accent
+            border.color: Theme.color.muted
+            Rectangle {
+                anchors.fill: parent
+                anchors.margins: -Buttons.RING
+                color: "transparent"
+                border.width: Buttons.RING
+                border.color: Theme.color.foreground
+                radius: Style.cornerRadius
+                visible: field.activeFocus
+            }
         }
 
         // corner: a typed path is arbitrary text, so it is drawn at the same size the path it
@@ -354,6 +343,8 @@ Item {
             font.family: Theme.font.family
             font.pixelSize: Theme.font.caption
             clip: true
+            // The jump's dropdown takes the arrows and Enter first, and only while it is showing rows.
+            Keys.forwardTo: root.jump !== null ? [root.jump] : []
 
             // Every one of these is handled and accepted here, for the reason ui/RenameField.qml
             // gives: an unaccepted key goes on to the pane's own handler, which would read Return as
@@ -379,6 +370,41 @@ Item {
             // left standing over a window that has moved on would commit against the wrong directory.
             onActiveFocusChanged: if (!activeFocus && root.editing) root.closeEdit()
         }
+
+        // The Jump board's dropdown, flush under this field at its width from the path slot its Loader fills.
+        Loader {
+            id: jumpLoader
+            anchors.fill: parent
+            active: root.jumpBuilt
+            asynchronous: false
+            source: "PathJump.qml"
+        }
+        // Live bindings onto the lazy item, applied once it stands and kept after the bar closes.
+        Binding {
+            target: jumpLoader.item
+            property: "editing"
+            value: root.editing
+            when: jumpLoader.item !== null
+        }
+        Binding {
+            target: jumpLoader.item
+            property: "query"
+            value: field.text
+            when: jumpLoader.item !== null
+        }
+        Binding {
+            target: jumpLoader.item
+            property: "home"
+            value: root.home
+            when: jumpLoader.item !== null
+        }
+        Connections {
+            target: jumpLoader.item
+            function onRequested(id, favourites, recent) { root.jumpRequested(id, favourites, recent) }
+            function onDeclined() { root.commitEdit() }
+            function onDismissed() { root.closeEdit() }
+            function onChosen(path) { root.closeEdit(); if (PathBar.shouldNavigate(path, root.path, root.pathFailed)) root.pathEntered(path) }
+        }
     }
 
     Row {
@@ -389,12 +415,14 @@ Item {
         spacing: Theme.spacing.gap
 
         Flea.ChromeButton {
+            inputLive: root.inputLive
             visible: root.viewMode !== "grid"
             glyph: "search"
             onActivated: root.searchRequested()
         }
 
         Flea.ChromeButton {
+            inputLive: root.inputLive
             visible: root.viewMode === "grid"
             enabled: root.canFilter
             glyph: "filter"
@@ -403,6 +431,7 @@ Item {
         }
 
         Flea.ChromeButton {
+            inputLive: root.inputLive
             visible: root.viewMode === "grid"
             enabled: root.canSort
             glyph: "sort"
@@ -410,14 +439,11 @@ Item {
             onActivated: root.sortRequested()
         }
 
-        Repeater {
-            model: ["list", "columns", "grid", "dual"]
-            delegate: Flea.ChromeButton {
-                required property string modelData
-                glyph: modelData
-                active: root.viewMode === modelData
-                onActivated: root.viewChosen(modelData)
-            }
+        Flea.ChromeModes {
+            id: modes
+            inputLive: root.inputLive
+            viewMode: root.viewMode
+            onChosen: function (mode) { root.viewChosen(mode) }
         }
 
         // Row owns horizontal placement; the short Settings divider stays vertically centered.
@@ -430,6 +456,7 @@ Item {
         }
 
         Flea.ChromeButton {
+            inputLive: root.inputLive
             glyph: "sliders"
             onActivated: root.settingsRequested()
         }
@@ -445,4 +472,7 @@ Item {
         color: Theme.color.foreground
         opacity: 0.12
     }
+
+    // The pointer's title bar over the whole strip; the controls under it keep their own taps.
+    Flea.WindowDrag { anchors.fill: parent; editing: root.editing; inputLive: root.inputLive }
 }

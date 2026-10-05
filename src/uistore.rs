@@ -81,7 +81,7 @@ impl Store {
         let lock = take_lock(&self.lock)?;
         let next = change(&self.read())?;
         self.write(&next)?;
-        lock.unlock().map_err(|e| format!("{} could not be unlocked ({:?})", self.lock.display(), e.kind()))?;
+        unlock(&lock).map_err(|e| format!("{} could not be unlocked ({:?})", self.lock.display(), e.kind()))?;
         Ok(next)
     }
 
@@ -133,7 +133,7 @@ impl Store {
     }
 }
 
-fn state_home() -> Result<PathBuf, String> {
+pub(crate) fn state_home() -> Result<PathBuf, String> {
     Ok(state_dir(userfile::env_dir("XDG_STATE_HOME"), &userfile::home()?))
 }
 
@@ -143,7 +143,7 @@ fn state_dir(from_env: Option<PathBuf>, home: &Path) -> PathBuf {
     from_env.unwrap_or_else(|| home.join(".local").join("state"))
 }
 
-fn make_dir(dir: &Path) -> Result<(), String> {
+pub(crate) fn make_dir(dir: &Path) -> Result<(), String> {
     fs::DirBuilder::new()
         .recursive(true)
         .mode(OWNER_ONLY_DIR)
@@ -151,8 +151,18 @@ fn make_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("{} could not be created ({:?})", dir.display(), e.kind()))
 }
 
-// flock(2) through std: advisory, exclusive, cross-process, and released when this file closes or the process dies.
-fn take_lock(path: &Path) -> Result<fs::File, String> {
+// flock(2) numbers from Linux sys/file.h, the same on both supported architectures.
+const LOCK_EXCLUSIVE: i32 = 2;
+const LOCK_UNLOCK: i32 = 8;
+const LOCK_NONBLOCKING: i32 = 4;
+
+// std already links the system libc, so flock is declared here the way src/thp.rs declares prctl.
+extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
+
+// flock(2) through the declared symbol: advisory, exclusive, cross-process, and released when this file closes or the process dies.
+pub(crate) fn take_lock(path: &Path) -> Result<fs::File, String> {
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -162,9 +172,42 @@ fn take_lock(path: &Path) -> Result<fs::File, String> {
         .custom_flags(O_NOFOLLOW)
         .open(path)
         .map_err(|e| format!("{} could not be opened as the ui.json lock ({:?})", path.display(), e.kind()))?;
-    file.lock()
+    lock_exclusive(&file)
         .map_err(|e| format!("{} could not be locked ({:?})", path.display(), e.kind()))?;
     Ok(file)
+}
+
+// File::lock needs Rust 1.89 over the 1.77 floor; this is its single blocking exclusive flock.
+pub(crate) fn lock_exclusive(file: &fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    if unsafe { flock(file.as_raw_fd(), LOCK_EXCLUSIVE) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+// File::try_lock needs Rust 1.89 over the 1.77 floor; true is locked, false is held elsewhere.
+pub(crate) fn try_lock_exclusive(file: &fs::File) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    if unsafe { flock(file.as_raw_fd(), LOCK_EXCLUSIVE | LOCK_NONBLOCKING) } == 0 {
+        return Ok(true);
+    }
+    let failed = std::io::Error::last_os_error();
+    if failed.kind() == std::io::ErrorKind::WouldBlock {
+        return Ok(false);
+    }
+    Err(failed)
+}
+
+// File::unlock needs Rust 1.89 over the 1.77 floor; this is its flock release.
+pub(crate) fn unlock(file: &fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    if unsafe { flock(file.as_raw_fd(), LOCK_UNLOCK) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 // The state file's path is predictable and its bytes are the operator's only copy, so a link, a
@@ -186,7 +229,7 @@ fn read_write_target(path: &Path) -> Result<Option<String>, String> {
 }
 
 // AGENTS.md "Predictable path writes": unlink this pid's own leftover, create exclusively, rename last.
-fn replace(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn replace(path: &Path, text: &str) -> Result<(), String> {
     let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
     let _ = fs::remove_file(&tmp);
     let written = write_new(&tmp, text).and_then(|()| {
@@ -359,14 +402,14 @@ mod tests {
         let d = TestDir::new("uistore-settle");
         let s = store(&d);
         fs::create_dir_all(d.join("state").join("flea")).expect("state dir");
-        fs::write(s.file(), r#"{"columns":["name","size","owner"],"density":"compact","fromANewerFlea":{"a":1}}"#).expect("write");
+        fs::write(s.file(), r#"{"columns":["name","size","owner"],"density":"comfortable","fromANewerFlea":{"a":1}}"#).expect("write");
         s.settle().expect("settle");
         let body = fs::read_to_string(s.file()).expect("read back");
         assert!(!body.contains("owner"), "the refused column must not survive the settle: {}", body);
         let stored = jsondoc::parse(&body).expect("valid JSON on disk");
         let cols: Vec<&str> = stored.get("columns").and_then(Json::as_array).expect("columns").iter().filter_map(Json::as_str).collect();
         assert_eq!(cols, ["name", "size", "date"], "the refused array falls back to the shipped one");
-        assert_eq!(stored.get("density").and_then(Json::as_str), Some("compact"), "a good key beside it stands");
+        assert_eq!(stored.get("density").and_then(Json::as_str), Some("comfortable"), "a good key beside it stands");
         assert!(stored.get("fromANewerFlea").is_some(), "a newer Flea's own key still survives");
         let settled = fs::read_to_string(s.file()).expect("settled");
         let ino = fs::metadata(s.file()).expect("meta").ino();
@@ -454,7 +497,7 @@ mod tests {
         let s = store(&d);
         s.update(&patch(r#"{"view":"grid"}"#)).expect("seed");
         let holder = fs::OpenOptions::new().read(true).write(true).open(s.lock_file()).expect("open the lock");
-        holder.lock().expect("hold the lock");
+        lock_exclusive(&holder).expect("hold the lock");
         std::thread::scope(|scope| {
             let waiting = scope.spawn(|| s.update(&patch(r#"{"view":"columns"}"#)));
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -462,10 +505,24 @@ mod tests {
                 fs::read_to_string(s.file()).expect("during").contains("\"grid\""),
                 "the second writer must not have written while the lock was held"
             );
-            holder.unlock().expect("release");
+            unlock(&holder).expect("release");
             waiting.join().expect("thread").expect("update");
         });
         assert!(fs::read_to_string(s.file()).expect("after").contains("\"columns\""));
+    }
+
+    // try_lock_exclusive is what open_inactive reads a live Trash review through: false while held.
+    #[test]
+    fn a_nonblocking_lock_reports_a_held_lock_rather_than_waiting() {
+        let d = TestDir::new("uistore-trylock");
+        let s = store(&d);
+        s.update(&patch(r#"{"view":"grid"}"#)).expect("seed");
+        let held = take_lock(s.lock_file()).expect("hold the lock");
+        let probe = fs::OpenOptions::new().read(true).write(true).open(s.lock_file()).expect("open the lock");
+        assert!(!try_lock_exclusive(&probe).expect("a held lock answers"), "a lock another handle holds is not taken");
+        drop(held);
+        assert!(try_lock_exclusive(&probe).expect("a freed lock locks"), "a released lock is taken");
+        unlock(&probe).expect("release");
     }
 
     // No environment at all: XDG_CONFIG_HOME and XDG_STATE_HOME are process wide, cargo runs tests

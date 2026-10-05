@@ -125,6 +125,10 @@ pub struct Model {
     pub filter: String,
     pub restore_cursor: Option<usize>,
     pub restore_path: Option<PathBuf>,
+    // Set by a re-sort press, kept across its replies, spent by a cursor move, a new listing request or a -1 answer.
+    pub sort_anchor: Option<PathBuf>,
+    // Where settings persist; None in tests, so no test writes the user's state.
+    pub store: Option<crate::uistore::Store>,
     pub sheet_top: usize,
     pub transfer_id: usize,
     pub transfer_total: usize,
@@ -155,6 +159,10 @@ pub struct Model {
     pub restore_selection: BTreeSet<PathBuf>,
     pub restore_id: usize,
     pub delete_marks: BTreeMap<PathBuf, Row>,
+}
+// "Renamed 1 item · Undo reverts one", the bulk completion line next_rename reports.
+fn bulk_done_line(completed: usize, cancelled: bool) -> String {
+    format!("{} {} · Undo reverts one", if cancelled { "Stopped after renaming" } else { "Renamed" }, super::render::items(completed))
 }
 impl Model {
     pub fn new(path: PathBuf, settings: &Json) -> Self {
@@ -249,6 +257,8 @@ impl Model {
             filter: String::new(),
             restore_cursor: None,
             restore_path: None,
+            sort_anchor: None,
+            store: None,
             sheet_top: 0,
             transfer_id: 0,
             transfer_total: 0,
@@ -285,6 +295,8 @@ impl Model {
         if self.pending.is_some() {
             return Ok(());
         }
+        // Cleared on send: a late re-sort reply belongs to the old listing, and a re-sort sent after this names its own anchor.
+        self.sort_anchor = None;
         if self.cancel_taildrop() {
             wire.send(vec![("c", word("menuaction")), ("op", word("close")), ("id", number(self.action_id))])?;
         }
@@ -323,6 +335,7 @@ impl Model {
             self.searching = true;
             self.search = "Search: refreshing".into();
             self.invalidate_rows();
+            self.sort_anchor = None;
             wire.send(vec![("c", word("search")), ("path", word(&self.path.to_string_lossy())),
                 ("query", word(&self.search_query)), ("hidden", Json::Bool(self.hidden))])
         } else { self.open(self.path.clone(), wire) }
@@ -359,14 +372,14 @@ impl Model {
     pub fn next_rename(&mut self, wire: &mut Wire) -> io::Result<()> {
         let Some(batch) = self.bulk.take() else { return Ok(()); };
         if batch.send_next(wire, self.action_id)? {
-            self.transfer = format!("Renaming {} of {}", batch.completed + 1, batch.total);
+            self.transfer = format!("Renaming {} of {}", super::render::grouped(batch.completed + 1), super::render::grouped(batch.total));
             self.menu_action = "bulkRename".into();
             self.bulk = Some(batch);
         } else {
             self.transfer.clear();
             self.menu_action.clear();
             self.say(if batch.completed == 0 { if batch.cancelled { "Rename cancelled" } else { "No names changed" }.into() }
-                else { format!("{} {} items · Undo reverts one", if batch.cancelled { "Stopped after renaming" } else { "Renamed" }, batch.completed) });
+                else { bulk_done_line(batch.completed, batch.cancelled) });
             self.restore_path = batch.last;
             wire.send(vec![("c", word("menuaction")), ("op", word("close")), ("id", number(self.action_id))])?;
             self.refresh(wire)?;
@@ -558,6 +571,19 @@ impl Model {
                 self.total = count(&value, "n");
                 self.invalidate_rows();
                 self.cursor = self.cursor.min(self.total.saturating_sub(1));
+                // Only the anchor still waited for moves the cursor; a superseded or foreign reply leaves the wait alive.
+                if value.get("anchor").and_then(Json::as_str).is_some()
+                    && text(&value, "path") == self.path.to_string_lossy()
+                    && self.sort_anchor.as_ref().is_some_and(|waiting| waiting.to_string_lossy() == text(&value, "anchor"))
+                {
+                    let index = value.get("anchorIndex").and_then(Json::as_f64).unwrap_or(-1.0);
+                    if index >= 0.0 && index.fract() == 0.0 && index < self.total as f64 {
+                        self.cursor = index as usize;
+                    } else {
+                        // -1: the row is gone or hidden, so the anchor is spent and the clamped cursor stands.
+                        self.sort_anchor = None;
+                    }
+                }
                 let parent = self
                     .path
                     .parent()
@@ -672,7 +698,7 @@ impl Model {
                         (
                             "Entries",
                             if count(&value, "entries") > 0 {
-                                count(&value, "entries").to_string()
+                                super::render::grouped(count(&value, "entries"))
                             } else {
                                 String::new()
                             },
@@ -764,8 +790,8 @@ impl Model {
                     self.pending_clipboard = false;
                     self.clipboard = paths;
                     self.say(format!(
-                        "{} items {}",
-                        self.clipboard.len(),
+                        "{} {}",
+                        super::render::items(self.clipboard.len()),
                         if self.cut { "cut" } else { "copied" }
                     ));
                 }
@@ -777,9 +803,10 @@ impl Model {
                 self.total = count(&value, "n");
                 self.searching = text(&value, "t") == "searching";
                 self.search = format!(
-                    "Search: {} matches · {} scanned",
-                    self.total,
-                    count(&value, "scanned")
+                    "Search: {} {} · {} scanned",
+                    super::render::grouped(self.total),
+                    super::render::word(self.total, "match", "matches"),
+                    super::render::grouped(count(&value, "scanned"))
                 );
                 if !self.searching {
                     // Ranking changes every index; no action may use the discovery-order window.
@@ -863,26 +890,26 @@ impl Model {
                     "undone" => format!("Undid {}", text(&value, "op")),
                     "redone" => format!("Redid {} · Undo available", text(&value, "op")),
                     "trashed" => format!(
-                        "Moved {} items to Trash · Undo available",
-                        count(&value, "ok")
+                        "Moved {} to Trash · Undo available",
+                        super::render::items(count(&value, "ok"))
                     ),
                     _ => format!(
-                        "{} {} items{}",
+                        "{} {}{}",
                         if flag(&value, "cancelled") {
                             "Cancelled after"
                         } else {
                             "Transferred"
                         },
-                        count(&value, "ok"),
+                        super::render::items(count(&value, "ok")),
                         if count(&value, "skipped") > 0 {
-                            format!(" · {} skipped", count(&value, "skipped"))
+                            format!(" · {} skipped", super::render::grouped(count(&value, "skipped")))
                         } else {
                             String::new()
                         }
                     ),
                 });
                 if count(&value, "failed") > 0 {
-                    self.fail(format!("{} failed", count(&value, "failed")));
+                    self.fail(format!("{} failed", super::render::grouped(count(&value, "failed"))));
                 }
                 if matches!(operation, "renamed" | "made" | "duplicated") {
                     self.restore_path = Some(PathBuf::from(text(&value, "path")));
@@ -923,9 +950,10 @@ impl Model {
                 } else if flag(&value, "stale") {
                     self.say("Deletion cancelled".into());
                 } else {
-                    self.say(format!("Deleted {} of {}{}", count(&value, "deleted"), self.menu_count,
+                    self.say(format!("Deleted {} of {} {}{}", super::render::grouped(count(&value, "deleted")), super::render::grouped(self.menu_count),
+                        if self.menu_count == 1 { "item" } else { "items" },
                         if flag(&value, "cancelled") { " · Cancelled".into() } else { String::new() }));
-                    if count(&value, "failed") > 0 { self.fail(format!("{} failed · {}", count(&value, "failed"), text(&value, "error"))); }
+                    if count(&value, "failed") > 0 { self.fail(format!("{} failed · {}", super::render::grouped(count(&value, "failed")), text(&value, "error"))); }
                     let remaining: BTreeSet<PathBuf> = value.get("remaining").and_then(Json::as_array).unwrap_or(&[]).iter().filter_map(Json::as_str).map(PathBuf::from).collect();
                     self.restore_marks = std::mem::take(&mut self.delete_marks);
                     self.restore_marks.retain(|path, _| remaining.contains(path));
@@ -1065,6 +1093,51 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn counted_lines_read_singular_for_one() {
+        let (mut wire, reader) = crate::tui::wire::echo_wire();
+        let mut model = Model::new(PathBuf::from("/listing"), &Json::Null);
+        model.pending_clipboard = true;
+        model.receive(crate::jsondoc::parse(r#"{"t":"paths","paths":["/listing/a"]}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.message, "1 item copied");
+        model.search = "Search: stale".into();
+        model.receive(crate::jsondoc::parse(r#"{"t":"searched","n":1,"scanned":5}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.search, "Search: 1 match · 5 scanned");
+        model.receive(crate::jsondoc::parse(r#"{"t":"trashed","ok":1,"failed":0}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.message, "Moved 1 item to Trash · Undo available");
+        model.transfer_id = 7;
+        model.receive(crate::jsondoc::parse(r#"{"t":"transferdone","id":7,"ok":1,"failed":0,"skipped":0,"cancelled":false,"retryPaths":[],"durable":false,"note":""}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.message, "Transferred 1 item");
+        model.menu_action = "deleteRunning".into();
+        model.menu_count = 1;
+        model.receive(crate::jsondoc::parse(r#"{"t":"menuaction","op":"delete","id":0,"ok":true,"deleted":1,"failed":0,"remaining":[]}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.message, "Deleted 1 of 1 item");
+        assert_eq!(bulk_done_line(1, false), "Renamed 1 item · Undo reverts one");
+        crate::tui::wire::finish(wire, reader);
+    }
+    #[test]
+    fn counted_lines_read_plural_for_many() {
+        let (mut wire, reader) = crate::tui::wire::echo_wire();
+        let mut model = Model::new(PathBuf::from("/listing"), &Json::Null);
+        model.pending_clipboard = true;
+        model.cut = true;
+        model.receive(crate::jsondoc::parse(r#"{"t":"paths","paths":["/listing/a","/listing/b"]}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.message, "2 items cut");
+        model.search = "Search: stale".into();
+        model.receive(crate::jsondoc::parse(r#"{"t":"searched","n":2000,"scanned":3000}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.search, "Search: 2,000 matches · 3,000 scanned");
+        model.receive(crate::jsondoc::parse(r#"{"t":"trashed","ok":3,"failed":0}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.message, "Moved 3 items to Trash · Undo available");
+        model.transfer_id = 7;
+        model.receive(crate::jsondoc::parse(r#"{"t":"transferdone","id":7,"ok":1204,"failed":0,"skipped":0,"cancelled":false,"retryPaths":[],"durable":false,"note":""}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.message, "Transferred 1,204 items");
+        model.menu_action = "deleteRunning".into();
+        model.menu_count = 3;
+        model.receive(crate::jsondoc::parse(r#"{"t":"menuaction","op":"delete","id":0,"ok":true,"deleted":2,"failed":0,"remaining":[]}"#).unwrap(), &mut wire).unwrap();
+        assert_eq!(model.message, "Deleted 2 of 3 items");
+        assert_eq!(bulk_done_line(3, true), "Stopped after renaming 3 items · Undo reverts one");
+        crate::tui::wire::finish(wire, reader);
+    }
     #[test]
     fn listing_invalidation_cancels_pending_taildrop_intent() {
         let mut model = Model::new(PathBuf::from("/"), &Json::Null);

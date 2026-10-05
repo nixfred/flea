@@ -5,6 +5,7 @@ use crate::backend::thumbargv::argv;
 use crate::backend::thumbcache::{uri_for, Cache};
 use crate::backend::thumbspec::Thumbnailers;
 use crate::backend::thumbwrite::{exclusive_temp, stamp, write_marker};
+use crate::backend::workerlink::{worker_shape, WorkerLink};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -16,7 +17,7 @@ pub const MAX_QUEUE: usize = 70;
 // The freedesktop "large" size, which is what this box's cache holds.
 pub const THUMB_SIZE: u32 = 256;
 // A decoder that has not answered in this long is hung, and a hung child starves the pool.
-const JOB_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const JOB_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct Job {
     pub path: PathBuf,
@@ -58,12 +59,8 @@ pub struct Done {
     pub trace: Option<Trace>,
 }
 
-// Parsed once by the caller and shared from here, so no worker ever opens these files and four workers never read one of them four times.
-struct Tables {
-    aliases: Arc<Aliases>,
-    specs: Arc<Thumbnailers>,
-    cache: Cache,
-}
+// Parsed once by the caller and shared from here, so no pool thread reads these files again; the shelf's single job has no pool and so no worker.
+pub(crate) struct Tables { pub aliases: Arc<Aliases>, pub specs: Arc<Thumbnailers>, pub cache: Cache, pub worker: Option<WorkerLink> }
 
 type Shared = Arc<(Mutex<VecDeque<Job>>, Condvar)>;
 
@@ -74,7 +71,7 @@ pub struct Pool {
 impl Pool {
     // The cache root and both tables are the caller's: a test never writes into the operator's shared cache, and run.rs has already parsed these two files.
     pub fn new(workers: usize, results: Sender<Done>, root: PathBuf, aliases: Arc<Aliases>, specs: Arc<Thumbnailers>) -> Pool {
-        Pool::start(workers, results, Tables { aliases, specs, cache: Cache::at(root) })
+        Pool::start(workers, results, Tables { aliases, specs, cache: Cache::at(root), worker: Some(WorkerLink::new()) })
     }
 
     fn start(workers: usize, results: Sender<Done>, tables: Tables) -> Pool {
@@ -158,7 +155,8 @@ fn worker(inner: Shared, results: Sender<Done>, tables: Arc<Tables>) {
     }
 }
 
-fn run_one(tables: &Tables, job: &mut Job) -> Outcome {
+// pub(crate) so the shelf can run one job in its own thread: a bar widget has no listing and no pool.
+pub(crate) fn run_one(tables: &Tables, job: &mut Job) -> Outcome {
     let spec = match tables.specs.for_mime(&job.mime, &tables.aliases) {
         Some(s) => s,
         None => return Outcome::Failed,
@@ -187,11 +185,20 @@ fn run_one(tables: &Tables, job: &mut Job) -> Outcome {
         return discard(&temp);
     }
     // corner: a thumbnailer that wrote then renamed would fail against this file bind, and only glycin and ffmpegthumbnailer were probed; see AGENTS.md "Thumbnail pool".
-    let full = sandbox::wrap(&inner, &abs, &temp);
+    let mut full = sandbox::wrap(&inner, &abs, &temp);
+    sandbox::add_status(&mut full, inner.len());
     if let Some(t) = job.trace.as_mut() {
         t.spawned = t.at.elapsed();
     }
-    let ran = run_with_timeout(&full, JOB_TIMEOUT);
+    // A video the pre-linked worker can take goes there first; anything it does not finish runs the exec path as before.
+    let by_worker = match (&tables.worker, worker_shape(spec)) {
+        (Some(worker), Some(film_strip)) => worker.generate(&abs, &temp, THUMB_SIZE, film_strip, JOB_TIMEOUT),
+        _ => None,
+    };
+    let ran = match by_worker {
+        Some(ran) => ran,
+        None => run_with_timeout(&full, JOB_TIMEOUT),
+    };
     if let Some(t) = job.trace.as_mut() {
         t.exited = t.at.elapsed();
     }
@@ -263,7 +270,7 @@ mod tests {
             sandbox.assert_contains(sandbox.path());
             let inner = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
             let pool = Pool { inner: Arc::clone(&inner) };
-            let tables = Arc::new(Tables { aliases, specs, cache: Cache::at(sandbox.path().to_path_buf()) });
+            let tables = Arc::new(Tables { aliases, specs, cache: Cache::at(sandbox.path().to_path_buf()), worker: None });
             let (sender, receiver) = channel();
             let worker = std::thread::spawn(move || worker(inner, sender, tables));
             Self { sandbox, pool, receiver: Some(receiver), worker: Some(worker) }
@@ -393,9 +400,13 @@ mod tests {
         let done = fixture.receiver.as_ref().unwrap().recv_timeout(Duration::from_secs(10)).expect("no result");
         assert_eq!(done.path, PathBuf::from(MISSING));
         assert!(matches!(done.result, Outcome::Failed));
-        // A vanished input is not a broken file, so nothing is recorded and no temp is left behind.
+        // A vanished input is not a broken file; a box with no host thumbnailer never creates large/.
         let recorded = fixture.sandbox.join("fail").exists();
-        let left = std::fs::read_dir(fixture.sandbox.join("large")).unwrap().count();
+        let left = match std::fs::read_dir(fixture.sandbox.join("large")) {
+            Ok(entries) => entries.count(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => panic!("large/ could not be read: {}", e),
+        };
         assert!(!recorded, "a vanished input was recorded in fail/");
         assert_eq!(left, 0, "a temp file survived a failed job");
     }
@@ -405,6 +416,11 @@ mod tests {
         if crate::backend::sandboxprobe::skipped() { return; }
         let aliases = Arc::new(Aliases::load());
         let specs = Arc::new(Thumbnailers::load(&aliases));
+        // This one test needs a real host thumbnailer; a builder without one is told, not failed.
+        if specs.for_mime("image/png", &aliases).is_none() {
+            std::io::Write::write_all(&mut std::io::stderr(), b"SKIP backend::thumbs::tests::a_real_file_round_trips_to_a_stamped_cache_entry: no thumbnailer declares image/png here\n").ok();
+            return;
+        }
         let fixture = TestPool::new("thumbs-roundtrip", aliases, specs);
         let src = fixture.sandbox.join("in.png");
         // A real thumbnailer needs a real image, and the fail marker writer already makes the smallest valid one.

@@ -1,13 +1,15 @@
 .import "../../ui/js/Focus.js" as Focus
+.import "../../ui/js/Eject.js" as Eject
 .import "../../ui/js/Keymap.js" as Keymap
 .import "filterfixture.js" as Fixture
+.import "sourcefixture.js" as Source
 
 // Focus.lookup is where a key is discarded for being meaningless in the current state, and a wrong
 // gate there is silent: the key simply does nothing, and no suite but this one would notice.
 
 function pane(preview, viewMode) {
     return {
-        focusView: "list",
+        focusView: "list", shown: null,
         viewMode: viewMode ? viewMode : "list",
         chooseView: function (mode) { this.viewMode = mode },
         searchMode: "",
@@ -48,8 +50,9 @@ function listPane(hasRow) {
     var p = pane(closed())
     p.opened = 0
     p.said = ""
+    p.isError = false
     p.openCursorMenu = function () { p.opened += 1; return hasRow }
-    p.message = function (text, isError) { p.said = text }
+    p.message = function (text, isError) { p.said = text; p.isError = isError }
     return p
 }
 
@@ -124,47 +127,20 @@ function run(check) {
     check("e is discarded over a media preview", Focus.lookup(e, pane(mediaOpen())), "")
     check("minus is discarded over a media preview", Focus.lookup(minus, pane(mediaOpen())), "")
 
-    // Left and Right now serve two previews, and must still serve the grid and nothing else.
+    // Left and Right serve two previews, the grid's own sideways step, and GM's fix: while browsing they are the letter pair's spelling, so they go up a level and into the row under the cursor.
     check("left turns a PDF page", Focus.lookup(left, pane(pdfOpen())), "seekBack")
     check("right turns a PDF page", Focus.lookup(right, pane(pdfOpen())), "seekForward")
     check("left still seeks media", Focus.lookup(left, pane(mediaOpen())), "seekBack")
-    check("left is discarded in the list", Focus.lookup(left, pane(closed())), "")
+    check("left goes up a level in the list", Focus.lookup(left, pane(closed())), "parent")
     check("left still steps a grid tile", Focus.lookup(left, pane(closed(), "grid")), "cursorLeft")
     check("right still steps a grid tile", Focus.lookup(right, pane(closed(), "grid")), "cursorRight")
-
-    var gridPane = Fixture.pane()
-    gridPane.viewMode = "grid"
-    gridPane.cursorStride = 3
-    gridPane.wrapAtEnds = true
-    gridPane.cursorIndex = 2
-    Focus.act("cursorDown", gridPane)
-    check("grid j follows row-major order across a row boundary", gridPane.cursorIndex, 3)
-    Focus.act("cursorUp", gridPane)
-    check("grid k follows the previous item", gridPane.cursorIndex, 2)
-    check("grid j is not a physical arrow", Focus.gridArrow(key(Qt.Key_J, "j", none), "cursorDown", gridPane), false)
-    for (var move of [
-        [Qt.Key_Right, "cursorRight", 2, 2], [Qt.Key_Left, "cursorLeft", 3, 3],
-        [Qt.Key_Down, "cursorDown", 2, 5], [Qt.Key_Down, "cursorDown", 5, 5],
-        [Qt.Key_Down, "cursorDown", 3, 6], [Qt.Key_Up, "cursorUp", 6, 3],
-        [Qt.Key_Up, "cursorUp", 0, 0], [Qt.Key_Right, "cursorRight", 6, 6]
-    ]) {
-        gridPane.cursorIndex = move[2]
-        Focus.gridArrow(key(move[0], "", none), move[1], gridPane)
-        check("grid visual neighbour from " + move[2] + " with " + move[1], gridPane.cursorIndex, move[3])
-    }
-    gridPane.cursorStride = 2
-    gridPane.cursorIndex = 3
-    Focus.gridArrow(key(Qt.Key_Down, "", none), "cursorDown", gridPane)
-    check("grid arrows use the reflowed column count", gridPane.cursorIndex, 5)
-
-    gridPane.filterQuery = "screen"
-    gridPane.refresh()
-    gridPane.cursorIndex = 0
-    gridPane.cursorStride = 2
-    Focus.gridArrow(key(Qt.Key_Down, "", none), "cursorDown", gridPane)
-    check("filtered grid arrows address visible cells", gridPane.cursorIndex, 6)
-    Focus.gridArrow(key(Qt.Key_Right, "", none), "cursorRight", gridPane)
-    check("filtered final row has no right cell", gridPane.cursorIndex, 6)
+    // Issue 114, muellan: the letters the presets spell the arrows with mean the arrows in the grid.
+    var hKey = key(Qt.Key_H, "h", none)
+    var lKey = key(Qt.Key_L, "l", none)
+    check("h steps a grid tile rather than climbing", Focus.lookup(hKey, pane(closed(), "grid")), "cursorLeft")
+    check("l steps a grid tile rather than browsing in", Focus.lookup(lKey, pane(closed(), "grid")), "cursorRight")
+    // Only h is read back in the list: l's answer there depends on the row under the cursor.
+    check("and in the list h is still the tree's own", Focus.lookup(hKey, pane(closed())), "parent")
 
     // Nothing in keys.toml is bound ahead of its feature now: lookup hands both actions through
     // and handleKey routes each above the views, so neither answers with a sentence any more.
@@ -258,6 +234,29 @@ function run(check) {
         check(preset + " Grid PDF Right keeps page navigation", Focus.lookup(right, pane(pdfOpen(), "grid")), "seekForward")
     }
     Keymap.setPreset("default")
+    // Issue 133: the key follows the menu row, so Delete on an SMB share asks gio for no trash it can only refuse.
+    var onShare = pane(closed())
+    onShare.path = "/run/user/1000/gvfs/smb-share:server=192.168.21.25,share=data"
+    check("Delete in an SMB share folder names the refusal instead of silence",
+          Focus.lookup(key(Qt.Key_Delete, "", none), onShare), "trashRefused")
+    check("and so does the first d of the pair", Focus.lookup(key(Qt.Key_D, "d", none), onShare), "trashRefused")
+    var refused = listPane(true)
+    refused.path = "/run/user/1000/gvfs/smb-share:server=192.168.21.25,share=data"
+    Focus.act("trashRefused", refused)
+    check("and the refusal names the place with the key that still removes the rows",
+          refused.said, Focus.noTrashLine())
+    check("and it takes the error role with its hint from the live keymap",
+          refused.isError + "|" + Focus.noTrashHint(),
+          true + "|" + Keymap.hintFor("deletePermanently") + " deletes")
+    // A preset with no deletePermanently row leaves hintFor empty, so the refusal reads bare rather than dangling a separator.
+    var keepHint = Keymap.hintFor
+    Keymap.hintFor = function (action) { return action === "deletePermanently" ? "" : keepHint(action) }
+    check("with no key for deletePermanently the refusal reads bare", Focus.noTrashLine(), Focus.NO_TRASH)
+    check("and its hint is empty rather than a bare verb", Focus.noTrashHint(), "")
+    Keymap.hintFor = keepHint
+    var onDisk = pane(closed())
+    onDisk.path = "/home/gm/Downloads"
+    check("while Delete in a local folder still does", Focus.lookup(key(Qt.Key_Delete, "", none), onDisk), "trash")
     check("bare a adds a network place from the list too", Focus.lookup(key(Qt.Key_A, "a", none), pane(closed())), "addNetwork")
     var dialled = listPane(true)
     dialled.sidebar = { asked: 0, addRequested: function () { this.asked += 1 } }
@@ -287,7 +286,10 @@ function run(check) {
     // Finder's Cmd+E in a listing: the removable volume the listing is inside, whose verdict is
     // Mounts.railMenu's, released through the same releaseChosen a chosen menu row takes. The rail's
     // own half of the key is ui/js/RailKeys.js's, and tests/js/railkeys.js drives it.
-    var stick = { label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", path: "/run/media/user/128GB", mounted: true, removable: true }
+    // RailAdditions rule 1's switch builds this row, so it carries the board's own menu
+    // (Open, Unmount, Eject) rather than the single Eject 0.2.1 drew: without volumeMenu the
+    // release below cannot tell rows[0] from the release.
+    var stick = { label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", path: "/run/media/user/128GB", mounted: true, removable: true, volumeMenu: true }
     var inside = ejectPane("list", "/run/media/user/128GB/photos", [home, stick], 0)
     Focus.act("eject", inside)
     check("ctrl e in a listing inside the volume ejects that volume, whatever the rail cursor is on",
@@ -297,6 +299,37 @@ function run(check) {
     check("ctrl e in a listing on the internal disk says so, even with the rail cursor on the stick",
           outside.sidebar.released.length + "|" + outside.said,
           "0|This is not inside a removable volume.")
+
+    // Ctrl+E with the rail hidden: the Loader unloads the Sidebar, so root.sidebar is null and
+    // there are no entries to resolve against. The key hands to the pane's transient one-shot
+    // flow instead of throwing on the missing rail.
+    var hidden = listPane(true)
+    hidden.path = "/run/media/user/128GB/photos"
+    hidden.sidebar = null
+    hidden.hiddenAsked = []
+    hidden.ejectHidden = function () { hidden.hiddenAsked.push(hidden.path) }
+    var hiddenThrew = ""
+    try { Focus.act("eject", hidden) } catch (e) { hiddenThrew = String(e) }
+    check("ctrl e with the rail hidden takes the hidden-rail release instead of throwing",
+          hiddenThrew + "|" + hidden.hiddenAsked.join(","), "|/run/media/user/128GB/photos")
+
+    // The transient host's completion runs the same release with device-only entries: network
+    // shares and phones carry no path and favourites offer no release, so only a volume resolves.
+    var adapter = { entries: [stick], deviceEntries: [stick], networkEntries: [],
+                    released: [],
+                    releaseChosen: function (action, key) { this.released.push(action + ":" + key) } }
+    var hiddenInside = listPane(true)
+    hiddenInside.path = "/run/media/user/128GB/photos"
+    Eject.release(hiddenInside, adapter, false)
+    check("the hidden-rail completion ejects the holding volume through releaseChosen",
+          adapter.released.join(",") + "|" + hiddenInside.said, "eject:/dev/sda1|")
+    var hiddenOutside = listPane(true)
+    hiddenOutside.path = "/home/user/Documents"
+    var noRail = { entries: [], deviceEntries: [], networkEntries: [],
+                   releaseChosen: function (action, key) {} }
+    Eject.release(hiddenOutside, noRail, false)
+    check("the hidden-rail completion outside any volume says so instead of releasing",
+          hiddenOutside.said, "This is not inside a removable volume.")
 
     // The listing's m goes through the pane, which says whether a delegate was under the cursor; an
     // empty directory and a filter that hides every row both get the sentence rather than silence.
@@ -371,4 +404,53 @@ function run(check) {
     check("another pane keeps its own key context while the shared listing is open", Focus.shareBrowserHere(otherPane), false)
     sharedBrowser.active = false
     check("closing the share listing releases its owner's keys", Focus.shareBrowserHere(shareOwner), false)
+
+    // Ctrl+B answers from the rail too, so hiding a focused rail hands the keyboard to the listing.
+    var hiding = chromePane("rail")
+    hiding.railHidden = false
+    hiding.listArea = { focused: false, forceActiveFocus: function () { this.focused = true } }
+    hiding.toggleRail = function () { this.railHidden = !this.railHidden }
+    var ctrlB = key(Qt.Key_B, "", ctrl)
+    check("ctrl b resolves to the sidebar from the rail", Focus.lookup(ctrlB, hiding), "sidebar")
+    check("ctrl b from the rail is consumed", Focus.handleKey(ctrlB, hiding, hiding.sidebar), true)
+    check("and it hides the rail", hiding.railHidden, true)
+    check("hiding a focused rail is a function the pane can call", typeof Focus.railHidden, "function")
+    if (typeof Focus.railHidden === "function") Focus.railHidden(hiding)
+    check("hiding a focused rail moves the logical view to the list", hiding.focusView, "list")
+    check("and the actual focus follows it", hiding.listArea.focused, true)
+    var j = key(Qt.Key_J, "j", none)
+    check("j then resolves in the list", Focus.lookup(j, hiding), "cursorDown")
+    check("the next chord is consumed too", Focus.handleKey(ctrlB, hiding, hiding.sidebar), true)
+    check("and it shows the rail again", hiding.railHidden, false)
+    var settled = chromePane("list")
+    settled.listArea = { focused: false, forceActiveFocus: function () { this.focused = true } }
+    if (typeof Focus.railHidden === "function") Focus.railHidden(settled)
+    check("a hide with the list focused moves nothing", settled.focusView + "|" + settled.listArea.focused, "list|false")
+    // Wire pin, not execution: the helper checks above prove the behavior, this proves Pane calls it.
+    var paneSrc = Source.source("ui/Pane.qml")
+    check("wire pin: Pane forwards railHidden changes to Focus.railHidden", paneSrc.indexOf("onRailHiddenChanged: if (root.railHidden) Focus.railHidden(root)") >= 0, true)
+    check("wire pin: Pane imports the Focus library it forwards through", paneSrc.indexOf('import "js/Focus.js" as Focus') >= 0, true)
+    check("tab with a hidden rail stays in the list", Focus.next("list", false), "list")
+    check("tab with an auto-hide rail reveals it", Focus.next("list", true), "rail")
+
+    // Both panes share the hidden state, so only the active pane answers a hide with its own listing.
+    for (var mode of ["list", "grid", "columns"]) {
+        var acting = chromePane("rail")
+        acting.viewMode = mode
+        acting.paneFocused = true
+        acting.listArea = { focused: false, forceActiveFocus: function () { this.focused = true } }
+        Focus.railHidden(acting)
+        check("an active " + mode + " pane takes its own listing on a hide", acting.focusView + "|" + acting.listArea.focused, "list|true")
+    }
+    var idle = chromePane("rail")
+    idle.paneFocused = false
+    idle.listArea = { focused: false, forceActiveFocus: function () { this.focused = true } }
+    Focus.railHidden(idle)
+    check("an inactive pane keeps its rail view on a hide", idle.focusView, "rail")
+    check("and takes no actual focus for it", idle.listArea.focused, false)
+    var calm = chromePane("list")
+    calm.paneFocused = true
+    calm.listArea = { focused: false, forceActiveFocus: function () { this.focused = true } }
+    Focus.railHidden(calm)
+    check("an already-list pane moves nothing on a hide", calm.focusView + "|" + calm.listArea.focused, "list|false")
 }

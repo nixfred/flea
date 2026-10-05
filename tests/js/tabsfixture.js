@@ -1,40 +1,61 @@
-.pragma library
+.import "../../ui/js/Selection.js" as Selection
 
-// The stubs the tab suite's newer cases share, kept here the way filterfixture.js keeps the
-// filter suite's: tests/js/tabs.js sits at its file budget, and three cases needed the same
-// two-tab shape spelled out.
-
-// A pane standing in a search's results, which sets pane.path to the scope it walked and keeps the
-// directory the operator was in on searchFrom.
-function searching(p, from) {
-    p.searchMode = "results"
-    p.searchFrom = from
-    return p
-}
-
-// Two tabs with the second current, so selectAt(0) and closeAt(1) both land on the first.
-function twoTabs(p, a, b, extra) {
-    var first = { path: a, history: [], cursorIndex: 4, viewMode: "list", showHidden: false,
-                  selected: [], sortBy: "name", sortDesc: false }
-    for (var k in (extra || {})) first[k] = extra[k]
-    p.tabs = { items: [first, { path: b }], index: 1,
-               pendingCursor: -1, pendingSortBy: "", pendingSortDesc: false }
-    return p
-}
-
-// A pane searching from `from`, with a tab on `scope` to switch to or close onto.
-function searchingOnScope(p, scope, from) {
-    return twoTabs(searching(p, from), scope, from)
-}
-
-// Both tabs on one directory, the hidden one holding a selection made on listing 7. order is what
-// the hidden tab recorded, so "size" is the switch that has to re-sort and "name" the one that does not.
-function twin(p, order) {
-    twoTabs(p, "/tmp/same", "/tmp/same", { selected: [2, 3], listed: 7, sortBy: order })
-    p.backend.listRequests = 7
-    p.thumbState = "warm"
-    p.dirSizeState = "warm"
-    p.selection.toggle(2)
-    p.selection.toggle(3)
+// The stub pane both tab suites drive, kept here so neither owns it: tests/js/tabs.js covers the
+// tab list itself and tests/js/tabs-switch.js what a switch restores.
+function pane(path) {
+    var p = {
+        path: path || "/home/gm/Work",
+        home: "/home/gm",
+        history: ["/home/gm"],
+        cursorIndex: 4,
+        viewMode: "list",
+        showHidden: false,
+        // ViewState.state.hidden as ui/Pane.qml reads it: the standing preference, not this tab's.
+        preferenceHidden: false,
+        searchMode: "",
+        searchFrom: "",
+        searchQuery: "",
+        searchRunning: false,
+        searchCancelled: false,
+        searchScanned: 0,
+        filterQuery: "",
+        filterTyping: false,
+        listInFlight: false,
+        tabs: null,
+        total: 20,
+        windowSize: 40,
+        said: [],
+        listed: [],
+        sorted: [],
+        windows: [],
+        preview: { active: false, closed: 0, close: function () { this.active = false; this.closed += 1 } },
+        selection: Selection.create(),
+        selectionVersion: 0
+    }
+    p.selectedIndices = function () { return p.selection.indices() }
+    p.clearSelection = function () { p.selection.clear(); p.selectionVersion++ }
+    p.setCursor = function (i) { p.cursorIndex = i }
+    p.message = function (text) { p.said.push(text) }
+    // A new listing forgets the selection; without ui/Pane.qml's keepHidden it takes the dotfile answer the tab being left chose.
+    p.openWithoutHistory = function (next, options) {
+        if (!options || options.keepHidden !== true)
+            p.showHidden = p.preferenceHidden === true
+        p.clearedAtOnce = !!options && options.clearAtOnce === true
+        p.listed.push(next)
+        p.path = next
+        p.cursorIndex = 0
+        p.selection.clear()
+        p.selectionVersion++
+        p.backend.listRequests += 1
+    }
+    p.backend = {
+        sortBy: "name",
+        sortDesc: false,
+        // Every list bumps this, the watch's own re-read included: see ui/Backend.qml.
+        listRequests: 0,
+        sort: function (by, desc) { p.sorted.push(by + ":" + desc); this.sortBy = by; this.sortDesc = desc },
+        window: function (start, count) { p.windows.push(start + ":" + count) },
+        searchcancel: function () { p.searchRunning = false }
+    }
     return p
 }

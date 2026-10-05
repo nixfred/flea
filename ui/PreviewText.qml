@@ -1,7 +1,9 @@
 import QtQuick
 import Quickshell.Io
+import "." as Flea
 
-// Text previews: FileView reads the whole file, so a row over the gate is refused, not truncated.
+// Text previews: FileView reads the whole file, so a row over the gate is refused
+// on every class. Truncating would still read all of it first, a 2 GB log over SMB.
 Item {
     id: root
 
@@ -10,7 +12,10 @@ Item {
     property int size: 0
 
     // FileView reads the whole file into memory, so this is the largest read a preview will start.
-    readonly property int maxBytes: 1048576
+    // Remote storage keeps the smaller 256 KiB gate through maxBytes, and refuses past it too.
+    property int maxBytes: 1048576
+    // Retained for its callers; over-limit rows are refused, never truncated, so it reads nothing.
+    property bool truncate: false
     readonly property bool tooLarge: root.size > root.maxBytes
     property bool readFailed: false
 
@@ -42,6 +47,12 @@ Item {
 
         FastScrollHandler {
             parent: textFlick
+            flickable: textFlick
+        }
+
+        Flea.ViewportScrollBar {
+            parent: textFlick
+            anchors { top: parent.top; right: parent.right }
             flickable: textFlick
         }
 

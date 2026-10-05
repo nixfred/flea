@@ -460,8 +460,8 @@ permissions_eligibility() {
     permissions_expect selectionCount 2
     click_row "$first" right
     permissions_expect contextMenuVisible true
-    ipc contextMenuModel | jq -e 'any(.[]; .action == "permissions" and .disabled and .hint == "Unavailable")' >/dev/null \
-        || fail "permissions: multi-selection does not show the specified disabled entry"
+    ipc contextMenuModel | jq -e 'any(.[]; .action == "permissions" and .disabled and .errored and .hint == null)' >/dev/null \
+        || fail "permissions: multi-selection does not read red with no sentence"
     shot "permissions-$permissions_group-multiselection"
     index=$(menu_row_index Permissions)
     permissions_point "$(ipc contextMenuRowCentre "$index")"
@@ -471,8 +471,8 @@ permissions_eligibility() {
     before=$(stat -c '%d:%i:%u:%g:%a:%s' "$permissions_listing/notes.md")
     click_row "$(row_index_of link)" right
     permissions_expect contextMenuVisible true
-    ipc contextMenuModel | jq -e 'any(.[]; .action == "permissions" and .disabled and .hint == "Symlink target not changed")' >/dev/null \
-        || fail "permissions: symlink entry lacks its specific refusal"
+    ipc contextMenuModel | jq -e 'any(.[]; .action == "permissions" and .disabled and .errored and .hint == null)' >/dev/null \
+        || fail "permissions: symlink entry does not read red with no sentence"
     shot "permissions-$permissions_group-symlink"
     index=$(menu_row_index Permissions)
     permissions_point "$(ipc contextMenuRowCentre "$index")"
@@ -577,7 +577,7 @@ if [[ "$#" != 2 || "$1" != -p || "$2" != "$PERMISSIONS_UI" ]]; then exec "$PERMI
 exec bwrap --die-with-parent --unshare-user --bind / / --dev-bind /dev/dri /dev/dri --ro-bind "$PERMISSIONS_BIND_FILE" "$PERMISSIONS_BIND_FILE" -- "$PERMISSIONS_REAL_QS" "$@"
 SH
     chmod 0700 "$permissions_box/bin/qs" || fail "permissions: could not make the owned launcher executable"
-    export PERMISSIONS_REAL_QS="$real_qs" PERMISSIONS_UI="$flea_ui"
+    export PERMISSIONS_REAL_QS="$real_qs" PERMISSIONS_UI="$flea_ui/boot/shell.qml"
     export PERMISSIONS_BIND_ROOT="$permissions_box" PERMISSIONS_BIND_FILE="$permissions_listing/notes.md"
     permissions_guard "$PERMISSIONS_BIND_FILE"
     before=$(stat -c '%d:%i:%u:%g:%a:%s' "$PERMISSIONS_BIND_FILE")

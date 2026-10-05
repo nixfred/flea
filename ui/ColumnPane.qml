@@ -1,9 +1,13 @@
 import QtQuick
 import qs.Commons
 import "." as Flea
+import "js/ClipMarks.js" as ClipMarks
 import "js/Filter.js" as Filter
+import "js/ExtThumbs.js" as ExtThumbs
+import "js/Scroll.js" as Scroll
 import "js/Tap.js" as Tap
 import "js/Thumbs.js" as Thumbs
+import "js/DirSizes.js" as DirSizes
 
 // One Miller column: a scrolling list of ColumnRows over either a peeked directory or the pane's
 // own listing window. It owns no state; the area above it decides which row is which.
@@ -25,6 +29,18 @@ Item {
     property int lockedMode: -1
     // Whether zero rows here means empty: false while a peek is still out, because a pending peek answers zero rows too, and false for the pane's own listing, whose empty answer is the hero ui/shell.qml lays over the area.
     property bool drawsEmpty: false
+    // True when this column draws its size cell, the same flag its rows read as showSize.
+    readonly property bool showsSize: root.pane !== null && root.pane !== undefined
+    // One character budget for a row without the chevron, so a column lays its names out once.
+    readonly property int nameBudgetPlain: Theme.bodyAdvance > 0 ? Math.max(0, Math.floor((Scroll.contentWidth(root.width, Theme.spacing.rowPaddingX) - Theme.spacing.rowPaddingX - Theme.iconSize - Theme.spacing.gap - Theme.spacing.rowPaddingX - (root.showsSize ? Theme.column.size + 2 * Theme.spacing.gap : 0)) / Theme.bodyAdvance)) : -1
+    // The same terms plus the chevron slot, for the chosen directory alone.
+    readonly property int nameBudgetChevron: Theme.bodyAdvance > 0 ? Math.max(0, Math.floor((Scroll.contentWidth(root.width, Theme.spacing.rowPaddingX) - Theme.spacing.rowPaddingX - Theme.iconSize - Theme.spacing.gap - Theme.spacing.rowPaddingX - Theme.font.caption - (root.showsSize ? Theme.column.size + 2 * Theme.spacing.gap : 0)) / Theme.bodyAdvance)) : -1
+    // True for every shown pane but the rightmost one; the line sits on the pane edge and changes no width.
+    property bool showDivider: false
+    // Empty short-circuits before the library, the same rule ui/List.qml carries.
+    property bool clipEmpty: ClipMarks.isEmpty(root.pane ? root.pane.clipboard : null)
+    // The short-circuit above is the only release while empty, so a cut of a large directory frees its lookup here.
+    onClipEmptyChanged: { if (root.clipEmpty) ClipMarks.release() }
 
     // isDir says which of the two things a neighbour column's row is: a directory the pane opens as
     // its own listing, or a file it hands to the opener. See keys.toml's [[pointer]] table.
@@ -37,13 +53,17 @@ Item {
     signal backgroundMenuRequested(var eventPoint)
     // A right click on a peek's row: the peek's directory becomes the listing with this row as the cursor, and the menu opens there.
     signal neighbourMenuRequested(string name)
+    // A right click on a peek's empty space: the peek's drawn directory becomes the listing, and the background menu opens there once its rows land.
+    signal neighbourBackgroundRequested(var eventPoint)
     // The thumbnail plan for this column's viewport, computed here and written by the pane, the grid's own contract.
     signal thumbsApplied(var work)
+    signal dirSizesApplied(var ask)
 
     // The listArea contract ui/ColumnsArea.qml drives the middle column through; the view is private.
     function positionViewAtIndex(index, mode) { view.positionViewAtIndex(index, mode) }
     function itemAtIndex(index) { return view.itemAtIndex(index) }
     function contentY() { return view.contentY }
+    readonly property alias scrollBar: verticalScroll
     function restartSettle() { settle.restart() }
     function restartCoalesce() { coalesce.restart() }
     function primeSettle() { settle.interval = root.pane.firstSettleMs }
@@ -76,7 +96,7 @@ Item {
     // The viewport's rows and no more, rule 1: the same plan the list and the grid run, over this column's own scroll position.
     function requestThumbs() {
         // visible is effective visibility, so the column kept alive under another view plans nothing against the shared state.
-        if (root.pane === null || !root.visible || root.pane.total === 0 || root.pane.listInFlight)
+        if (root.pane === null || !root.visible || root.pane.total === 0 || root.pane.listInFlight || !root.pane.storageKnown)
             return
         var range = root.visibleRange()
         var span = Filter.span(root.pane.shown, range.first, range.last)
@@ -85,9 +105,29 @@ Item {
         // Only the loaded preview owns an off-viewport request; manual cursor movement asks nothing extra.
         work.drop = work.drop.filter(function (index) { return index !== root.pane.previewIndex })
         root.pane.backend.thumbcancel(work.drop)
-        root.pane.backend.thumb(work.ask)
+        work.cacheOnly = ExtThumbs.cacheOnly(root.pane.storageClass, ViewState.preview)
+        root.pane.backend.thumb(work.ask, work.cacheOnly)
         if (work.ask.length > 0) settle.interval = root.pane.settleMs
         root.thumbsApplied(work)
+    }
+
+    // The same viewport plan the list runs, over this column's own scroll position. Only the active
+    // column can ask: dirsize resolves against st.listing, which a peeked row has no index in.
+    function requestDirSizes() {
+        if (root.pane === null || !root.visible || root.pane.total === 0 || root.pane.listInFlight)
+            return
+        // The active column always draws its size, so only the class gate applies here.
+        if (!DirSizes.wantsSizes("columns", [], root.pane.storageClass, root.pane.storageKnown))
+            return
+        var range = root.visibleRange()
+        var span = Filter.span(root.pane.shown, range.first, range.last)
+        var ask = Filter.keep(DirSizes.plan(root.pane.dirSizeState, root.pane.rows, root.pane.held,
+            span.first, span.last, ViewState.thumbnailMode), root.pane.shown)
+        if (ask.length > 0) {
+            root.pane.backend.dirsize(ask)
+            settle.interval = root.pane.settleMs
+        }
+        root.dirSizesApplied(ask)
     }
 
     Connections {
@@ -106,7 +146,7 @@ Item {
         id: settle
         interval: root.pane ? root.pane.settleMs : 120
         repeat: false
-        onTriggered: root.requestThumbs()
+        onTriggered: { root.requestThumbs(); root.requestDirSizes() }
     }
     onRowsChanged: if (root.pane !== null) settle.restart()
     onVisibleChanged: if (root.visible && root.pane !== null) { coalesce.restart(); settle.restart() }
@@ -138,12 +178,19 @@ Item {
 
         // G7 needs an empty press target below the final row even when a long column fills the viewport.
         footer: Item {
-            width: view.width
+            width: Scroll.contentWidth(view.width, Theme.spacing.rowPaddingX)
             height: root.pane ? Theme.spacing.rowPaddingY : 0
         }
 
         Flea.FastScrollHandler {
             parent: view
+            flickable: view
+        }
+
+        Flea.ViewportScrollBar {
+            id: verticalScroll
+            parent: view
+            anchors { top: parent.top; right: parent.right }
             flickable: view
         }
 
@@ -153,14 +200,16 @@ Item {
             flickable: view
         }
 
-        // Empty space below the last row, the same rule ui/List.qml carries; pane is what says this
-        // column draws the pane's own listing rather than a peek.
+        // Empty space below the last row, the same rule ui/List.qml carries: the pane's own column answers at once while a peek navigates to its drawn directory first and opens its menu once the rows land.
         TapHandler {
             acceptedButtons: Qt.RightButton
             onTapped: function (eventPoint) {
-                if (root.pane !== null
-                        && view.indexAt(view.contentX + eventPoint.position.x, view.contentY + eventPoint.position.y) < 0)
+                if (!Tap.onBackground(view, eventPoint))
+                    return
+                if (root.pane !== null)
                     root.backgroundMenuRequested(eventPoint)
+                else
+                    root.neighbourBackgroundRequested(eventPoint)
             }
         }
 
@@ -168,12 +217,18 @@ Item {
             id: cell
             required property int index
             readonly property int listingIndex: root.pane ? Filter.at(root.pane.shown, index) : index
-            width: view.width
+            // Each column keeps the scroll lane clear, the same rule ui/List.qml follows.
+            width: Scroll.contentWidth(view.width, Theme.spacing.rowPaddingX)
+            paintWidth: view.width
             // A shrunk listing subscripts out of range under a delegate not yet released, and QML
             // hands that back as undefined; every row reader in the tree tests against a real null.
             row: root.pane ? root.pane.rowFor(listingIndex) : root.rows[index] !== undefined ? root.rows[index] : null
             thumb: root.pane !== null && Thumbs.allowed(row, ViewState.thumbnailMode) ? root.pane.thumbFor(listingIndex) : ""
+            showSize: root.showsSize
+            dirSize: root.pane !== null ? DirSizes.sizeFor(root.pane.dirSizeState, listingIndex) : null
             cursor: root.selectedIndex >= 0 && listingIndex === root.selectedIndex
+            // The clipboard mark is looked up only on the pane's own column, and never while it is empty.
+            clipMark: root.clipEmpty ? "" : (root.pane !== null ? ClipMarks.markForRow(root.pane, cell.row ? cell.row.n : "", root.pane.clipboard) : "")
             // The list and the grid both mark a selection member apart from the cursor; so does this.
             selected: root.pane !== null && root.pane.isSelected(listingIndex)
             dropTarget: dragSession.dropIndex >= 0 && listingIndex === dragSession.dropIndex
@@ -181,6 +236,8 @@ Item {
             // Read off the normalised row above: subscripting rows again hands a shrunk listing's undefined to a bool.
             lifted: root.liftedName.length > 0 && row !== null && row.n === root.liftedName
             dim: root.dim && !lifted
+            // The column's own budget, so no row measures its own text to elide it.
+            nameBudget: cell.showChevron ? root.nameBudgetChevron : root.nameBudgetPlain
 
             TapHandler {
                 id: tap
@@ -220,6 +277,14 @@ Item {
         total: root.rows.length
     }
 
+    // The column boundary, one per pane and never one per row; an inactive Loader builds no pane so draws none.
+    Flea.Divider {
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        visible: root.showDivider
+    }
+
     // corner: one editor for this column, never one inside each row. A delegate binding that follows
     // the pane's renamingIndex costs this column its keys, measured on the box: the comma that opens
     // Settings stopped reaching ui/js/Focus.js, which case_overlays catches. An overlay follows no
@@ -228,7 +293,7 @@ Item {
                                            ? Filter.viewOf(root.pane.shown, root.pane.renamingIndex) : -1
     readonly property bool renaming: root.renameViewIndex >= 0
     // What ui/Pane.qml's renameEditor() hands ui/Ipc.qml, the shape a list delegate hands it.
-    readonly property Item editorField: renameLoader.item
+    readonly property Item editorField: renameLoader.item as Item
     readonly property string editorText: renameLoader.item ? renameLoader.item.current : ""
     function commitEditor() { return renameLoader.item ? renameLoader.item.commit() : false }
 
@@ -244,7 +309,7 @@ Item {
         visible: root.renaming
         x: root.renameLeft
         y: root.renameViewIndex * Theme.fileRowHeight
-        width: Math.max(0, view.width - root.renameLeft - root.renameRight)
+        width: Math.max(0, Scroll.contentWidth(view.width, Theme.spacing.rowPaddingX) - root.renameLeft - root.renameRight)
         height: Theme.fileRowHeight
         z: 1
         color: Theme.color.surface
@@ -263,7 +328,7 @@ Item {
         active: root.renaming
         x: root.renameLeft
         y: root.renameViewIndex * Theme.fileRowHeight
-        width: Math.max(0, view.width - root.renameLeft - root.renameRight)
+        width: Math.max(0, Scroll.contentWidth(view.width, Theme.spacing.rowPaddingX) - root.renameLeft - root.renameRight)
         height: Theme.fileRowHeight
         z: 2
         sourceComponent: Flea.RenameField {

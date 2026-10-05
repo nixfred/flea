@@ -1,8 +1,10 @@
 import QtQuick
 
-// A name with the search or filter match run in the accent role. Three PlainText runs laid out
-// left to right, never StyledText: a filename is arbitrary text and StyledText would render any
-// markup found inside it.
+// A name with the search or filter match run marked by an accent wash. Three PlainText runs laid
+// out left to right, never StyledText: a filename is arbitrary text and StyledText would render any
+// markup found inside it. SearchFilter rule 3: the run keeps the foreground ink and the accent goes
+// behind it, because accent against foreground is under 1.5:1 on nine of the 22 installed palettes
+// and exactly 1.00 on kanagawa, where inked matches were the dimmest part of the name.
 Item {
     id: root
 
@@ -13,6 +15,8 @@ Item {
     property color color: Theme.color.foreground
     property color accent: Theme.color.accent
     property int pixelSize: Theme.font.body
+    // Opt-in middle elision, so the match run keeps its place.
+    property bool elideMiddle: false
 
     readonly property bool marked: root.matchStart >= 0 && root.matchLength > 0
     readonly property string before: root.marked ? root.text.substring(0, root.matchStart) : root.text
@@ -20,7 +24,8 @@ Item {
     readonly property string after: root.marked ? root.text.substring(root.matchStart + root.matchLength) : ""
 
     implicitHeight: beforeText.implicitHeight
-    implicitWidth: beforeText.implicitWidth + runText.implicitWidth + afterText.implicitWidth
+    // The marked run and its tail exist only while a match is marked, so their widths are the loaded item's.
+    implicitWidth: beforeText.implicitWidth + (markLoader.item ? markLoader.item.runsImplicitWidth : 0)
     clip: true
 
     Text {
@@ -32,36 +37,56 @@ Item {
         color: root.color
         font.family: Theme.font.family
         font.pixelSize: root.pixelSize
-        elide: Text.ElideRight
+        elide: root.elideMiddle && !root.marked ? Text.ElideMiddle : Text.ElideRight
         textFormat: Text.PlainText
         maximumLineCount: 1
     }
 
-    Text {
-        id: runText
+    // Built only while a match is marked: an unmarked name is the one run above, and most rows are unmarked.
+    Loader {
+        id: markLoader
+        active: root.marked
         anchors.left: beforeText.right
-        anchors.verticalCenter: parent.verticalCenter
-        width: Math.min(implicitWidth, Math.max(0, root.width - beforeText.width))
-        text: root.run
-        color: root.accent
-        font.family: Theme.font.family
-        font.pixelSize: root.pixelSize
-        elide: Text.ElideRight
-        textFormat: Text.PlainText
-        maximumLineCount: 1
-    }
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: Math.max(0, root.width - beforeText.width)
+        sourceComponent: Item {
+            readonly property real runsImplicitWidth: runText.implicitWidth + afterText.implicitWidth
 
-    Text {
-        id: afterText
-        anchors.left: runText.right
-        anchors.verticalCenter: parent.verticalCenter
-        width: Math.max(0, root.width - beforeText.width - runText.width)
-        text: root.after
-        color: root.color
-        font.family: Theme.font.family
-        font.pixelSize: root.pixelSize
-        elide: Text.ElideRight
-        textFormat: Text.PlainText
-        maximumLineCount: 1
+            Rectangle {
+                anchors.fill: runText
+                visible: runText.width > 0
+                // The accent carries the row dim, so the wash multiplies it instead of replacing it.
+                color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, root.accent.a * Theme.washActive)
+            }
+
+            Text {
+                id: runText
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.min(implicitWidth, parent.width)
+                text: root.run
+                color: root.color
+                font.family: Theme.font.family
+                font.pixelSize: root.pixelSize
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+                maximumLineCount: 1
+            }
+
+            Text {
+                id: afterText
+                anchors.left: runText.right
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.max(0, parent.width - runText.width)
+                text: root.after
+                color: root.color
+                font.family: Theme.font.family
+                font.pixelSize: root.pixelSize
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+                maximumLineCount: 1
+            }
+        }
     }
 }

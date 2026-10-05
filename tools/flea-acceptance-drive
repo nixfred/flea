@@ -1996,18 +1996,22 @@ menu_row_for() {
 # Sample inventory: ["delete", "Delete permanently", "trash", "F", "trash", "deletePermanently"].
 derive_menu_actions() {
   python3 - "$REPO/ui/js/Menu.js" <<'PY'
-import json, pathlib, sys
-source = pathlib.Path(sys.argv[1]).read_text()
+import json, pathlib, re, sys
+# The table carries its own comments, and a // line is not JSON: dropped before the decoder reads it.
+source = re.sub(r'^\s*//.*$', '', pathlib.Path(sys.argv[1]).read_text(), flags=re.M)
 def array(name):
     start = source.index('var ' + name + ' = ') + len('var ' + name + ' = ')
     return json.JSONDecoder().raw_decode(source[start:].lstrip())[0]
 seen, output = set(), []
-contexts = {'F': 'file', 'B': 'background', 'T': 'trash'}
+contexts = {'F': 'file', 'B': 'background', 'P': 'places', 'T': 'trash'}
 for row in array('INVENTORY'):
     if len(row) not in (5, 6) or row[0] in seen or not row[3]:
         raise SystemExit('invalid or duplicate Menu.INVENTORY row: ' + repr(row))
     seen.add(row[0])
     for context in row[3]:
+        # Rail rows (R) open from the sidebar, which tests/ui.sh's rail cases drive; this matrix drives listing menus.
+        if context == 'R':
+            continue
         fields = [row[0], row[5] if len(row) == 6 else row[0], row[1], contexts[context]]
         if any(not value or any(char in value for char in '|\r\n') for value in fields):
             raise SystemExit('unrepresentable Menu.INVENTORY row: ' + repr(row))
@@ -2212,7 +2216,7 @@ drive_menu_action() {
   local id action label rc row=$1
   IFS='|' read -r id action label DRIVE_MENU_CONTEXT <<< "$row"
   local name="$id/$DRIVE_MENU_CONTEXT/$action"
-  if [[ "$DRIVE_MENU_CONTEXT" == trash || "$DRIVE_MENU_CONTEXT" == header ]]; then
+  if [[ "$DRIVE_MENU_CONTEXT" == trash || "$DRIVE_MENU_CONTEXT" == header || "$DRIVE_MENU_CONTEXT" == places ]]; then
     skip menu "$name" "derived $label needs its own $DRIVE_MENU_CONTEXT native fixture and eligibility assertion"
     return
   fi
@@ -2225,6 +2229,9 @@ drive_menu_action() {
       return ;;
     sharelink)
       skip menu "$name" "the row appears only for a row already inside \$HOME/Dropbox, which this battery must not create"
+      return ;;
+    updateFlea)
+      skip menu "$name" "the row appears only once a check has found a newer Flea, and choosing it opens Omarchy's system update, which is not this battery's to run"
       return ;;
   esac
   if ! declare -F "menucase_$action" >/dev/null; then

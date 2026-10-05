@@ -44,18 +44,18 @@ fn value_start(line: &str, key: &str) -> Option<usize> {
     None
 }
 
-// Sample input: "/tmp/two\nlines" or "café", the value only, quotes included. The string itself is
-// read by src/jsonstring.rs, the one reader the whole-document side already has, so a \ud83d\udcc1
-// pair lands as the one character it names on this wire too: this scanner had its own copy of the
-// escapes that answered None to any surrogate, and a path holding one then read as absent, which
-// listed "" and trashed nothing without an error line to say so.
+// Sample input: "/tmp/two\nlines" or "café", the value only, quotes included.
 pub fn field_str(line: &str, key: &str) -> Option<String> {
     let start = value_start(line, key)?;
     let rest = line[start..].trim_start();
     if !rest.starts_with('"') {
         return None;
     }
-    crate::jsonstring::parse_string(rest.as_bytes(), &mut 0).ok()
+    // Issue 87, nixfred: this had its own copy of the escapes and called char::from_u32 on each four
+    // digit escape alone, so a surrogate half made the whole field answer None and its caller read
+    // that as absent. src/jsonstring.rs is the reader src/jsondoc.rs already uses, and it pairs them.
+    let mut at = 0;
+    crate::jsonstring::parse_string(rest.as_bytes(), &mut at).ok()
 }
 
 pub fn field_usize(line: &str, key: &str) -> Option<usize> {
@@ -178,21 +178,18 @@ mod tests {
         );
     }
 
-    // Python's json.dumps defaults to ensure_ascii, so a path holding a non-BMP character reaches this
-    // wire as a surrogate pair from any client but the QML one; it has to name the same file it would
-    // raw, and a pair inside an array element has to keep that element rather than drop it.
+    // Issue 87, nixfred: an ASCII-safe serializer writes a folder emoji as a surrogate pair, and a
+    // half is not a scalar value, so the whole field used to answer None and its caller read absent.
     #[test]
-    fn a_surrogate_pair_on_the_wire_is_one_character_and_the_field_is_not_lost() {
-        let line = r#"{"c":"list","path":"/home/gm/\ud83d\udcc1 Work","first":1}"#;
-        assert_eq!(field_str(line, "path").as_deref(), Some("/home/gm/\u{1F4C1} Work"));
-        let line = r#"{"c":"trash","paths":["/a","/home/gm/\ud83d\udcc1.txt","/z"]}"#;
-        assert_eq!(
-            field_str_array(line, "paths"),
-            vec!["/a".to_string(), "/home/gm/\u{1F4C1}.txt".to_string(), "/z".to_string()],
-            "the element with the pair is kept in its place"
-        );
-        // A half with no partner is the replacement character, the same answer the document reader gives.
-        assert_eq!(field_str(r#"{"path":"\ud83dx"}"#, "path").as_deref(), Some("\u{FFFD}x"));
+    fn a_surrogate_pair_on_the_wire_names_its_character() {
+        let line = r#"{"c":"list","path":"/x/\ud83d\udcc1 Work","first":1}"#;
+        assert_eq!(field_str(line, "path").as_deref(), Some("/x/\u{1F4C1} Work"));
+        let paths = r#"{"c":"trash","paths":["/a","/x/\ud83d\udcc1.txt"]}"#;
+        assert_eq!(field_str_array(paths, "paths"), vec!["/a".to_string(), "/x/\u{1F4C1}.txt".to_string()],
+            "an element that would not decode used to be dropped, and the trash answered ok for it");
+        let lone = r#"{"c":"list","path":"/x/\ud83d","first":1}"#;
+        assert_eq!(field_str(lone, "path").as_deref(), Some("/x/\u{FFFD}"),
+            "a half with no partner is the replacement character, which is what src/jsondoc.rs answers");
     }
 
     #[test]

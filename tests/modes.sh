@@ -10,8 +10,11 @@ BIN=./target/debug/flea
 [ -x "$BIN" ] || { echo "modes.sh: $BIN is missing, run cargo build" >&2; exit 1; }
 # current_exe() answers with the kernel's own resolved path, so the expectation is resolved the same way.
 BIN_REAL=$(readlink -f "$BIN")
+# Named, not re-derived from ui_dir's own walk, which an installed /usr/share/flea/ui outranks.
+UI_REAL=$(readlink -f .)/ui
 # An operator exporting any of these would answer for src/gui.rs, which is the thing under test here.
-unset QSG_RHI_BACKEND FLEA_RENDERER_AUTOMATIC VK_DRIVER_FILES VK_ICD_FILENAMES
+unset QSG_RHI_BACKEND FLEA_RENDERER_AUTOMATIC QT_VK_PHYSICAL_DEVICE_INDEX VK_DRIVER_FILES VK_ICD_FILENAMES QS_ICON_THEME FLEA_QT_THEME \
+  FLEA_PREFETCH FLEA_PREFETCH_SHELL
 fail=0
 
 check() {
@@ -130,15 +133,24 @@ grep -i "^THP_enabled" /proc/self/status
 printf 'FLEA_BIN %s\n' "$FLEA_BIN"
 printf 'RENDERER %s\n' "$QSG_RHI_BACKEND"
 printf 'AUTOMATIC %s\n' "${FLEA_RENDERER_AUTOMATIC-unset}"
+printf 'ICD %s\n' "${VK_ICD_FILENAMES-unset}"
+printf 'DRIVER_FILES %s\n' "${VK_DRIVER_FILES-unset}"
 printf 'ARGV %s\n' "$*"
 printf 'FLEA_PATH %s\n' "${FLEA_PATH-unset}"
 printf 'FLEA_SELECT %s\n' "${FLEA_SELECT-unset}"
+printf 'PLATFORM_THEME %s\n' "${QT_QPA_PLATFORMTHEME-unset}"
+printf 'PREFETCH %s\n' "${FLEA_PREFETCH-unset}"
+printf 'PREFETCH_SHELL %s %s\n' "${FLEA_PREFETCH_SHELL-unset}" "$$"
+printf 'ICON_THEME %s\n' "${QS_ICON_THEME-unset}"
+printf 'THEME_MARKER %s\n' "${FLEA_QT_THEME-unset}"
 STUB
 chmod +x "$D/qs"
-out=$(env FLEA_BIN=stale WAYLAND_DISPLAY=flea-modes-test-display PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+out=$(env FLEA_BIN=stale FLEA_UI="$UI_REAL" WAYLAND_DISPLAY=flea-modes-test-display PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
 check "the launched shell has transparent huge pages off" "1" \
   "$(echo "$out" | grep -c 'THP_enabled:[[:space:]]*0')"
 check "the launched shell reported its THP state at all" "1" "$(echo "$out" | grep -c 'THP_enabled')"
+# The entry is ui/boot/shell.qml and not the ui directory, because a document imports its own.
+check "the launch targets the boot entry" "ARGV -p $UI_REAL/boot/shell.qml" "$(echo "$out" | grep '^ARGV ')"
 # 24003ab made an explicit FLEA_BIN the operator's choice, the rule FLEA_UI and QSG_RHI_BACKEND
 # already follow, and this check was left asserting the behaviour that commit replaced. The launch
 # above sets one deliberately, so the operator's own value is what must reach the shell; the unset
@@ -149,6 +161,35 @@ check "the automatic renderer starts with Vulkan" "1" "$(echo "$out" | grep -c '
 check "the automatic renderer permits one fallback" "1" "$(echo "$out" | grep -c '^AUTOMATIC 1$')"
 # The downgrade below says why, so its silence here is what proves this arm took the probe's other branch.
 check "a loader that can deliver Vulkan says nothing" "0" "$(echo "$out" | grep -c 'Vulkan is unusable')"
+# A DRM card directory has no dash in its name; card1-DP-1 is one of its connectors.
+card_count=0
+for card in /sys/class/drm/card[0-9]*; do
+  # An unmatched glob arrives as its own literal, which is not a card and must not be counted.
+  [ -e "$card" ] || continue
+  case "${card##*/}" in *-*) continue ;; esac
+  card_count=$((card_count + 1))
+done
+# corner: a box with one DRM card cannot be hybrid, so the pin must stay silent on it.
+if [ "$card_count" = 1 ]; then
+  check "a single-GPU box leaves the loader's ICD list alone" "1" "$(echo "$out" | grep -c '^ICD unset$')"
+  check "a single-GPU box leaves the driver file list alone" "1" "$(echo "$out" | grep -c '^DRIVER_FILES unset$')"
+  check "a single-GPU box announces no display-GPU pin" "0" "$(echo "$out" | grep -c 'GPU with no display')"
+else
+  # corner: a multi-card box cannot be judged from here, so only the pin and the variables are held to agree.
+  if echo "$out" | grep -q 'GPU with no display'; then
+    check "an announced pin names an ICD file" "1" "$(echo "$out" | grep -c '^ICD /.*\.json')"
+    check "and an announced pin names a driver file" "1" "$(echo "$out" | grep -c '^DRIVER_FILES /.*\.json')"
+  else
+    check "an unannounced pin leaves the loader's ICD list alone" "1" "$(echo "$out" | grep -c '^ICD unset$')"
+    check "and leaves the driver file list alone" "1" "$(echo "$out" | grep -c '^DRIVER_FILES unset$')"
+  fi
+fi
+out=$(env VK_ICD_FILENAMES=/tmp/flea-operator-icd.json WAYLAND_DISPLAY=flea-modes-test-display PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "an explicit ICD list is preserved" "1" "$(echo "$out" | grep -c '^ICD /tmp/flea-operator-icd.json$')"
+check "and an explicit ICD list is not announced as a pin" "0" "$(echo "$out" | grep -c 'GPU with no display')"
+out=$(env VK_DRIVER_FILES=/tmp/flea-operator-driver.json WAYLAND_DISPLAY=flea-modes-test-display PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "an explicit driver file list is preserved" "1" "$(echo "$out" | grep -c '^DRIVER_FILES /tmp/flea-operator-driver.json$')"
+check "and an explicit driver file list is not announced as a pin" "0" "$(echo "$out" | grep -c 'GPU with no display')"
 out=$(env QSG_RHI_BACKEND=opengl FLEA_RENDERER_AUTOMATIC=stale WAYLAND_DISPLAY=flea-modes-test-display PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
 check "an explicit renderer is preserved" "1" "$(echo "$out" | grep -c '^RENDERER opengl$')"
 check "an explicit renderer cannot trigger fallback" "1" "$(echo "$out" | grep -c '^AUTOMATIC unset$')"
@@ -189,10 +230,85 @@ check "the fallback arm passes the same UI root" "$(echo "$good" | grep '^ARGV '
 check "and the fallback arm is the one that changed renderer" "1" "$(echo "$broken" | grep -c '^RENDERER opengl$')"
 check "and it is the only arm that reported a downgrade" "0" "$(echo "$good" | grep -c 'Vulkan is unusable')"
 
+
 # A launch with no FLEA_BIN in the environment is the ordinary one, and it must still name this binary.
 out=$(env -u FLEA_BIN WAYLAND_DISPLAY=flea-modes-test-display PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
 check "an unset FLEA_BIN is derived from the running binary" "FLEA_BIN $BIN_REAL" \
   "$(echo "$out" | grep '^FLEA_BIN ')"
+
+# The icon theme name is the one thing Flea took from gtk3, and Omarchy writes it here too.
+theme_home="$D/home"
+mkdir -p "$theme_home/.local/state/omarchy/current/theme"
+printf 'Yaru-blue\n' > "$theme_home/.local/state/omarchy/current/theme/icons.theme"
+out=$(env -u XDG_CACHE_HOME HOME="$theme_home" QT_QPA_PLATFORMTHEME=gtk3 WAYLAND_DISPLAY=flea-modes-test-display \
+  PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "the icon theme name reaches the shell" "ICON_THEME Yaru-blue" "$(echo "$out" | grep '^ICON_THEME ')"
+check "the prefetch list is named for the backend" "PREFETCH $theme_home/.cache/flea/prefetch" "$(echo "$out" | grep '^PREFETCH ')"
+# Sample line: "PREFETCH_SHELL 4242 4242", the pid the launcher named and the pid the stub runs as.
+own=$(echo "$out" | grep '^PREFETCH_SHELL ' | cut -d' ' -f3)
+check "and the shell is named by the pid exec kept" "PREFETCH_SHELL $own $own" "$(echo "$out" | grep '^PREFETCH_SHELL ')"
+check "and gtk3 does not" "PLATFORM_THEME unset" "$(echo "$out" | grep '^PLATFORM_THEME ')"
+
+out=$(env HOME="$theme_home" XDG_CACHE_HOME="$D/xdg-cache" WAYLAND_DISPLAY=flea-modes-test-display \
+  PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "an operator's XDG_CACHE_HOME holds the prefetch list" "PREFETCH $D/xdg-cache/flea/prefetch" "$(echo "$out" | grep '^PREFETCH ')"
+
+# An operator who named an icon theme keeps whatever platform theme they chose with it.
+out=$(env HOME="$theme_home" QT_QPA_PLATFORMTHEME=gtk3 QS_ICON_THEME=Papirus \
+  WAYLAND_DISPLAY=flea-modes-test-display PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "an operator's own icon theme is untouched" "ICON_THEME Papirus" "$(echo "$out" | grep '^ICON_THEME ')"
+check "and their platform theme survives with it" "PLATFORM_THEME gtk3" "$(echo "$out" | grep '^PLATFORM_THEME ')"
+check "and no trade was marked over it" "THEME_MARKER unset" "$(echo "$out" | grep '^THEME_MARKER ')"
+
+# Only gtk3 is traded. Another engine is the operator's own choice and must survive untouched.
+out=$(env HOME="$theme_home" QT_QPA_PLATFORMTHEME=qt6ct WAYLAND_DISPLAY=flea-modes-test-display \
+  PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "another platform theme is the operator's and survives" "PLATFORM_THEME qt6ct" "$(echo "$out" | grep '^PLATFORM_THEME ')"
+check "and no icon theme is named over it" "ICON_THEME unset" "$(echo "$out" | grep '^ICON_THEME ')"
+check "and nothing is marked as traded" "THEME_MARKER unset" "$(echo "$out" | grep '^THEME_MARKER ')"
+
+# The trade marks itself, which is what open.rs and terminal.rs read to hand the theme back.
+out=$(env HOME="$theme_home" QT_QPA_PLATFORMTHEME=gtk3 WAYLAND_DISPLAY=flea-modes-test-display \
+  PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "a traded theme says what it traded" "THEME_MARKER gtk3" "$(echo "$out" | grep '^THEME_MARKER ')"
+
+# An unreadable icons.theme is a read that failed, so the launch must be exactly today's.
+chmod 000 "$theme_home/.local/state/omarchy/current/theme/icons.theme"
+out=$(env HOME="$theme_home" QT_QPA_PLATFORMTHEME=gtk3 WAYLAND_DISPLAY=flea-modes-test-display \
+  PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "an unreadable icons.theme keeps the platform theme" "PLATFORM_THEME gtk3" "$(echo "$out" | grep '^PLATFORM_THEME ')"
+check "and names no icon theme from it" "ICON_THEME unset" "$(echo "$out" | grep '^ICON_THEME ')"
+check "and marks no trade it did not make" "THEME_MARKER unset" "$(echo "$out" | grep '^THEME_MARKER ')"
+chmod 644 "$theme_home/.local/state/omarchy/current/theme/icons.theme"
+
+# No HOME: no icons.theme, no cache for a list, and the prefetch pair a Flea terminal passes on never reaches the shell.
+out=$(env -u HOME -u XDG_CACHE_HOME FLEA_PREFETCH="$D/stale-list" FLEA_PREFETCH_SHELL=1 QT_QPA_PLATFORMTHEME=gtk3 WAYLAND_DISPLAY=flea-modes-test-display \
+  PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "no HOME keeps the platform theme" "PLATFORM_THEME gtk3" "$(echo "$out" | grep '^PLATFORM_THEME ')"
+check "and names no prefetch list" "PREFETCH unset" "$(echo "$out" | grep '^PREFETCH ')"
+check "and no shell to record it" "1" "$(echo "$out" | grep -c '^PREFETCH_SHELL unset ')"
+
+# A chooser started from a Flea terminal inherits both variables and must not record over the main window's list.
+out=$(env FLEA_PICKER='{"stub":true}' FLEA_PREFETCH="$D/stale-list" FLEA_PREFETCH_SHELL=1 FLEA_UI="$UI_REAL" \
+  WAYLAND_DISPLAY=flea-modes-test-display PATH="$D:/usr/bin:/bin" $BIN --pick "$D/reply.json" 2>&1 </dev/null)
+check "a chooser drops the prefetch list" "PREFETCH unset" "$(echo "$out" | grep '^PREFETCH ')"
+check "and the shell pid with it" "1" "$(echo "$out" | grep -c '^PREFETCH_SHELL unset ')"
+
+# No icons.theme is not an invitation to guess: the launch must be exactly today's.
+rm -f "$theme_home/.local/state/omarchy/current/theme/icons.theme"
+out=$(env HOME="$theme_home" QT_QPA_PLATFORMTHEME=gtk3 WAYLAND_DISPLAY=flea-modes-test-display \
+  PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "a box with no icons.theme keeps its platform theme" "PLATFORM_THEME gtk3" "$(echo "$out" | grep '^PLATFORM_THEME ')"
+check "and gets no icon theme of its own" "ICON_THEME unset" "$(echo "$out" | grep '^ICON_THEME ')"
+check "and marks no trade it did not make" "THEME_MARKER unset" "$(echo "$out" | grep '^THEME_MARKER ')"
+
+# An empty icons.theme is absent, the rule every other empty variable follows here.
+printf '\n' > "$theme_home/.local/state/omarchy/current/theme/icons.theme"
+out=$(env HOME="$theme_home" QT_QPA_PLATFORMTHEME=gtk3 WAYLAND_DISPLAY=flea-modes-test-display \
+  PATH="$D:/usr/bin:/bin" $BIN --gui 2>&1 </dev/null)
+check "an empty icons.theme keeps the platform theme" "PLATFORM_THEME gtk3" "$(echo "$out" | grep '^PLATFORM_THEME ')"
+check "and names no icon theme" "ICON_THEME unset" "$(echo "$out" | grep '^ICON_THEME ')"
+check "and marks no trade it did not make" "THEME_MARKER unset" "$(echo "$out" | grep '^THEME_MARKER ')"
 
 sandbox_remove "$D"
 
@@ -249,6 +365,12 @@ last_arg="$D/last-arg"
   printf 'exec >> %q 2>&1\n' "$opened"
   printf 'printf "PID %%s\\n" "$$"\n'
   printf 'printf "NARGS %%s\\n" "$#"\n'
+  printf 'printf "ICD %%s\\n" "${VK_ICD_FILENAMES-unset}"\n'
+  printf 'printf "DRIVER_FILES %%s\\n" "${VK_DRIVER_FILES-unset}"\n'
+  printf 'printf "PIN %%s\\n" "${FLEA_VK_PIN-unset}"\n'
+  printf 'printf "THEME %%s\\n" "${QT_QPA_PLATFORMTHEME-unset}"\n'
+  printf 'printf "ICON_THEME %%s\\n" "${QS_ICON_THEME-unset}"\n'
+  printf 'printf "THEME_MARKER %%s\\n" "${FLEA_QT_THEME-unset}"\n'
   printf 'printf "ARGV %%s\\n" "$*"\n'
   printf 'shift $(($# - 1)); printf "%%s" "$1" > %q\n' "$last_arg"
   printf 'P=$(cut -d" " -f5 /proc/self/stat)\n'
@@ -278,6 +400,7 @@ check "and the stub reported its process group at all" "1" "$(echo "$out" | grep
 # Nothing disabled huge pages in this process, so 1 is the untouched state and a stray disable would show.
 check "a plain --open leaves huge pages on" "1" "$(echo "$out" | grep -c '^THP_enabled:[[:space:]]*1')"
 check "and the stub reported its THP state at all" "1" "$(echo "$out" | grep -c 'THP_enabled')"
+
 # --open waits for the launcher, so by the time it returns the launcher has been reaped; a pid that
 # is still signalable is a gio left running for the life of the application it started.
 launcher_pid=$(echo "$out" | sed -n 's/^PID //p' | head -1)
@@ -297,6 +420,69 @@ lingering_pid=$(sed -n 's/^PID //p' "$lingered" | head -1)
 check "the lingering launcher reported a pid at all" "1" "$([ -n "$lingering_pid" ] && echo 1 || echo 0)"
 check "and --open waited for a launcher that outlived its own last write" "1" \
   "$([ -n "$lingering_pid" ] && ! kill -0 "$lingering_pid" 2>/dev/null && echo 1 || echo 0)"
+
+: > "$opened"
+# Flea's own pin carries a marker, and only a marked pin is taken back off a program Flea opens.
+VK_ICD_FILENAMES=/tmp/flea-pin-icd.json VK_DRIVER_FILES=/tmp/flea-pin-driver.json FLEA_VK_PIN=1 \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --open "$D/file.txt" 2>&1 | cat >/dev/null
+# The status wanted is the launcher's own, not cat's, which is 0 whatever happened upstream.
+check "the marked-pin open returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$opened" '^THP_enabled'
+out=$(cat "$opened")
+check "a marked pin is dropped from an opened program" "1" "$(echo "$out" | grep -c '^ICD unset$')"
+check "and its driver file list goes with it" "1" "$(echo "$out" | grep -c '^DRIVER_FILES unset$')"
+check "and the marker itself does not leak onward" "1" "$(echo "$out" | grep -c '^PIN unset$')"
+
+: > "$opened"
+# An operator's own list carries no marker, so it must survive into the program they open.
+VK_ICD_FILENAMES=/tmp/flea-operator-icd.json VK_DRIVER_FILES=/tmp/flea-operator-driver.json \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --open "$D/file.txt" 2>&1 | cat >/dev/null
+check "the operator-list open returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$opened" '^THP_enabled'
+out=$(cat "$opened")
+check "an operator's own ICD list reaches the opened program" "1" "$(echo "$out" | grep -c '^ICD /tmp/flea-operator-icd.json$')"
+check "and so does their own driver file list" "1" "$(echo "$out" | grep -c '^DRIVER_FILES /tmp/flea-operator-driver.json$')"
+
+: > "$opened"
+# An exported but empty marker is absent, so it must not turn an operator's own list into a pin.
+VK_ICD_FILENAMES=/tmp/flea-operator-icd.json VK_DRIVER_FILES=/tmp/flea-operator-driver.json FLEA_VK_PIN= \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --open "$D/file.txt" 2>&1 | cat >/dev/null
+check "the empty-marker open returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$opened" '^THP_enabled'
+out=$(cat "$opened")
+check "an empty marker leaves an operator's ICD list alone" "1" "$(echo "$out" | grep -c '^ICD /tmp/flea-operator-icd.json$')"
+check "and leaves their driver file list alone" "1" "$(echo "$out" | grep -c '^DRIVER_FILES /tmp/flea-operator-driver.json$')"
+
+: > "$opened"
+# What the launcher traded for its own startup, the program it opens gets back, and nothing else.
+env -u QT_QPA_PLATFORMTHEME QS_ICON_THEME=Yaru-blue FLEA_QT_THEME=gtk3 \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --open "$D/file.txt" 2>&1 | cat >/dev/null
+check "the traded-theme open returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$opened" '^THP_enabled'
+out=$(cat "$opened")
+check "an opened program gets the traded platform theme back" "THEME gtk3" "$(echo "$out" | grep '^THEME ')"
+check "and not the icon theme Flea named for Quickshell" "ICON_THEME unset" "$(echo "$out" | grep '^ICON_THEME ')"
+check "and not the marker that said so" "THEME_MARKER unset" "$(echo "$out" | grep '^THEME_MARKER ')"
+
+: > "$opened"
+# No marker is no trade, so an operator's own platform theme reaches the program they opened.
+env QT_QPA_PLATFORMTHEME=qt6ct QS_ICON_THEME=Papirus \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --open "$D/file.txt" 2>&1 | cat >/dev/null
+check "the untraded open returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$opened" '^THP_enabled'
+out=$(cat "$opened")
+check "an unmarked launch leaves the platform theme alone" "THEME qt6ct" "$(echo "$out" | grep '^THEME ')"
+check "and leaves an operator's own icon theme alone" "ICON_THEME Papirus" "$(echo "$out" | grep '^ICON_THEME ')"
+
+: > "$opened"
+# An exported but empty marker is absent, the rule the pin marker beside it already follows.
+env QT_QPA_PLATFORMTHEME=qt6ct QS_ICON_THEME=Papirus FLEA_QT_THEME= \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --open "$D/file.txt" 2>&1 | cat >/dev/null
+check "the empty-theme-marker open returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$opened" '^THP_enabled'
+out=$(cat "$opened")
+check "an empty theme marker hands nothing back" "THEME qt6ct" "$(echo "$out" | grep '^THEME ')"
+check "and leaves the icon theme it found alone" "ICON_THEME Papirus" "$(echo "$out" | grep '^ICON_THEME ')"
 
 : > "$opened"
 PATH="$D/bin:/usr/bin:/bin" $BIN --open "$D/linkfile" >/dev/null 2>&1
@@ -402,6 +588,12 @@ ran="$D/ran.log"
   printf 'printf "FD1 %%s\\n" "$(readlink /proc/$$/fd/1)" >> %q\n' "$ran"
   printf 'exec >> %q 2>&1\n' "$ran"
   printf 'printf "NARGS %%s\\n" "$#"\n'
+  printf 'printf "ICD %%s\\n" "${VK_ICD_FILENAMES-unset}"\n'
+  printf 'printf "DRIVER_FILES %%s\\n" "${VK_DRIVER_FILES-unset}"\n'
+  printf 'printf "PIN %%s\\n" "${FLEA_VK_PIN-unset}"\n'
+  printf 'printf "THEME %%s\\n" "${QT_QPA_PLATFORMTHEME-unset}"\n'
+  printf 'printf "ICON_THEME %%s\\n" "${QS_ICON_THEME-unset}"\n'
+  printf 'printf "THEME_MARKER %%s\\n" "${FLEA_QT_THEME-unset}"\n'
   printf 'printf "ARGV %%s\\n" "$*"\n'
   printf 'P=$(cut -d" " -f5 /proc/self/stat)\n'
   printf '[ "$$" = "$P" ] && printf "PGID MATCH pid=%%s pgid=%%s\\n" "$$" "$P" || printf "PGID MISMATCH pid=%%s pgid=%%s\\n" "$$" "$P"\n'
@@ -427,6 +619,68 @@ check "and the stub reported its process group at all" "1" "$(echo "$out" | grep
 # Nothing disabled huge pages in this process, so 1 is the untouched state and a stray disable would show.
 check "a plain --terminal leaves huge pages on" "1" "$(echo "$out" | grep -c '^THP_enabled:[[:space:]]*1')"
 check "and the stub reported its THP state at all" "1" "$(echo "$out" | grep -c 'THP_enabled')"
+
+: > "$ran"
+# Flea's own pin carries a marker, and only a marked pin is taken back off a terminal Flea opens.
+VK_ICD_FILENAMES=/tmp/flea-pin-icd.json VK_DRIVER_FILES=/tmp/flea-pin-driver.json FLEA_VK_PIN=1 \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --terminal "$D/dir" 2>&1 | cat >/dev/null
+# Same reason as the open path's marker arms: cat's status says nothing about the launcher.
+check "the marked-pin terminal returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$ran" '^THP_enabled'
+out=$(cat "$ran")
+check "a marked pin is dropped from a terminal" "1" "$(echo "$out" | grep -c '^ICD unset$')"
+check "and its driver file list goes with it" "1" "$(echo "$out" | grep -c '^DRIVER_FILES unset$')"
+check "and the marker does not leak into the terminal" "1" "$(echo "$out" | grep -c '^PIN unset$')"
+
+: > "$ran"
+# An operator's own list carries no marker, so it must survive into the terminal they open.
+VK_ICD_FILENAMES=/tmp/flea-operator-icd.json VK_DRIVER_FILES=/tmp/flea-operator-driver.json \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --terminal "$D/dir" 2>&1 | cat >/dev/null
+check "the operator-list terminal returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$ran" '^THP_enabled'
+out=$(cat "$ran")
+check "an operator's own ICD list reaches the terminal" "1" "$(echo "$out" | grep -c '^ICD /tmp/flea-operator-icd.json$')"
+check "and so does their own driver file list" "1" "$(echo "$out" | grep -c '^DRIVER_FILES /tmp/flea-operator-driver.json$')"
+
+: > "$ran"
+# Both spawn sites reach one shared guard, pin_is_marked, so each needs this arm of its own.
+VK_ICD_FILENAMES=/tmp/flea-operator-icd.json VK_DRIVER_FILES=/tmp/flea-operator-driver.json FLEA_VK_PIN= \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --terminal "$D/dir" 2>&1 | cat >/dev/null
+check "the empty-marker terminal returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$ran" '^THP_enabled'
+out=$(cat "$ran")
+check "an empty marker leaves an operator's ICD list alone in a terminal" "1" "$(echo "$out" | grep -c '^ICD /tmp/flea-operator-icd.json$')"
+check "and leaves their driver file list alone in a terminal" "1" "$(echo "$out" | grep -c '^DRIVER_FILES /tmp/flea-operator-driver.json$')"
+
+: > "$ran"
+# The same hand-back on the terminal path, which carries its own copy of these guards.
+env -u QT_QPA_PLATFORMTHEME QS_ICON_THEME=Yaru-blue FLEA_QT_THEME=gtk3 \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --terminal "$D/dir" 2>&1 | cat >/dev/null
+check "the traded-theme terminal returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$ran" '^THP_enabled'
+out=$(cat "$ran")
+check "a terminal gets the traded platform theme back" "THEME gtk3" "$(echo "$out" | grep '^THEME ')"
+check "and not the icon theme Flea named for Quickshell" "ICON_THEME unset" "$(echo "$out" | grep '^ICON_THEME ')"
+check "and not the marker that said so" "THEME_MARKER unset" "$(echo "$out" | grep '^THEME_MARKER ')"
+
+: > "$ran"
+# No marker is no trade here either, and an exported empty one is absent.
+env QT_QPA_PLATFORMTHEME=qt6ct QS_ICON_THEME=Papirus \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --terminal "$D/dir" 2>&1 | cat >/dev/null
+check "the untraded terminal returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$ran" '^THP_enabled'
+out=$(cat "$ran")
+check "an unmarked terminal keeps the platform theme" "THEME qt6ct" "$(echo "$out" | grep '^THEME ')"
+check "and keeps an operator's own icon theme" "ICON_THEME Papirus" "$(echo "$out" | grep '^ICON_THEME ')"
+
+: > "$ran"
+env QT_QPA_PLATFORMTHEME=qt6ct QS_ICON_THEME=Papirus FLEA_QT_THEME= \
+  PATH="$D/bin:/usr/bin:/bin" $BIN --terminal "$D/dir" 2>&1 | cat >/dev/null
+check "the empty-theme-marker terminal returned success" "0" "${PIPESTATUS[0]}"
+wait_for_line "$ran" '^THP_enabled'
+out=$(cat "$ran")
+check "an empty theme marker hands nothing back to a terminal" "THEME qt6ct" "$(echo "$out" | grep '^THEME ')"
+check "and leaves the icon theme it found alone" "ICON_THEME Papirus" "$(echo "$out" | grep '^ICON_THEME ')"
 
 : > "$ran"
 PATH="$D/bin:/usr/bin:/bin" $BIN --terminal "$D/linkdir" >/dev/null 2>&1
@@ -539,6 +793,91 @@ check "--default refuses when its desktop entry is not installed" "1" "$rc"
 check "and names what is missing" "1" "$(echo "$out" | grep -c 'is not installed')"
 check "and mimeapps.list is never created" "0" "$([ -e "$D/config/mimeapps.list" ] && echo 1 || echo 0)"
 check "and bindings.lua is left untouched" "-- stock omarchy bindings" "$(cat "$D/config/hypr/bindings.lua")"
+sandbox_remove "$D"
+
+# At a terminal --picker restarts the portal as Settings does; piped, it leaves that to its caller.
+D="$FIXTURE_ROOT/flea-portal-restart-test-$$"
+sandbox_make "$D"
+mkdir -p "$D/data/xdg-desktop-portal/portals" "$D/config/hypr" "$D/bin"
+: > "$D/data/xdg-desktop-portal/portals/flea.portal"
+printf -- '-- stock omarchy bindings\n' > "$D/config/hypr/bindings.lua"
+# Sample input: systemctl --user try-restart xdg-desktop-portal.service
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/restarts"\nexit "$(cat "%s/restart-status")"\n' "$D" "$D" > "$D/bin/systemctl"
+# hyprctl unreachable, so the float block is written but the operator's own Hyprland is never reloaded.
+printf '#!/bin/sh\nexit 1\n' > "$D/bin/hyprctl"
+chmod 755 "$D/bin/systemctl" "$D/bin/hyprctl"
+echo 0 > "$D/restart-status"
+picker_env=(env XDG_DATA_HOME="$D/data" XDG_DATA_DIRS="$D/no-such-data-dir" XDG_CONFIG_HOME="$D/config" XDG_CURRENT_DESKTOP=Hyprland
+  PATH="$D/bin:/usr/bin:/bin")
+# script(1) runs the command on a pseudo-terminal; the first argument is shell redirection applied inside it.
+at_terminal() { local redirect=$1; shift; script -qec "$(printf '%q ' "${picker_env[@]}" "$BIN_REAL" "$@") $redirect" /dev/null </dev/null | tr -d '\r'; }
+restarts() { cat "$D/restarts" 2>/dev/null | wc -l | tr -d ' '; }
+restarted="xdg-desktop-portal restarted if it was running, so file dialogs follow now"
+at_startup="xdg-desktop-portal reads this at startup: systemctl --user restart xdg-desktop-portal"
+command -v script >/dev/null || check "script(1) is installed for the terminal cases" "yes" "no"
+out=$("${picker_env[@]}" "$BIN_REAL" --picker 2>&1 </dev/null)
+check "a piped --picker claims" "1" "$(grep -c 'flea;gtk, written to' <<<"$out")"
+check "a piped --picker restarts nothing" "0" "$(restarts)"
+check "and ends on the restart command instead" "$at_startup" "$(grep '^xdg-desktop-portal ' <<<"$out")"
+out=$(at_terminal "" --picker off)
+check "--picker off at a terminal restarts the portal once, with the switch's exact command" \
+  "--user try-restart xdg-desktop-portal.service" "$(cat "$D/restarts" 2>/dev/null)"
+check "and says file dialogs follow now" "$restarted" "$(grep '^xdg-desktop-portal ' <<<"$out")"
+# Only stdout decides: a terminal on stdin and stderr with stdout in a file is a script capturing it.
+at_terminal "> $(printf '%q' "$D/captured")" --picker >/dev/null
+check "a terminal run whose stdout is redirected restarts nothing" "1" "$(restarts)"
+check "and its captured output names the restart command" "$at_startup" "$(grep '^xdg-desktop-portal ' "$D/captured")"
+out=$(at_terminal "</dev/null 2>/dev/null" --picker off)
+check "stdout on a terminal restarts, whatever stdin and stderr are" "2" "$(restarts)"
+check "and says so" "$restarted" "$(grep '^xdg-desktop-portal ' <<<"$out")"
+echo 1 > "$D/restart-status"
+out=$(at_terminal "" --picker)
+check "a refused restart is still tried once" "3" "$(restarts)"
+check "and ends on the restart command, not a claim it happened" "$at_startup" "$(grep '^xdg-desktop-portal ' <<<"$out")"
+# A desktop-specific portals.conf is the one user file the portal reads, so the claim edits it and off restores it.
+echo 0 > "$D/restart-status"
+shadow="$D/config/xdg-desktop-portal/hyprland-portals.conf"
+nautilus=$'[preferred]\ndefault=hyprland;gtk\norg.freedesktop.impl.portal.FileChooser=gnome;gtk\n'
+printf '%s' "$nautilus" > "$shadow"
+out=$(at_terminal "" --picker)
+check "the claim names the desktop file it wrote" "1" "$(grep -c 'written to .*hyprland-portals.conf, the file xdg-desktop-portal reads on this desktop' <<<"$out")"
+check "and the backend it replaced" "1" "$(grep -c 'it named gnome;gtk before, and the undo below puts that back' <<<"$out")"
+check "the desktop file now routes the chooser to flea" "1" "$(grep -cx 'org.freedesktop.impl.portal.FileChooser=flea;gtk' "$shadow")"
+check "and keeps the note naming what it replaced" "1" "$(grep -cx '# flea replaced: org.freedesktop.impl.portal.FileChooser=gnome;gtk' "$shadow")"
+check "and keeps its default line" "1" "$(grep -cx 'default=hyprland;gtk' "$shadow")"
+check "a routed claim at a terminal restarts the portal" "4" "$(restarts)"
+check "and says file dialogs follow now" "$restarted" "$(grep '^xdg-desktop-portal ' <<<"$out")"
+check "an older Flea's portals.conf line is still there before the undo" "1" "$(grep -cx 'org.freedesktop.impl.portal.FileChooser=flea;gtk' "$D/config/xdg-desktop-portal/portals.conf")"
+# The undo reads the directory, not the session: an off run over ssh has no XDG_CURRENT_DESKTOP.
+no_desktop=(env -u XDG_CURRENT_DESKTOP)
+for setting in "${picker_env[@]:1}"; do [ "$setting" = XDG_CURRENT_DESKTOP=Hyprland ] || no_desktop+=("$setting"); done
+out=$(script -qec "$(printf '%q ' "${no_desktop[@]}" "$BIN_REAL" --picker off)" /dev/null </dev/null | tr -d '\r')
+check "--picker off puts the replaced backend back byte for byte" "${nautilus}x" "$(cat "$shadow"; printf x)"
+check "and says so, without the session's desktop to name the file" "1" "$(grep -c 'gnome;gtk put back in .*hyprland-portals.conf' <<<"$out")"
+check "and removes the portals.conf an older Flea left, naming it" "1" "$(grep -c 'portals.conf held nothing else, so it is gone' <<<"$out")"
+check "which is gone" "no" "$([ -e "$D/config/xdg-desktop-portal/portals.conf" ] && echo yes || echo no)"
+check "and restarts the portal once more" "5" "$(restarts)"
+# Without the session's desktop a claim cannot tell which file the portal reads, so it refuses before either half writes.
+binds_before=$(cat "$D/config/hypr/bindings.lua"; printf x)
+out=$(script -qec "$(printf '%q ' "${no_desktop[@]}" "$BIN_REAL" --picker); echo rc=\$?" /dev/null </dev/null | tr -d '\r')
+check "a claim with no desktop named beside a desktop file refuses" "1" "$(grep -c 'XDG_CURRENT_DESKTOP is not set, so it is unknown whether .*hyprland-portals.conf is the file this desktop reads' <<<"$out")"
+check "and exits 1" "1" "$(grep -cx 'rc=1' <<<"$out")"
+check "and leaves that file as it was" "${nautilus}x" "$(cat "$shadow"; printf x)"
+check "and writes no picker window rule into bindings.lua" "$binds_before" "$(cat "$D/config/hypr/bindings.lua"; printf x)"
+check "and writes no portals.conf behind it" "no" "$([ -e "$D/config/xdg-desktop-portal/portals.conf" ] && echo yes || echo no)"
+check "and restarts nothing" "5" "$(restarts)"
+# With no desktop named and no desktop file, portals.conf is the only user file the portal can read.
+rm "$shadow"
+out=$(script -qec "$(printf '%q ' "${no_desktop[@]}" "$BIN_REAL" --picker); echo rc=\$?" /dev/null </dev/null | tr -d '\r')
+check "a claim with no desktop named and no desktop file writes portals.conf" "1" "$(grep -c 'flea;gtk, written to .*/xdg-desktop-portal/portals.conf' <<<"$out")"
+check "and exits 0" "1" "$(grep -cx 'rc=0' <<<"$out")"
+check "and restarts the portal" "6" "$(restarts)"
+# The routing alone decides: a claim whose float block fails (no bindings.lua) still exits 1 but restarts.
+rm "$D/config/hypr/bindings.lua"
+out=$(at_terminal "" --picker)
+check "a routed claim whose window half failed names that failure" "1" "$(grep -c 'bindings.lua could not be read' <<<"$out")"
+check "and still restarts the portal" "7" "$(restarts)"
+check "and says file dialogs follow now" "$restarted" "$(grep '^xdg-desktop-portal ' <<<"$out")"
 sandbox_remove "$D"
 
 # An unknown flag is a usage error naming the flag, never a silent fallthrough.

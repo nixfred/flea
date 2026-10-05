@@ -21,7 +21,7 @@ function run(check) {
     check("the chosen folder opens when nothing was named",
           Startup.startPath(chosen, HOME, ""), "/home/gm/Work")
 
-    // "Last folder" reads the path ui/shell.qml records as the pane moves.
+    // "Last folder" reads the path ui/WindowBody.qml records as the pane moves.
     var last = { startIn: "last", lastPath: "/home/gm/Pictures/2026" }
     check("last folder opens where the pane was left", Startup.startPath(last, HOME, ""), "/home/gm/Pictures/2026")
 
@@ -54,4 +54,30 @@ function run(check) {
     // refuses anything but a place or "", so what reaches here is a string or an absent key.
     check("a null recorded path falls back to home",
           Startup.startPath({ startIn: "last", lastPath: null }, HOME, ""), HOME)
+
+    // A saved dual view and a command-line folder: the focused side takes the folder and the other keeps its own.
+    var pair = function(dual, start, named) {
+        var answer = Startup.dualPaths(dual, start, named)
+        return answer.paths.join(" | ") + " @" + answer.launchSide
+    }
+    var saved = { paths: ["/home/gm/Music", "/home/gm/Work"], focus: 0 }
+    check("with nothing named a saved pair opens as it was left",
+          pair(saved, HOME, ""), "/home/gm/Music | /home/gm/Work @-1")
+    check("a named folder goes to the left side when it had focus",
+          pair(saved, "/tmp/asked", "/tmp/asked"), "/tmp/asked | /home/gm/Work @0")
+    check("a start folder the named one did not come from is left behind, not launched",
+          pair(saved, "/home/gm/Pictures", "/tmp/asked"), "/tmp/asked | /home/gm/Work @0")
+    check("and to the right side when it had focus",
+          pair({ paths: saved.paths, focus: 1 }, "/tmp/asked", "/tmp/asked"), "/home/gm/Music | /tmp/asked @1")
+    check("a start folder is left behind on the right side too",
+          pair({ paths: saved.paths, focus: 1 }, "/home/gm/Pictures", "/tmp/asked"), "/home/gm/Music | /tmp/asked @1")
+    check("a pair saved with no focus recorded gives the named folder to the left side",
+          pair({ paths: saved.paths }, "/tmp/asked", "/tmp/asked"), "/tmp/asked | /home/gm/Work @0")
+    check("with no saved pair both sides start where one pane would",
+          pair({}, "/home/gm/Pictures", ""), "/home/gm/Pictures | /home/gm/Pictures @-1")
+    // start differs from the named folder here, as it does when the second pane loads before the first has opened.
+    check("and a named folder with no saved pair opens on both sides, the left side's",
+          pair(null, "/home/gm/Pictures", "/tmp/asked"), "/tmp/asked | /tmp/asked @0")
+    check("a saved pair of the wrong length is no pair",
+          pair({ paths: ["/home/gm/Music"], focus: 1 }, "/home/gm/Pictures", "/tmp/asked"), "/tmp/asked | /tmp/asked @0")
 }

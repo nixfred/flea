@@ -1,5 +1,7 @@
 .pragma library
 
+.import "Format.js" as Format
+
 // What a typed path line means, and nothing about the field that carries it: ui/ChromeBar.qml owns
 // the field and ui/shell.qml owns the navigation, the same split ui/js/Filter.js keeps with its
 // strip. Every function here is pure, so tests/js/pathbar.js drives the whole of it with no window.
@@ -66,10 +68,20 @@ function unwrap(text) {
     }
 }
 
+// A typed smb:// (or sftp://, davs://, ...) address is a network location, not a name
+// relative to the pane: resolving it against the directory would list one nobody named.
+// The bar hands it back untouched, and the window routes it to the rail's own open.
+function isNetworkUri(text) {
+    return /^(smb|sftp|ftp|ftps|dav|davs|nfs|afp):\/\//i.test(String(text).trim())
+}
+
 // The typed line as an absolute path. Answers "" for a line that names nothing, which is what the
 // field checks before it navigates: an empty commit closes the bar and leaves the pane where it is.
 function resolve(text, current, home) {
     var line = String(text).trim()
+    if (isNetworkUri(line)) {
+        return line
+    }
     var body = unwrap(line)
     // Empty either because nothing was typed or because unwrap refused a URI on another host; both
     // answer "" here, and refused() below is what tells the two apart for the sentence.
@@ -182,6 +194,20 @@ function complete(text, names) {
     return { text: parts.head + tail, matches: matched.length }
 }
 
+// Sample input: shouldNavigate("/etc", "/etc", false) is false, the settled no-op.
+// Whether a committed target lists again. The settled same-path no-op keeps the selection.
+function shouldNavigate(target, current, failed) {
+    // An empty line closes the bar and navigates nowhere, the rule commitEdit already kept.
+    if (String(target).length === 0) {
+        return false
+    }
+    // The same path re-lists only when its listing failed, so an error retries and all else is a no-op.
+    if (String(target) === String(current) && !failed) {
+        return false
+    }
+    return true
+}
+
 // A line that named something and still resolved to nothing, which is only ever a file:// URI on
 // another host: the bar owes that a sentence, where an empty line owes silence.
 function refused(text) {
@@ -196,7 +222,7 @@ function completionMessage(before, after, dir) {
         return "Nothing in " + dir + " starts with that."
     }
     if (after.text === before) {
-        return after.matches + " names share that prefix."
+        return Format.count(after.matches) + " names share that prefix."
     }
     return ""
 }

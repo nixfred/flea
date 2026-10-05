@@ -42,6 +42,18 @@ pub fn rename(path: &Path, to_name: &str) -> Result<(PathBuf, Vec<Step>), FleaEr
     }
     let before = ItemIdentity::inspect(path)?;
     renamecompat::rename_path(path, &to)?;
+    {
+        // A same-filesystem rename is atomic, so its folder confirmation stays best effort.
+        let mut confirm = crate::backend::durable::Durability::begin(&to);
+        if confirm.durable {
+            if let Some(parent) = to.parent() {
+                confirm.touch(parent);
+            }
+            if let Err(error) = confirm.flush_dirs() {
+                eprintln!("flea: rename {} landed but the drive did not confirm the folder: {}", to.display(), error);
+            }
+        }
+    }
     Ok((to.clone(), vec![undo::moved(path, &to, before)?]))
 }
 
@@ -82,16 +94,29 @@ pub fn duplicate(path: &Path) -> (Result<PathBuf, FleaError>, Vec<Step>) {
     };
     let flag = AtomicBool::new(false);
     let mut sink = |_: u64, _: u64| {};
-    let mut p = Progress { cancel: &flag, on_bytes: &mut sink, partial: None };
+    let mut durability = crate::backend::durable::Durability::begin(dst.parent().unwrap_or(path));
+    let mut p = Progress { cancel: &flag, on_bytes: &mut sink, partial: None, tree: None,
+        manifest: crate::backend::copymanifest::writer_for(path, &dst), durability: Some(&mut durability) };
     match copy_any(path, &dst, &mut p) {
-        Ok(()) => match undo::copied(path, &dst, source) {
-            Ok(step) => (Ok(dst), vec![step]),
-            Err(error) => (Err(error), Vec::new()),
-        },
+        Ok(()) => {
+            drop(p);
+            // The bytes landed; only the folder confirmation can still fail, so the step stays journalled either way.
+            let unconfirmed = durability.flush_dirs().is_err();
+            match undo::copied(path, &dst, source) {
+                Ok(step) if !unconfirmed => (Ok(dst), vec![step]),
+                Ok(step) => (Err(named("duplicate", &dst, crate::backend::durable::DIR_UNCONFIRMED)), vec![step]),
+                Err(error) => (Err(error), Vec::new()),
+            }
+        }
         Err(mut error) => {
             let mut steps = Vec::new();
             if let Some(partial) = p.partial.take() {
-                match undo::copied(path, &partial, source) {
+                // A success journals the plain step above, so its undo is byte-for-byte today's; only a partial carries what the copy managed to create.
+                let (manifest, loud) = crate::backend::copymanifest::finish_loud(p.manifest.take());
+                if let Some(e) = loud {
+                    error.msg.push_str(&format!("; copy manifest failed: {e}"));
+                }
+                match undo::copied_partial(path, &partial, source, manifest) {
                     Ok(step) => steps.push(step),
                     Err(record) => error.msg.push_str(&format!("; could not journal partial copy {}: {}", partial.display(), record.msg)),
                 }
@@ -261,7 +286,8 @@ mod tests {
         assert!(outcome.is_err(), "the unreadable file cannot be opened, so the tree copy fails");
         let partial = d.join("tree copy");
         assert!(partial.is_dir(), "the failure left what it had copied");
-        assert_eq!(steps, vec![undo::copied(&src, &partial, ItemIdentity::inspect(&src).unwrap()).unwrap()], "and the journal gets the partial, so undo can remove it");
+        assert!(matches!(&steps[..], [Step::Copied { from, to, manifest: Some(_), .. }] if from == &src && to == &partial),
+            "and the journal gets the partial with what it created: {:?}", steps);
     }
 
     #[test]

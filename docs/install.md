@@ -11,6 +11,44 @@ default file manager, puts it in front of the other file managers for "Show in f
 the desktop's file chooser to it, and `flea --picker` does that last part alone. Both are described
 below.
 
+## Which package?
+
+The recommended install is `omarchy pkg aur add flea-bin`, and `omarchy update` keeps it current: a
+release reaches it minutes after it ships. Omarchy's own repository carries the same release as
+`flea`, a day or more behind. Install one of these, never two: all three own `/usr/bin/flea`, so pacman refuses a pair rather than leaving two
+half-installed.
+
+| Package | What you get | Built where | Install | Updates |
+|---|---|---|---|---|
+| `flea-bin`, AUR, recommended | the tagged release | Flea's release workflow, for x86_64 and aarch64; nothing compiles on your machine | `omarchy pkg aur add flea-bin` | `omarchy update`; a release arrives minutes after it ships |
+| `flea`, Omarchy's repository | the same tagged release | Omarchy's build host, signed; nothing compiles on your machine | `omarchy pkg add flea` | `omarchy update`; a release arrives a day or more after it ships, once Omarchy has reviewed and built it |
+| `flea-git`, AUR | current `main`, unreleased fixes included, for testers | your machine, with `cargo` | `yay -S flea-git` | `yay -Sua --devel` follows `main`; `omarchy update` rebuilds it only when its AUR PKGBUILD changes |
+
+The AUR also carries a `flea` that compiles the tagged release on your machine. Omarchy's repository
+package shares its name, so `omarchy update` replaces it with the repository build; use `flea-bin`
+instead.
+
+**Switching.** From `flea` to `flea-bin`, run the interactive command and answer `y` when pacman
+asks whether to remove `flea`:
+
+```
+yay -S flea-bin
+```
+
+`omarchy pkg aur add flea-bin` cannot make that swap: it passes `--noconfirm`, pacman then answers
+its own "Remove flea?" with the default No, and the install stops at "unresolvable package
+conflicts". On a box with no Flea installed yet, both commands work. `flea-git` switches the same
+way, and going back to Omarchy's package is `sudo pacman -S flea`, answering `y` to remove the other.
+Omarchy refuses `yay -Syu` and `pacman -Syu`; `omarchy update`, or `yay -Sua` for the AUR alone, are
+the update commands.
+
+What lands on disk is the table below whichever package it is, the licence directory aside, which
+takes the package's name: every AUR PKGBUILD runs the source `PKGBUILD`'s `package()` commands, and
+the release workflow refuses a tag where one has drifted. `flea --default` and `flea --picker` write
+per-user files, so a switch keeps them. The AUR also carries `flea`, the same release built from
+source on your machine, but on Omarchy the repository package of the same name comes first, so
+there is no reason to pick it there. [docs/release.md](release.md) is how each package is made.
+
 ## Build and install
 
 ```
@@ -35,7 +73,7 @@ uncommitted edits are what gets packaged.
 | Path | What it is |
 |---|---|
 | `/usr/bin/flea` | the binary, backend and launcher both |
-| `/usr/share/flea/ui/` | the Quickshell UI, which `paths.rs` looks for by `shell.qml` |
+| `/usr/share/flea/ui/` | the Quickshell UI, which `paths.rs` looks for by `boot/shell.qml` |
 | `/usr/share/flea/ui/Commons`, `/usr/share/flea/ui/Ui` | symlinks into `/usr/share/omarchy/shell/`, reached from QML as `qs.Commons` |
 | `/usr/lib/flea/flea-portal` | the XDG portal backend, which answers `org.freedesktop.impl.portal.FileChooser` |
 | `/usr/lib/flea/flea-filemanager1` | the D-Bus service, which answers `org.freedesktop.FileManager1` for "Show in folder" |
@@ -44,6 +82,7 @@ uncommitted edits are what gets packaged.
 | `/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.flea.service` | what D-Bus activates it with |
 | `/usr/share/applications/com.thisisgm.flea.desktop` | the desktop entry |
 | `/usr/share/icons/hicolor/scalable/apps/com.thisisgm.flea.svg` | the icon |
+| `/usr/share/libalpm/hooks/flea.hook` | the removal note, which prints the per-user undo commands below |
 | `/usr/share/licenses/flea/LICENSE` | the licence |
 
 The count is whatever the built archive declares, not a number written down here: the UI grows a file
@@ -58,10 +97,18 @@ directory that package owns.
 sudo pacman -Rns flea
 ```
 
-Everything above goes, including the directories the install created. The package carries no
-`.INSTALL` scriptlet, so nothing is ever created outside the file list pacman tracks, and the
-desktop and icon caches are re-indexed by Arch's own `update-desktop-database` and
-`gtk-update-icon-cache` hooks, which fire on Remove as well as on Install.
+Or `flea-bin`, or `flea-git`, whichever is installed. Everything above goes, including the
+directories the install created. The package carries no `.INSTALL` scriptlet, so nothing is ever
+created outside the file list pacman tracks, and the desktop and icon caches are re-indexed by
+Arch's own `update-desktop-database` and `gtk-update-icon-cache` hooks, which fire on Remove as
+well as on Install.
+
+Removal also runs Flea's own `flea.hook`, before any file goes. It prints `flea --default off` and
+`flea --picker off`, because what those two commands undo lives in each user's home, where pacman
+never reaches. Run them before the removal; once Flea is gone, the two "What `pacman -Rns flea`
+leaves behind" sections below name each file to delete by hand. Swapping `flea-bin` for `flea` or
+`flea-git` removes one package too, so the note appears then as well; its first line says it only
+matters when Flea is leaving for good.
 
 ## Make Flea the default
 
@@ -153,7 +200,27 @@ take one to name which program and here the program is Flea. The files it writes
    installed at all, step 1 refuses first and nothing is written, because
    `com.thisisgm.flea.desktop` is the proof the package landed.
 
-Run it from a terminal inside the session, so the keys take effect at once.
+Run it from a terminal inside the session, so the keys and file dialogs take effect at once: there it
+also restarts xdg-desktop-portal, as described under the file chooser below.
+
+### Or from Settings
+
+Settings > About has the same switch, "Make Flea the default", directly under the File manager row.
+Ticking it runs `flea --default` and unticking it runs `flea --default off`: the same commands, the
+same steps, and the same four files. After either one goes through, the switch also runs
+`systemctl --user try-restart xdg-desktop-portal.service`, so file dialogs follow at once instead of
+at the next login; `try-restart` leaves a portal that is not running alone. If that restart fails
+the switch still stands, and the line under it says "File dialogs follow after xdg-desktop-portal
+restarts." The command makes the same restart itself only when its output is a terminal, so the
+switch's run, whose output it reads, restarts nothing and the portal restarts once. The box is
+ticked when `xdg-mime query default inode/directory` answers `com.thisisgm.flea.desktop`, and that
+answer is read again after every run, so the box shows what the desktop will do rather than what was
+clicked. The line under it says what happened: that
+folders, Show in folder and file dialogs open Flea; that file dialogs were left out because the
+package's portal files are missing (step 4's skip); or the first line flea printed when a step failed.
+On a build with no Flea desktop entry installed the switch is greyed and asks you to install a
+package first, which is step 1's refusal said before you press it. It stores nothing in Flea's
+settings.
 
 ### Undo
 
@@ -167,7 +234,8 @@ whatever the system default is (Nautilus on stock Omarchy), deletes
 created when nothing else is in them, so "Show in folder" goes back to whichever packaged
 registration D-Bus reads first, and removes the marked block from
 `~/.config/hypr/bindings.lua` byte for byte, then reloads, and undoes the file-chooser step exactly
-as `flea --picker off` does. If you had pinned another handler in
+as `flea --picker off` does. Unticking "Make Flea the default" in Settings > About runs the same
+command. If you had pinned another handler in
 `~/.config/mimeapps.list` before running `flea --default`, the first run printed its id as
 `was <id>`; `xdg-mime default <id> inode/directory` puts that pin back.
 
@@ -218,6 +286,15 @@ writes one key to `~/.config/xdg-desktop-portal/portals.conf`:
 org.freedesktop.impl.portal.FileChooser=flea;gtk
 ```
 
+If `~/.config/xdg-desktop-portal/hyprland-portals.conf` exists, xdg-desktop-portal reads that file and
+ignores `portals.conf`, so the same key goes there instead. A backend it replaces, such as the GNOME
+portal's Nautilus chooser, is kept on a comment above Flea's line for `flea --picker off` to restore:
+
+```
+# flea replaced: org.freedesktop.impl.portal.FileChooser=gnome;gtk
+org.freedesktop.impl.portal.FileChooser=flea;gtk
+```
+
 and it writes one more thing, an additive block in `~/.config/hypr/bindings.lua` beside the one
 `flea --default` writes:
 
@@ -243,16 +320,24 @@ Email and DynamicLauncher still resolve to gtk, exactly as before. `gtk` stays b
 own line for the same reason: if `flea.portal` ever goes missing, there is still a chooser.
 
 xdg-desktop-portal reads its configuration once, at startup, so a live session keeps the old routing
-until it is restarted, which the command's second line says:
+until it is restarted. Run at a terminal, `flea --picker`, `flea --default` and both `off` forms do
+that themselves with `systemctl --user try-restart xdg-desktop-portal.service`, the Settings switch's
+own restart, and say `xdg-desktop-portal restarted if it was running, so file dialogs follow now`.
+With their output piped or redirected, as Settings runs them and as a script capturing them does,
+they restart nothing, since the caller may own the restart, and a refused restart is reported the same
+way: the line names the command to run instead:
 
 ```
 systemctl --user restart xdg-desktop-portal
 ```
 
+A claim refused before it wrote anything restarts nothing and prints neither line.
+
 The picker that then opens is Flea: the same rows, icons, theme and keys as the window, with a check
 box in front of every row a caller can receive. Space marks, Enter walks into a directory or submits
-what is marked, Backspace climbs, Escape refuses. Nothing marked and Enter does nothing, because a
-chooser that sends on a stray keypress is worse than one that asks twice.
+what is marked, Backspace climbs, Escape refuses. `.` shows and hides the directory's dotfiles, the
+same re-read the window makes; a preset's toggleHidden chord does the same. Nothing marked and Enter
+does nothing, because a chooser that sends on a stray keypress is worse than one that asks twice.
 
 ### Undo
 
@@ -260,15 +345,19 @@ chooser that sends on a stray keypress is worse than one that asks twice.
 flea --picker off
 ```
 
-removes that one key, and removes the file too when the key was all it held, and removes the
-Hyprland block byte for byte. Restart xdg-desktop-portal again and the GTK chooser is back.
+puts back the backend a `# flea replaced:` comment names, or removes Flea's line when there is no
+comment, in `portals.conf` and in any `<desktop>-portals.conf` beside it, and removes `portals.conf`
+when Flea's line was all it held. It removes the Hyprland block byte for byte. Restart
+xdg-desktop-portal again and the previous chooser is back.
 
 ### What `pacman -Rns flea` leaves behind
 
 `~/.config/xdg-desktop-portal/portals.conf` is per-user state like `mimeapps.list` above, so it stays.
 With no `flea.portal` installed, xdg-desktop-portal logs that the requested backend does not exist and
 takes the next name on the line, which is `gtk`, so the desktop keeps a working chooser either way.
-The clean order is `flea --picker off` before `sudo pacman -Rns flea`.
+The same goes for `hyprland-portals.conf` when Flea's line went there. The `flea --picker` block in
+`~/.config/hypr/bindings.lua` stays too, inert with no Flea window to match: delete it and run
+`hyprctl reload`. The clean order is `flea --picker off` before `sudo pacman -Rns flea`.
 
 ## Why the Exec line reads `flea --gui %f`
 
@@ -285,7 +374,7 @@ meaning the window. Launcher stdio is beside the point either way, and every lau
 hands over none: glib routes the launch through the session bus, so the child's stdio is the user
 manager's.
 
-`StartupWMClass` because the window's app id comes from the `AppId` pragma at `ui/shell.qml:1` and
+`StartupWMClass` because the window's app id comes from the `AppId` pragma at `ui/boot/shell.qml:1` and
 is not the binary name. `packaging/flea-package-test` reads both and fails if they drift apart.
 
 ## Proving it

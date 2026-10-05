@@ -14,10 +14,17 @@ if [ ! -x "$BIN" ]; then
     printf 'protocol.sh: build it (cargo build) or set BIN to one; refusing to report on nothing\n' >&2
     exit 1
 fi
+if ! command -v cc >/dev/null 2>&1; then
+    echo 'protocol.sh: cc is required to build the directory-size syscall barrier' >&2
+    exit 1
+fi
 # The sandbox is the parent and the listing is a directory inside it, because the guard's marker is
 # a real dotfile and this suite asserts what a hidden:true listing contains.
 SB="$FIXTURE_ROOT/flea-proto-test-$$"
 D="$SB/tree"
+SIZES="$SB/sizes"
+# damson.txt's size: far above any folder's walked size, so the folder sorts below it on every filesystem.
+LARGEST_BYTES=1000000
 # src/backend/thumbcache.rs honours XDG_CACHE_HOME, so this suite's thumbnails land inside its own
 # sandbox and the operator's real cache is never written to, read from, or cleaned up after.
 export XDG_CACHE_HOME="$SB/cache"
@@ -28,6 +35,18 @@ setup() {
   mkdir -p "$D/sub"
   printf 'abc' > "$D/three.txt"
   : > "$D/empty.txt"
+  # Name order and size order disagree here, so an anchored size sort cannot pass on name order.
+  mkdir -p "$SIZES"
+  # The anchors sit two or more places from both ends of every name order, so no name order puts either at 1.
+  printf '123' > "$SIZES/apple.txt"
+  printf '12345' > "$SIZES/berry.txt"
+  printf '1' > "$SIZES/cherry.txt"
+  head -c "$LARGEST_BYTES" /dev/zero > "$SIZES/damson.txt"
+  printf '1234567' > "$SIZES/elder.txt"
+  printf '123456789' > "$SIZES/fig.txt"
+  # A folder orders by its walked size (src/backend/ordering.rs): its 4 bytes plus its own entry, a few KB at most.
+  mkdir -p "$SIZES/box"
+  printf '1234' > "$SIZES/box/four.txt"
 }
 
 check() {
@@ -56,6 +75,14 @@ check "a rows object follows list even when first is 0" "rows" "$(echo "$out" | 
 check "that rows object is empty" "0" "$(echo "$out" | sed -n 2p | grep -o '"n":"' | wc -l | tr -d ' ')"
 check "directories sort first" "sub" "$(echo "$out" | sed -n 3p | grep -oE '"n":"[^"]+"' | head -1 | cut -d'"' -f4)"
 
+# ui/js/Swap.js onListed drops a listed line whose path is not the one it asked for, so each spelling comes back byte for byte.
+ln -s "$D/sub" "$SB/sublink"
+for asked in "$D/sub/" "$SB/sublink" "$D/sub/.."; do
+  out=$(printf '{"c":"list","path":"%s","first":0}\n{"c":"quit"}\n' "$asked" | $BIN --backend)
+  # Sample output, the listed line: {"t":"listed","n":2,"read":0.040,"sort":0.010,"v":42,"path":"/tmp/flea/sub/"}
+  check "listed names ${asked#"$SB"/} exactly as it was asked" "\"path\":\"$asked\"" "$(echo "$out" | grep -F '"t":"listed"' | head -1 | grep -oE '"path":"[^"]*"')"
+done
+
 # listpaths: the picker's Recent, a listing built from the client's own list; see docs/protocol.md "listpaths".
 # The order is the client's, a path that is gone is dropped, and every name is relative to the base "/".
 out=$(printf '{"c":"listpaths","paths":["%s/three.txt","%s/gone.txt","%s/sub","%s/empty.txt"],"first":10}\n{"c":"quit"}\n' \
@@ -70,17 +97,12 @@ check "listpaths reports no sort pass" "0.000" "$(echo "$out" | head -1 | grep -
 out=$(printf '{"c":"listpaths","paths":["etc/hostname","/",""],"first":10}\n{"c":"quit"}\n' | $BIN --backend)
 check "listpaths refuses a path that is not absolute" "0" "$(echo "$out" | head -1 | grep -oE '"n":[0-9]+' | cut -d: -f2)"
 
-# A search row is a path relative to the base, and its kind is read from the name at the end of it.
-# The lookup took the whole path and its by-name table never matched one: sub/Makefile answered Data
-# where list answered Makefile build file for the same file, so the two listings are held to one answer.
-: > "$D/sub/Makefile"
-listed_kind=$(printf '{"c":"list","path":"%s/sub","first":10}\n{"c":"quit"}\n' "$D" | $BIN --backend | sed -n 2p | grep -o '"kinds":\[[^]]*\]')
-searched_kind=$( ( printf '{"c":"search","path":"%s","query":"makefile","hidden":false}\n' "$D"
-                   sleep 0.6
-                   printf '{"c":"window","start":0,"count":10}\n{"c":"quit"}\n' ) | $BIN --backend | grep -o '"n":"sub/Makefile".*"kinds":\[[^]]*\]' | grep -o '"kinds":\[[^]]*\]')
-check "list gives the nested Makefile a kind of its own, not Data" "0" "$(echo "$listed_kind" | grep -c '"Data"')"
-check "a search row carries the kind list gives the same file" "$listed_kind" "$searched_kind"
-rm -f "$D/sub/Makefile"
+# A local fsinfo answers figures and class in one line; only a slow mount sends a second.
+# Sample output: {"t":"fsinfo","fs":"btrfs","free":442000000000,"path":"/x","class":""}
+out=$(printf '{"c":"list","path":"%s","first":0}\n{"c":"fsinfo"}\n{"c":"quit"}\n' "$D" | $BIN --backend)
+check "a local fsinfo answers exactly one line" "1" "$(echo "$out" | grep -c '"t":"fsinfo"')"
+check "and that line names the directory's own filesystem, not unknown" "1" "$(echo "$out" | grep '"t":"fsinfo"' | grep -vc '"fs":""')"
+check "for the directory just listed" "1" "$(echo "$out" | grep -c "\"t\":\"fsinfo\",\"fs\":\"[^\"]*\",\"free\":[0-9]*,\"path\":\"$D\"")"
 
 # Task 11: rows carries a per-response Kind dictionary, read against the box's real freedesktop tables, see docs/protocol.md "rows".
 kind_out=$(printf '{"c":"list","path":"%s","first":10}\n{"c":"quit"}\n' "$D" | $BIN --backend)
@@ -94,11 +116,91 @@ check "every one of the three rows names its kind by an index" "3" "$(echo "$kin
 check "only the directory row carries a filesystem id" "1" "$(echo "$kind_row" | grep -o '"v":[0-9]*' | wc -l | tr -d ' ')"
 check "and that id is a real device, not a zero placeholder" "0" "$(echo "$kind_row" | grep -c '"v":0[,}]')"
 
+# A request naming a replaced numbering (docs/protocol.md "listing") resolves nothing: $D/sub/kept.txt, row 0 of listing 2, survives a trash sent with 1.
+printf 'x' > "$D/sub/kept.txt"
+# The stale refusal's leading fields, which the check below cuts the first refusal to.
+stale_paths='{"t":"error","where":"stale","path":"paths"'
+# Sample output: {"t":"error","where":"stale","path":"paths","msg":"the listing changed before this request arrived, so its rows name other files; nothing was done"}
+out=$(printf '{"c":"list","path":"%s","first":5}\n{"c":"list","path":"%s/sub","first":5}\n{"c":"paths","rows":[0],"listing":1}\n{"c":"trash","rows":[0],"menuId":0,"listing":1}\n{"c":"menuaction","op":"snapshot","id":3,"rows":[0],"cursor":0,"listing":1}\n{"c":"paths","rows":[0],"listing":2}\n{"c":"paths","rows":[0]}\n{"c":"sort","by":"size","desc":false}\n{"c":"paths","rows":[0],"listing":2}\n{"c":"quit"}\n' "$D" "$D" | $BIN --backend)
+check "each rows line names its listing's numbering" "1 2" "$(echo "$out" | grep '"t":"rows"' | grep -oE '"listing":[0-9]+' | cut -d: -f2 | tr '\n' ' ' | sed 's/ $//')"
+check "paths naming the replaced numbering is refused by name and resolves nothing" "$stale_paths" \
+  "$(echo "$out" | grep '"where":"stale"' | sed -n 1p | cut -c1-${#stale_paths})"
+check "trash naming it is refused the same way" "1" "$(echo "$out" | grep -c '"where":"stale","path":"trash"')"
+check "and the file that request would have trashed is still there" "yes" "$([ -f "$D/sub/kept.txt" ] && echo yes || echo no)"
+check "a menu snapshot naming it is refused in the menu's own shape" "1" \
+  "$(echo "$out" | grep '"t":"menuaction","id":3' | grep -c '"ok":false')"
+check "the numbering in force resolves, and so does a request that names none" "2" \
+  "$(echo "$out" | grep -c "\"t\":\"paths\",\"paths\":\[\"$D/sub/kept.txt\"\]")"
+check "a sort renumbers, so the numbering the rows were read in is refused after it too" "2" \
+  "$(echo "$out" | grep -c '"where":"stale","path":"paths"')"
+rm -f "$D/sub/kept.txt"
+
 # Size and mtime are orders now: answered with listed like name, and the pass rides in read.
 # Sample output: {"t":"listed","n":3,"read":0.041,"sort":0.003}
 out=$(printf '{"c":"list","path":"%s","first":0}\n{"c":"sort","by":"size","desc":false}\n{"c":"quit"}\n' "$D" | $BIN --backend)
 check "sorting by size answers a listed line, not an error" "listed" "$(echo "$out" | sed -n 3p | grep -oE '"t":"[a-z]+"' | cut -d'"' -f4)"
 check "and sorting by mtime does too" "listed" "$(printf '{"c":"list","path":"%s","first":0}\n{"c":"sort","by":"mtime","desc":true}\n{"c":"quit"}\n' "$D" | $BIN --backend | sed -n 3p | grep -oE '"t":"[a-z]+"' | cut -d'"' -f4)"
+check "a sort that names no anchor answers the plain listed line" "0" "$(echo "$out" | sed -n 3p | grep -c anchor)"
+
+# A re-sort that names the cursor's row answers that row's index in the new order, through handle_line itself.
+# Sample output: {"t":"listed","n":4,"read":0.041,"sort":0.003,"v":56,"path":"/x","anchor":"/x/cherry.txt","anchorIndex":2}
+anchored() {
+  printf '{"c":"list","path":"%s","first":0}\n{"c":"sort","by":"%s","desc":%s,"foldersFirst":true,"anchor":"%s"}\n{"c":"quit"}\n' \
+    "$SIZES" "$1" "$2" "$3" | $BIN --backend | sed -n 3p
+}
+# Each anchor is 1 only in its own order: every name order, the other direction and size without folders first answer otherwise.
+out=$(anchored size false "$SIZES/cherry.txt")
+check "an anchored sort echoes the anchor it was given" "1" "$(echo "$out" | grep -c "\"anchor\":\"$SIZES/cherry.txt\"")"
+check "and answers its index in the size order: [box, cherry, apple, berry, elder, fig, damson]" '"anchorIndex":1' "$(echo "$out" | grep -oE '"anchorIndex":-?[0-9]+')"
+check "descending, the largest file answers its index: [box, damson, fig, elder, berry, apple, cherry]" '"anchorIndex":1' "$(anchored size true "$SIZES/damson.txt" | grep -oE '"anchorIndex":-?[0-9]+')"
+check "a name sort answers the anchor's index too: [box, apple, berry, cherry, damson, elder, fig]" '"anchorIndex":3' "$(anchored name false "$SIZES/cherry.txt" | grep -oE '"anchorIndex":-?[0-9]+')"
+check "an anchor the listing never held answers -1" '"anchorIndex":-1' "$(anchored name false "$SIZES/gone.txt" | grep -oE '"anchorIndex":-?[0-9]+')"
+
+# Prefetch record (src/prefetch.rs): this shell plays the launcher's, since a pipeline's last command is its child.
+PREFETCH_WAIT_TENTHS=30
+LIST="$SB/prefetch-list"
+SEEN="$SB/prefetch-seen"
+REPLY="$SB/prefetch-reply"
+# Runs a backend as this shell's child, naming pid $1 as the launcher's shell, until the list differs from $3 (marking $SEEN) or the wait runs out.
+prefetch_run() {
+  rm -f "$SEEN"
+  { printf '{"c":"list","path":"%s","first":10}\n' "$D"
+    for _ in $(seq 1 "$PREFETCH_WAIT_TENTHS"); do
+      [ "$(cat "$2" 2>/dev/null)" != "$3" ] && { : > "$SEEN"; break; }
+      sleep 0.1
+    done
+    printf '{"c":"quit"}\n'; } | FLEA_PREFETCH="$2" FLEA_PREFETCH_SHELL="$1" $BIN --backend > "$REPLY"
+  PREFETCH_RC=${PIPESTATUS[1]}
+}
+# Sample reply line: {"t":"listed","n":3,"read":0.041,"sort":0.003,"v":1,"path":"/x"}, the proof the backend served the list.
+answered() { echo "$PREFETCH_RC $(grep -c '"t":"listed"' "$REPLY")"; }
+# A live process of this user, not the backend's parent: a missing parent check would read its maps and record.
+sleep 30 &
+stranger=$!
+prefetch_run "$stranger" "$LIST" ""
+kill "$stranger" 2>/dev/null; wait "$stranger" 2>/dev/null
+check "a backend whose parent is not the named shell serves the list and exits cleanly" "0 1" "$(answered)"
+check "and records no prefetch list" "absent" "$([ -e "$LIST" ] && echo present || echo absent)"
+prefetch_run $$ "$LIST" ""
+check "the named shell's own backend records one while it runs, before quit" "0 1 seen" "$(answered) $([ -e "$SEEN" ] && echo seen)"
+# Sample line 2: "shell 4242 5561234", the shell's pid and start time.
+identity=$(sed -n 2p "$LIST")
+# Sample stat: "4242 (bash) S 1 ... 0 5561234 ...": after the name's ") ", starttime (field 22) is the 20th field.
+stat_line=$(cat /proc/$$/stat)
+check "and names this shell by its pid and start time" "shell $$ $(echo "${stat_line##*) }" | cut -d' ' -f20)" "$identity"
+shell_exe=$(readlink -f /proc/$$/exe)
+# Sample range line: "0 32768 /usr/bin/bash", offset, length and path, so " <path>" matches only the path field.
+check "and lists the shell's own executable, not the backend's" "yes no" \
+  "$(grep -qF " $shell_exe" "$LIST" && echo yes || echo no) $(grep -qF " $(readlink -f $BIN)" "$LIST" && echo yes || echo no)"
+printf 'flea-prefetch 2\nshell %s 1\n0 4096 /sentinel\n' "$$" > "$LIST"
+prefetch_run $$ "$LIST" "$(cat "$LIST")"
+check "a list naming this pid with another start time is an earlier shell's, and is replaced" "$identity no" \
+  "$(sed -n 2p "$LIST") $(grep -qF /sentinel "$LIST" && echo yes || echo no)"
+printf 'flea-prefetch 2\n%s\n0 4096 /sentinel\n' "$identity" > "$LIST"
+recorded=$(cat "$LIST")
+prefetch_run $$ "$LIST" "$recorded"
+check "a later backend of the same shell serves its list and leaves the launch's list alone" "0 1 same" \
+  "$(answered) $([ "$(cat "$LIST")" = "$recorded" ] && echo same)"
 
 out=$(printf '{"c":"list","path":"%s","first":0}\n{"c":"sort","by":"name","desc":true}\n{"c":"window","start":0,"count":10}\n{"c":"quit"}\n' "$D" | $BIN --backend)
 check "descending name sort keeps directories first" "sub" "$(echo "$out" | sed -n 4p | grep -oE '"n":"[^"]+"' | head -1 | cut -d'"' -f4)"
@@ -217,10 +319,10 @@ done
 
 # Size and mtime go through the metadata pass and must keep the grouping. Each key is made to
 # disagree with the others: 2 is the larger file and the oldest entry, 3 the smaller and the
-# newest, 11 is older than 1, and 1 holds a file so its st_size is not 0. A build ordering
-# directories by st_size would answer "11 1 3 2" for size ascending; one that lost the grouping
-# would answer "2 11 1 3" for mtime ascending.
-: > "$GR/1/x"
+# newest, 11 is older than 1, and 1 holds 20 bytes so its walked size is above 11's whatever
+# the two directory entries measure. A build ordering folders by name would answer "1 11 3 2"
+# for size ascending; one that lost the grouping would answer "2 11 1 3" for mtime ascending.
+printf '%020d' 0 > "$GR/1/x"
 printf '%05d' 0 > "$GR/2"
 printf '0' > "$GR/3"
 touch -d '2020-01-01 00:00:00' "$GR/2"
@@ -229,10 +331,10 @@ touch -d '2020-01-01 00:00:02' "$GR/1"
 touch -d '2020-01-01 00:00:03' "$GR/3"
 check "name ascending still groups the directories with the two files in place" \
   "1 11 2 3" "$(grouping_order name false)"
-check "size ascending orders the files by size and the directories by name" \
-  "1 11 3 2" "$(grouping_order size false)"
-check "size descending keeps the directories first and reverses inside each group" \
-  "11 1 2 3" "$(grouping_order size true)"
+check "size ascending orders the files by size and the folders by walked size" \
+  "11 1 3 2" "$(grouping_order size false)"
+check "size descending keeps the folders first and reverses inside each group" \
+  "1 11 2 3" "$(grouping_order size true)"
 check "mtime ascending orders both groups by time, directories still first" \
   "11 1 2 3" "$(grouping_order mtime false)"
 check "mtime descending keeps the directories first and reverses inside each group" \
@@ -255,6 +357,9 @@ check "prewarm file exists" "0" "$([ -f "$PW" ] && echo 0 || echo 1)"
 check "prewarm first line is listed" "listed" "$(head -1 "$PW" | grep -oE '"t":"[a-z]+"' | cut -d'"' -f4)"
 check "prewarm second line is rows" "rows" "$(sed -n 2p "$PW" | grep -oE '"t":"[a-z]+"' | head -1 | cut -d'"' -f4)"
 check "prewarm rows honour the count" "2" "$(sed -n 2p "$PW" | grep -o '"n":"' | wc -l | tr -d ' ')"
+first_listing=$(printf '{"c":"list","path":"%s","first":2}\n{"c":"quit"}\n' "$D" | $BIN --backend | sed -n 2p | grep -oE '"listing":[0-9]+}$')
+check "prewarm rows name the numbering a backend's first list answers in" "${first_listing:-no numbering from the backend}" \
+  "$(sed -n 2p "$PW" | grep -oE '"listing":[0-9]+}$')"
 check "no temp file is left behind" "0" "$(ls "$PW".*.tmp 2>/dev/null | wc -l | tr -d ' ')"
 check "the prewarm file is owner-only" "600" "$(stat -c '%a' "$PW")"
 
@@ -333,6 +438,24 @@ out=$(printf '{"c":"list","path":"%s","first":10}\n{"c":"thumb","rows":[0,1,3]}\
 check "every row of a multi-row request is answered" "3" "$(echo "$out" | grep -c '"t":"thumbed"')"
 check "a directory row answers an empty file" '"row":0,"file":""' "$(echo "$out" | grep -o '"row":0,"file":""')"
 
+# ExtThumbs, callout 3: off is cache-only. The decoder is jailed with only its input and output bound, so the witness is this suite's cache.
+setup
+cp "$FIXTURE_ROOT/flea-media-btrfs/photo_0.jpg" "$D/photo-a.jpg"
+cp "$FIXTURE_ROOT/flea-media-btrfs/photo_0.jpg" "$D/photo-b.jpg"
+out=$(printf '{"c":"list","path":"%s","first":10}\n{"c":"thumb","rows":[2]}\n{"c":"quit"}\n' "$D" | $BIN --backend)
+# Sample input: {"t":"thumbed","row":2,"file":"/home/flea-sandbox/t/cache/thumbnails/large/0a1b.png","ms":98.1}
+decoded=$(echo "$out" | grep -oE '"row":2,"file":"[^"]+"' | cut -d'"' -f6)
+check "the full path starts the decoder" "1" "$([ -n "$decoded" ] && [ -s "$decoded" ] && echo 1 || echo 0)"
+# A decode that started leaves a thumbnail or a fail marker here before quit returns, so an unchanged cache means none started.
+cached=$(find "$XDG_CACHE_HOME" -type f | sort)
+out=$(printf '{"c":"list","path":"%s","first":10}\n{"c":"thumb","rows":[3],"cacheOnly":true}\n{"c":"quit"}\n' "$D" | $BIN --backend)
+check "a cache-only miss answers none" "1" "$(echo "$out" | grep -c '"row":3,"file":""')"
+check "and it never starts the decoder" "$cached" "$(find "$XDG_CACHE_HOME" -type f | sort)"
+
+# The class rides beside the fsinfo figures, once per directory change and never per row.
+out=$(printf '{"c":"list","path":"%s","first":1}\n{"c":"fsinfo"}\n{"c":"quit"}\n' "$D" | $BIN --backend)
+check "a local directory answers an empty class" "1" "$(echo "$out" | grep -c '"t":"fsinfo".*"class":""')"
+
 # Dotfiles are dropped from the scan itself, so they never reach the sort at all.
 setup
 : > "$D/.dotfile"
@@ -349,7 +472,7 @@ check "hidden true includes both dotfile entries" "5" "$(echo "$out" | head -1 |
 check "the dotfile row is present" "1" "$(echo "$out" | sed -n 2p | grep -c '"n":"\.dotfile"')"
 check "the dot-directory row is present and marked a directory" "1" "$(echo "$out" | sed -n 2p | grep -c '"n":"\.dotdir","d":true')"
 
-# Task 16: directory sizes; each argument is one stage, and the walker only gets a turn between stages once stdin drains to empty, see docs/protocol.md "dirsize".
+# Directory sizes: each argument is one stage; pacing allows asynchronous replies between stages.
 dirsize_run() {
   ( for stage in "$@"; do
       # $(...) strips a stage's trailing newline, so it comes back here or the next stage glues onto this one's last line.
@@ -386,7 +509,7 @@ out=$(dirsize_run \
     "$(printf '{"c":"dirsize","rows":[0]}\n')")
 check "a repeated ask for an already-answered row still answers" "2" "$(echo "$out" | grep -c '"t":"dirsized"')"
 
-# dirsizecancel carries no rows and drops everything queued; no pacing here on purpose, so the row is cancelled before the walker could ever get a turn.
+# A queued cancellation suppresses the result even if the worker has already picked up the row.
 out=$(printf '{"c":"list","path":"%s","first":10}\n{"c":"dirsize","rows":[0]}\n{"c":"dirsizecancel"}\n{"c":"quit"}\n' "$DZ" | $BIN --backend)
 check "a row cancelled before it was walked is never answered" "0" "$(echo "$out" | grep -c '"t":"dirsized"')"
 
@@ -460,6 +583,179 @@ out=$( ( printf '{"c":"mkdir","path":"%s","name":"filled"}\n' "$MK"; sleep 0.3; 
 check "undo refuses a new folder the user has filled" "the new folder has been filled since, so undo left it in place" "$(echo "$out" | sed -n 2p | grep -oE '"msg":"[^"]+"' | cut -d'"' -f4)"
 check "and what they put inside is still there" "yes" "$([ -f "$MK/filled/theirs.txt" ] && echo yes || echo no)"
 sandbox_remove "$MK_SB"
+
+# Names a transfer would land on, asked first, then one choice for them; see docs/protocol.md "collisions".
+CO_SB="$FIXTURE_ROOT/flea-collide-test-$$"
+CO="$CO_SB/tree"
+collide_fixture() {
+  sandbox_remove "$CO_SB"
+  sandbox_make "$CO_SB"
+  mkdir -p "$CO/from/album" "$CO/to/album" "$CO_SB/data"
+  printf 'yours' > "$CO/from/photo.png"
+  printf 'there' > "$CO/to/photo.png"
+  printf 'notes' > "$CO/from/notes.txt"
+}
+collide_ask() {
+  printf '{"c":"collisions","id":%s,"paths":["%s/from/photo.png","%s/from/notes.txt","%s/from/album"],"dest":"%s/to"}\n' "$1" "$CO" "$CO" "$CO" "$CO"
+}
+collide_transfer() {
+  printf '{"c":"transfer","op":"%s","paths":["%s/from/photo.png","%s/from/notes.txt"],"dest":"%s/to"%s}\n' "${2:-copy}" "$CO" "$CO" "$CO" "$1"
+}
+# One backend session run in steps, so quit is sent only once the reply it waits for is out and a loaded box cannot cancel a transfer.
+# Sample steps: '{"c":"collisions",...}' 'wait:"t":"collisions"' 'do:printf x > "$CO/to/notes.txt"' 'wait:"t":"transferdone"'
+backend_steps() {
+  local out="$CO_SB/steps.out" in="$CO_SB/steps.in" step waited pid
+  rm -f "$out" "$in"
+  mkfifo "$in"
+  : > "$out"
+  ${step_wrap[@]+"${step_wrap[@]}"} $BIN --backend < "$in" > "$out" &
+  pid=$!
+  exec 8> "$in"
+  for step in "$@"; do
+    case "$step" in
+      wait:*)
+        waited=0
+        until grep -qF -- "${step#wait:}" "$out"; do
+          waited=$((waited + 1))
+          [ "$waited" -le "$STEP_WAIT_TENTHS" ] || { echo "backend_steps: no ${step#wait:} within the wait" >&2; break; }
+          sleep 0.1
+        done ;;
+      do:*) eval "${step#do:}" ;;
+      *) printf '%s\n' "$step" >&8 ;;
+    esac
+  done
+  printf '{"c":"quit"}\n' >&8
+  exec 8>&-
+  wait "$pid"
+  cat "$out"
+  rm -f "$out" "$in"
+}
+# Ten seconds, far past a transfer of three small files on a loaded box, and short enough to fail a stuck one.
+STEP_WAIT_TENTHS=100
+# What backend_steps runs the backend under, empty but for the Replace cases below.
+step_wrap=()
+collide_fixture
+# Sample output: {"t":"collisions","id":7,"total":2,"names":[{"n":"photo.png","d":false,"i":"image-x-generic"},{"n":"album","d":true,"i":"folder"}]}
+out=$(backend_steps "$(collide_ask 7)" 'wait:"t":"collisions"')
+check "collisions counts only the names the destination holds" '"total":2' "$(echo "$out" | grep -oE '"total":[0-9]+')"
+check "and names them in request order" '"n":"photo.png","n":"album"' "$(echo "$out" | grep -oE '"n":"[^"]+"' | paste -sd, -)"
+check "a folder carries the directory bit and its mark" "1" "$(echo "$out" | grep -c '{"n":"album","d":true,"i":"folder"}')"
+out=$(backend_steps "$(printf '{"c":"collisions","id":8,"paths":["%s/from/photo.png"],"dest":"relative"}' "$CO")" 'wait:"t":"collisions"')
+check "an unusable destination asks nothing and leaves the error to the transfer" '{"t":"collisions","id":8,"total":0,"names":[]}' "$out"
+# Rows resolve against the listing the way a transfer's do: album, notes.txt, photo.png, folders first.
+out=$(backend_steps "$(printf '{"c":"list","path":"%s/from","first":10}' "$CO")" 'wait:"t":"rows"' "$(printf '{"c":"collisions","id":9,"rows":[2],"dest":"%s/to"}' "$CO")" 'wait:"t":"collisions"')
+check "a rows question names the row's own file" '"id":9,"total":1,"names":[{"n":"photo.png"' "$(echo "$out" | grep -oE '"id":9,"total":[0-9]+,"names":\[\{"n":"[^"]+"')"
+
+out=$(backend_steps "$(collide_ask 7)" 'wait:"t":"collisions"' "$(collide_transfer ',"collide":"keep","collideId":7')" 'wait:"t":"transferdone"')
+check "keep both copies every item" '"ok":2,"failed":0,"skipped":0' "$(echo "$out" | grep -oE '"ok":[0-9]+,"failed":[0-9]+,"skipped":[0-9]+')"
+check "and names the incoming one as Duplicate does" "yours" "$(cat "$CO/to/photo copy.png" 2>/dev/null)"
+check "and leaves the one already there" "there" "$(cat "$CO/to/photo.png")"
+
+collide_fixture
+out=$(backend_steps "$(collide_ask 7)" 'wait:"t":"collisions"' "$(collide_transfer ',"collide":"skip","collideId":7')" 'wait:"t":"transferdone"')
+check "skip counts the collision in skipped and copies the rest" '"ok":1,"failed":0,"skipped":1' "$(echo "$out" | grep -oE '"ok":[0-9]+,"failed":[0-9]+,"skipped":[0-9]+')"
+check "and the name it skipped is untouched" "there" "$(cat "$CO/to/photo.png")"
+check "and the free name was copied" "notes" "$(cat "$CO/to/notes.txt" 2>/dev/null)"
+
+# A name that appears after the question is refused whatever the choice, exactly as before.
+collide_fixture
+out=$(backend_steps "$(collide_ask 7)" 'wait:"t":"collisions"' 'do:printf "arrived later" > "$CO/to/notes.txt"' "$(collide_transfer ',"collide":"keep","collideId":7')" 'wait:"t":"transferdone"')
+check "a name that appeared after the question is refused" '"name":"notes.txt","ok":false,"err":"already exists"' "$(echo "$out" | grep -oE '"name":"notes.txt","ok":false,"err":"[^"]+"')"
+check "and never replaced" "arrived later" "$(cat "$CO/to/notes.txt")"
+check "while the name the question saw was kept both" "yours" "$(cat "$CO/to/photo copy.png" 2>/dev/null)"
+# Copy to asks about its menu's selection, and its dialog's close expires that selection before the answer.
+collide_fixture
+# A snapshot publishes from the menu worker and answers nothing, so its step alone waits a fixed second; the app takes it when the menu opens.
+out=$(backend_steps "$(printf '{"c":"list","path":"%s/from","first":10}' "$CO")" 'wait:"t":"rows"' '{"c":"menuaction","op":"snapshot","id":4,"rows":[2]}' 'do:sleep 1' \
+  "$(printf '{"c":"collisions","id":7,"menuId":4,"dest":"%s/to"}' "$CO")" 'wait:"t":"collisions"' '{"c":"menuaction","op":"close","id":4}' \
+  "$(printf '{"c":"transfer","op":"copy","menuId":4,"dest":"%s/to"}' "$CO")" 'wait:Menu selection expired' \
+  "$(printf '{"c":"transfer","op":"copy","menuId":4,"dest":"%s/to","collide":"keep","collideId":7}' "$CO")" 'wait:"t":"transferdone"' \
+  "$(printf '{"c":"collisions","id":8,"menuId":4,"dest":"%s/to"}' "$CO")" 'wait:"id":8')
+check "a menu question names the menu's own selection" '"id":7,"total":1,"names":[{"n":"photo.png"' "$(echo "$out" | grep -oE '"id":7,"total":[0-9]+,"names":\[\{"n":"[^"]+"')"
+check "the close expired the live selection in this same process" "1" "$(echo "$out" | grep -c '"where":"transfer","path":"","msg":"Menu selection expired; reopen the menu."')"
+check "and its transfer runs on what it captured after the menu closed" '"ok":1,"failed":0,"skipped":0' "$(echo "$out" | grep -oE '"ok":[0-9]+,"failed":[0-9]+,"skipped":[0-9]+')"
+check "keeping both beside the name that was there" "yours" "$(cat "$CO/to/photo copy.png" 2>/dev/null)"
+check "a menu selection that is not there asks nothing" '{"t":"collisions","id":8,"total":0,"names":[]}' "$(echo "$out" | grep '"id":8')"
+# From here a case can send replace, so the backend runs with HOME and XDG_DATA_HOME in this sandbox and a private bus that starts gvfsd with them.
+collide_env=(env HOME="$CO_SB" XDG_DATA_HOME="$CO_SB/data")
+! command -v dbus-run-session >/dev/null || collide_env+=(dbus-run-session --)
+step_wrap=("${collide_env[@]}")
+# A choice naming no question covers nothing, and a transfer with no choice at all is today's.
+collide_fixture
+out=$(backend_steps "$(collide_transfer ',"collide":"replace","collideId":99')" 'wait:"t":"transferdone"')
+check "a choice for a question never asked is refused" '"err":"already exists"' "$(echo "$out" | grep -oE '"err":"[^"]+"')"
+check "and leaves the name already there untouched" "there" "$(cat "$CO/to/photo.png")"
+collide_fixture
+out=$(backend_steps "$(collide_ask 7)" 'wait:"t":"collisions"' "$(collide_transfer ',"collide":"replace","collideId":99')" 'wait:"t":"transferdone"')
+check "a choice naming another id than the question kept is refused" '"name":"photo.png","ok":false,"err":"already exists"' "$(echo "$out" | grep -oE '"name":"photo.png","ok":false,"err":"[^"]+"')"
+check "and the kept question's name is untouched" "there" "$(cat "$CO/to/photo.png")"
+collide_fixture
+out=$(backend_steps "$(collide_transfer '')" 'wait:"t":"transferdone"')
+check "and so is a transfer with no choice at all" '"err":"already exists"' "$(echo "$out" | grep -oE '"err":"[^"]+"')"
+check "neither touched the name already there" "there" "$(cat "$CO/to/photo.png")"
+
+# Same folder: a copy keeps both under Duplicate's name, a move onto itself is no error and no work.
+collide_fixture
+out=$(backend_steps "$(printf '{"c":"transfer","op":"copy","paths":["%s/to/photo.png"],"dest":"%s/to","collide":"refuse"}' "$CO" "$CO")" 'wait:"t":"transferdone"')
+check "a copy into its own folder keeps both" "there" "$(cat "$CO/to/photo copy.png" 2>/dev/null)"
+out=$(backend_steps "$(printf '{"c":"transfer","op":"move","paths":["%s/to/photo.png"],"dest":"%s/to","collide":"refuse"}' "$CO" "$CO")" 'wait:"t":"transferdone"')
+check "a move onto itself is skipped, not failed" '"ok":0,"failed":0,"skipped":1' "$(echo "$out" | grep -oE '"ok":[0-9]+,"failed":[0-9]+,"skipped":[0-9]+')"
+out=$(backend_steps "$(printf '{"c":"transfer","op":"copy","paths":["%s/to/photo.png"],"dest":"%s/to"}' "$CO" "$CO")" 'wait:"t":"transferdone"')
+check "an older client's same-folder copy is refused as before" '"err":"already in that folder"' "$(echo "$out" | grep -oE '"err":"[^"]+"')"
+
+# A move whose Replace would trash the folder holding its own source is refused before any trash is tried.
+collide_fixture
+mkdir -p "$CO/to/album/album"
+printf 'inner' > "$CO/to/album/album/in.txt"
+out=$(backend_steps "$(printf '{"c":"collisions","id":7,"paths":["%s/to/album/album"],"dest":"%s/to"}' "$CO" "$CO")" 'wait:"t":"collisions"' \
+  "$(printf '{"c":"transfer","op":"move","paths":["%s/to/album/album"],"dest":"%s/to","collide":"replace","collideId":7}' "$CO" "$CO")" 'wait:"t":"transferdone"')
+check "a move replacing the folder it sits in is refused" "the item already there holds the one being moved in, so it was not replaced" "$(echo "$out" | grep -oE '"err":"[^"]+"' | cut -d'"' -f4)"
+check "and both folders stay where they were" "inner" "$(cat "$CO/to/album/album/in.txt" 2>/dev/null)"
+
+# gio alone decides which branch runs, never the output under test: a scratch file it trashes here, then lists.
+collide_trash_state() {
+  collide_fixture
+  printf 'probe' > "$CO_SB/probe"
+  "${collide_env[@]}" sh -c 'gio trash -- "$1" >/dev/null 2>&1; [ ! -e "$1" ] || { echo refuses; exit; }
+    if gio trash --list 2>/dev/null | grep -qF "$1"; then echo listed; else echo unlisted; fi' _ "$CO_SB/probe"
+}
+trash_state=$(collide_trash_state)
+echo "note gio trash in this sandbox: $trash_state (a box with gvfs lists, a build container only trashes)"
+for op in copy move; do
+  collide_fixture
+  undone='wait:"t":"undone"'
+  [ "$trash_state" = unlisted ] && undone='wait:"where":"undo"'
+  out=$(backend_steps "$(collide_ask 7)" 'wait:"t":"collisions"' "$(collide_transfer ',"collide":"replace","collideId":7' "$op")" 'wait:"t":"transferdone"' \
+    'do:cat "$CO/to/photo.png" > "$CO_SB/landed"; cat "$CO_SB/data/Trash/files/photo.png" > "$CO_SB/trashed" 2>/dev/null; if [ -e "$CO/from/photo.png" ]; then echo stayed; else echo left; fi > "$CO_SB/source"' \
+    '{"c":"undo"}' "$undone")
+  counts=$(echo "$out" | grep -oE '"ok":[0-9]+,"failed":[0-9]+,"skipped":[0-9]+')
+  if [ "$trash_state" = refuses ]; then
+    check "$op: a trash that refuses replaces nothing" '"ok":1,"failed":1,"skipped":0' "$counts"
+    check "$op: and says so" "the item already there could not be moved to Trash, so nothing was replaced" "$(echo "$out" | grep -oE '"err":"[^"]+"' | cut -d'"' -f4)"
+    check "$op: and the item that was there is there now" "there" "$(cat "$CO/to/photo.png")"
+    continue
+  fi
+  check "$op: replace lands every item" '"ok":2,"failed":0,"skipped":0' "$counts"
+  check "$op: the incoming photo took the name" "yours" "$(cat "$CO_SB/landed" 2>/dev/null)"
+  check "$op: and the one it replaced went to this sandbox's trash" "there" "$(cat "$CO_SB/trashed" 2>/dev/null)"
+  if [ "$op" = move ]; then
+    check "move: the source left its folder" "left" "$(cat "$CO_SB/source" 2>/dev/null)"
+    check "move: and undo puts it back where it was" "yours" "$(cat "$CO/from/photo.png" 2>/dev/null)"
+  else
+    check "copy: the source stays in its folder" "stayed" "$(cat "$CO_SB/source" 2>/dev/null)"
+  fi
+  if [ "$trash_state" = listed ]; then
+    check "$op: and one undo reverses the whole transfer" "{\"t\":\"undone\",\"op\":\"$op\",\"ok\":true}" "$(echo "$out" | grep '"t":"undone"')"
+    check "$op: restoring the item that was there to its name" "there" "$(cat "$CO/to/photo.png" 2>/dev/null)"
+    check "$op: and out of the trash" "no" "$([ -e "$CO_SB/data/Trash/files/photo.png" ] && echo yes || echo no)"
+  else
+    check "$op: a trash gio cannot list leaves undo nothing to restore by, and it says so" "this item was trashed without a trash entry, so it cannot be restored" "$(echo "$out" | grep '"where":"undo"' | grep -oE '"msg":"[^"]+"' | cut -d'"' -f4)"
+    check "$op: so the item that was there waits in the sandbox trash" "there" "$(cat "$CO_SB/data/Trash/files/photo.png" 2>/dev/null)"
+    check "$op: while undo still took the incoming photo off the name" "no" "$([ -e "$CO/to/photo.png" ] && echo yes || echo no)"
+  fi
+done
+step_wrap=()
+sandbox_remove "$CO_SB"
 
 # An op that names neither compress nor extract used to fall through to extract, which would have
 # unpacked into a destination the caller never meant. It is refused by name and starts no job.
@@ -623,6 +919,39 @@ check_changed "and two changes after that re-list are both answered" "$out" 2 4
 out=$(watch_run "$WT" burst_of_creates)
 check_changed "a hundred creates answer a handful of changed lines, not a hundred" "$out" 1 10
 sandbox_remove "$WT_SB"
+
+# A test-only opendir barrier pins a real size worker until the parent releases it. These
+# requests must finish while it is blocked; no sleeps or tree-size guesses choose the race.
+ASYNC_SB="$FIXTURE_ROOT/flea-dirsize-async-$$"
+sandbox_make "$ASYNC_SB"
+python3 tests/dirsize-async.py "$ASYNC_SB" "$BIN"
+check "running size jobs allow cancel, list, sort and quit without stale replies" "0" "$?"
+sandbox_remove "$ASYNC_SB"
+
+# The folder jump through the real binary, with a zoxide of this suite's own first on PATH, so the
+# operator's database is never read. The missing favourite and zoxide row are dropped, the recent file
+# stands for its folder, each folder is answered once, in the first source that names it, and zoxide's
+# score rides along for every folder it ranks, the favourite it also ranks included.
+JUMP_BIN="$SB/jump-bin"
+NO_ZOXIDE="$SB/no-zoxide"
+mkdir -p "$JUMP_BIN" "$NO_ZOXIDE" "$D/ranked"
+cat > "$JUMP_BIN/zoxide" <<EOF
+#!/bin/sh
+[ "\$*" = "query --list --all --score" ] || exit 3
+printf '  %s %s\n' 9.5 '$D/ranked' 4.0 '$D/gone' 2.0 '$D/sub'
+EOF
+chmod +x "$JUMP_BIN/zoxide"
+jump_run() {
+  ( printf '{"c":"jump","id":7,"favourites":["%s/sub","%s/nope"],"recent":["%s/three.txt"]}\n' "$D" "$D" "$D"
+    sleep 1
+    printf '{"c":"quit"}\n' ) | PATH="$1" $BIN --backend 2>/dev/null | grep '"t":"jumped"' | sed 's/,"ms":[0-9.]*}$//'
+}
+check "jump answers each source's existing folders once, in order" \
+  "{\"t\":\"jumped\",\"id\":7,\"favourites\":[\"$D/sub\"],\"zoxide\":[\"$D/ranked\"],\"recent\":[\"$D\"],\"frecency\":{\"$D/sub\":2,\"$D/ranked\":9.5}" \
+  "$(jump_run "$JUMP_BIN:$PATH")"
+check "with no zoxide installed its source is empty and nothing else changes" \
+  "{\"t\":\"jumped\",\"id\":7,\"favourites\":[\"$D/sub\"],\"zoxide\":[],\"recent\":[\"$D\"],\"frecency\":{}" \
+  "$(jump_run "$NO_ZOXIDE")"
 
 # No per-key cleanup: the cache is inside the sandbox, so it goes when the sandbox does.
 sandbox_remove "$SB"

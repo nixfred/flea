@@ -1,30 +1,41 @@
 import Quickshell
 import Quickshell.Io
 import QtQuick
+import "js/Messages.js" as Messages
+import "js/FolderSorts.js" as FolderSorts
+import "js/Swap.js" as Swap
 
 Item {
     id: root
 
-    signal listed(int total, real readMs, real sortMs)
+    signal listed(int total, real readMs, real sortMs, string path)
     // The listing directory's filesystem, straight off the listed line: a drag compares it against
     // the dropped-on folder's own to tell a move within one volume from a copy across two.
     property var dirDev: 0
-    signal rows(int start, var items, real ms, var kinds)
+    // listing is the numbering the rows are in, 0 from a backend that does not say; see docs/protocol.md "listing".
+    signal rows(int start, var items, real ms, var kinds, real listing)
+    // The numbering of the rows the pane holds, which every row-indexed request names back; ui/PaneSwap.qml writes it.
+    property real heldListing: 0
     property real firstRowsAt: 0
     onRows: function(start, items, ms, kinds) {
         if (root.firstRowsAt === 0 && items.length > 0) root.firstRowsAt = Date.now()
     }
     // mode rides only on a denied listing, the one failure a pane draws more than a sentence for.
     signal failed(string where, string input, string message, int mode)
+    // Directive 71: LocalSend's own CLI answers on its own thread, so both legs arrive as their own line.
+    signal localSendPeers(var peers, string reason)
+    signal localSendSent(bool ok, string reason)
     signal thumbed(int row, string file)
     signal dirSized(int row, real bytes, bool partial)
     signal searching(int total, int scanned, real ms)
     signal searched(int total, int scanned, real ms, bool cancelled)
-    // The write operations, see docs/protocol.md; every one of them is reversible with undo.
-    signal transferStarted(int id, int n, bool moving)
-    signal transferProgress(int id, int index, string name, real bytes, real total)
+    // Copy/move support undo; extract uses the same activity card without an undo journal.
+    signal transferStarted(int id, int n, bool moving, bool extract)
+    signal transferProgress(int id, int index, string name, real bytes, real total, real scanned, string phase, string drive)
     signal transferItem(int id, int index, string name, bool ok, string err)
-    signal transferDone(int id, int ok, int failed, int skipped, bool cancelled, var retryPaths)
+    signal transferDone(int id, int ok, int failed, int skipped, bool cancelled, var retryPaths, bool durable, string note)
+    // The names a transfer would land on, asked first; ui/CollideHost.qml holds the transfer until it lands.
+    signal collisions(int id, int total, var names)
     signal trashed(int ok, int failed)
     signal renamed(bool ok, string path)
     signal made(bool ok, string path)
@@ -41,14 +52,15 @@ Item {
     signal redoStarted(int id, int n, string op)
     signal metaResult(var message)
     property int metaToken: 0
-    signal meta(int row, int w, int h, real durationMs, int sampleRate, int entries, real unpacked, bool archiveFailed, var names, real lines, bool partial, bool linesFailed, string target, bool targetDir, string owner)
-    signal fsInfo(string fs, real free)
+    signal meta(int row, int w, int h, int orient, real durationMs, int sampleRate, int entries, real unpacked, bool archiveFailed, var names, real lines, bool partial, bool linesFailed, string target, bool targetDir, string owner)
+    signal fsInfo(string fs, real free, string path, string storageClass)
     // The one line no request asked for: the directory the current listing came from changed under
     // it. path is that directory, so a pane that has since moved can ignore it; see docs/protocol.md.
     signal changed(string path)
-    // readFailed tells a zero-row answer apart from an empty directory; mode is that directory's own, 0 when the stat failed too.
-    // hidden is the flag the request carried, echoed by the backend: two clients peek this wire, so path alone does not say whose reply this is.
-    signal peeked(string path, bool hidden, int total, var rows, bool readFailed, int mode)
+    // readFailed tells an unreadable directory from an empty one (mode 0 when its stat failed too); hidden, hiddenLast and first echo the request, so each of the three peek clients knows its own reply.
+    signal peeked(string path, bool hidden, int total, var rows, bool readFailed, int mode, bool hiddenLast, int first)
+    // The path bar's folder jump, the existing folders of each source in its own order; see docs/protocol.md "jump".
+    signal jumped(int id, var favourites, var zoxide, var recent, var frecency)
     signal archiveStarted(int id)
     signal archiveDone(int id, bool ok, bool verified, string err)
     signal convertChecked(var message)
@@ -61,7 +73,7 @@ Item {
     // The compress submenu is exactly this list, so a box with no 7zip never shows .7z.
     property var archiveFormats: []
     property bool canConvert: false
-    property var extraction: ({archive: false, sevenZip: false})
+    property var extraction: ({archive: false, sevenZip: false, zip: false})
     property var providers: ({})
     property int formatsToken: 0
 
@@ -74,13 +86,40 @@ Item {
     property bool sortDesc: false
     property bool preserveSort: false
     property bool hasListed: false
+    // The path the last list request named, so a settings change re-reads that folder's own order.
+    property string lastListedPath: ""
     readonly property string sortPreference: JSON.stringify(ViewState.state.sort || {})
-    onSortPreferenceChanged: if (!root.preserveSort || !root.hasListed) root.resetSort()
+    onSortPreferenceChanged: if (!root.preserveSort || !root.hasListed) root.resetSort(root.lastListedPath)
 
-    function resetSort() {
-        root.sortBy = (ViewState.state.sort || {}).key || "name"
-        if (root.sortBy === "date") root.sortBy = "mtime"
-        root.sortDesc = (ViewState.state.sort || {}).reverse === true
+    function resetSort(path) {
+        // Read once per listing, so browsing never writes; only Sort.resort does.
+        var order = FolderSorts.orderFor(ViewState.state.folderSorts, path,
+                                         ViewState.state.sort, ViewState.state.rememberSort !== false)
+        root.sortBy = order.key === "date" ? "mtime" : order.key
+        root.sortDesc = order.reverse === true
+    }
+
+    // Whether the Sort by flyout offers its forget row for this folder.
+    function folderHasSort(path) {
+        return ViewState.state.rememberSort !== false && FolderSorts.has(ViewState.state.folderSorts, path)
+    }
+
+    // A user sort writes its folder and moves it to the most recent end; past 500 the oldest goes.
+    function rememberFolderSort(path, key, desc) {
+        if (!FolderSorts.shouldRemember(ViewState.state.rememberSort, path))
+            return
+        var keyed = key === "mtime" ? "date" : key
+        var leaf = {}
+        leaf[path] = { key: keyed, reverse: desc === true }
+        ViewState.changeMapEntries("folderSorts", leaf, FolderSorts.set(ViewState.state.folderSorts, path, keyed, desc === true))
+    }
+
+    function forgetFolderSort(path) {
+        if (!path)
+            return
+        var leaf = {}
+        leaf[path] = null
+        ViewState.changeMapEntries("folderSorts", leaf, FolderSorts.forget(ViewState.state.folderSorts, path))
     }
 
     // What the settle gate asserts: how many thumb requests this process has attempted; see AGENTS.md.
@@ -97,10 +136,15 @@ Item {
 
     // A quit is in flight, so the child's exit is the end the shell asked for, not a failure.
     property bool quitting: false
+    // Only the portal chooser opts in: it has no filesystem write operations to drain.
+    property bool pickerOnly: false
 
-    // Everything the UI sends goes through here, so the protocol has exactly one author.
+    // One of two writers: the chooser's listing worker builds its own list, listpaths and window lines.
     function send(object) {
-        var line = JSON.stringify(object) + "\n"
+        // The chooser opts out of writes, so a dropped command names the command it refused.
+        if (root.pickerOnly && object.c !== "picker" && object.c !== "formats") { console.warn("Backend refused command " + object.c); return }
+        // Every request that names rows names the numbering they were read in, its caller's if it read them earlier; src/backend/rowguard.rs refuses a stale one.
+        var line = JSON.stringify(Swap.named(object, root.heldListing)) + "\n"
         if (root.queueing) {
             root.pending.push(line)
             return
@@ -112,17 +156,19 @@ Item {
         child.write(line)
     }
 
-    function list(path, first, hidden) {
+    // One composition, two senders: the chooser adds the caller's filter to it and counts its own
+    // replies, and issue 134 was the chooser building this by hand without the saved order in it.
+    // A fresh scan is always name ascending, so a refresh after a write puts the header's mark back.
+    function listRequest(path, first, hidden) {
         root.listRequests += 1
-        // A fresh scan is always name ascending, so every refresh after a write operation puts the
-        // header's mark back rather than leaving it describing the order before the refresh.
-        if (!root.preserveSort || !root.hasListed) root.resetSort()
+        root.lastListedPath = path
+        if (!root.preserveSort || !root.hasListed) root.resetSort(path)
         root.hasListed = true
-        root.send({ c: "list", path: path, first: first, hidden: hidden,
-                    by: root.sortBy, desc: root.sortDesc,
-                    foldersFirst: ViewState.state.foldersFirst !== false,
-                    groupByKind: ViewState.state.groupByKind === true })
+        return { c: "list", path: path, first: first, hidden: hidden, by: root.sortBy, desc: root.sortDesc,
+                 foldersFirst: ViewState.state.foldersFirst !== false, groupByKind: ViewState.state.groupByKind === true,
+                 hiddenLast: ViewState.state.hiddenLast === true }
     }
+    function list(path, first, hidden) { root.send(root.listRequest(path, first, hidden)) }
 
     // A listing built from the paths named here, in that order and never sorted; see
     // docs/protocol.md "listpaths". The header's sort mark is left where the caller set it, because
@@ -138,7 +184,8 @@ Item {
     function sort(by, desc) {
         root.send({ c: "sort", by: by, desc: desc,
                     foldersFirst: ViewState.state.foldersFirst !== false,
-                    groupByKind: ViewState.state.groupByKind === true })
+                    groupByKind: ViewState.state.groupByKind === true,
+                    hiddenLast: ViewState.state.hiddenLast === true })
     }
 
     // The walk replaces the current listing with its matches, each named relative to path; see docs/protocol.md "search".
@@ -209,9 +256,20 @@ Item {
         root.send({ c: "fsinfo" })
     }
 
-    // A read-only look at a directory that is not the current listing; see docs/protocol.md "peek".
-    function peek(path, first, hidden) {
-        root.send({ c: "peek", path: path, first: first, hidden: hidden })
+    // A read-only look elsewhere; Tab passes hiddenLast false, other callers keep the listing order.
+    function peek(path, first, hidden, hiddenLast) {
+        var last = hiddenLast === undefined ? ViewState.state.hiddenLast === true : hiddenLast === true
+        root.send({ c: "peek", path: path, first: first, hidden: hidden, hiddenLast: last })
+    }
+
+    // op is "peers" for the flyout's list and "send" for the transfer it chooses; both answer late.
+    // Once per open of the path bar: the client's favourites and recent files, joined there with zoxide; id comes back on the answer.
+    function jump(id, favourites, recent) {
+        root.send({ c: "jump", id: id, favourites: favourites, recent: recent })
+    }
+
+    function localSend(op, peer, paths) {
+        root.send({ c: "localsend", op: op, peer: peer, paths: paths, id: ++root.formatsToken })
     }
 
     function askFormats() {
@@ -234,12 +292,12 @@ Item {
                     requestId: requestId || 0, check: check === true })
     }
 
-    function thumb(rows) {
+    function thumb(rows, cacheOnly) {
         if (rows.length === 0) {
             return
         }
         root.thumbRequests += 1
-        root.send({ c: "thumb", rows: rows })
+        root.send({ c: "thumb", rows: rows, cacheOnly: cacheOnly === true })
     }
 
     // An empty rows cancels EVERYTHING queued, so an empty list is never sent; see docs/protocol.md.
@@ -271,6 +329,12 @@ Item {
             return
         }
         root.quitting = true
+        if (root.pickerOnly) {
+            root.pending = []
+            if (child.running) child.signal(9)
+            else root.quitReady()
+            return
+        }
         // Before the child is up a quit would only join the pending queue and never be written,
         // and nothing can be in flight yet, so there is nothing to drain and the shell goes now.
         if (root.queueing || !child.running) {
@@ -287,12 +351,16 @@ Item {
     // Sample input: {"t":"changed","path":"/home/gm/Downloads"}
     // Sample input: {"t":"searching","n":812,"scanned":41200,"ms":300.114}
     // Sample input: {"t":"transferstarted","id":12,"n":2,"moving":true}
-    // Sample input: {"t":"transferprogress","id":12,"index":0,"name":"a.txt","bytes":40000000,"total":120000000}
+    // Sample input: {"t":"transferstarted","id":12,"n":1,"moving":false,"extract":true}
+    // Sample input: {"t":"transferprogress","id":12,"index":0,"name":"a.txt","bytes":40000000,"total":120000000,"scanned":8400000000}
+    // Sample input: {"t":"transferprogress","id":12,"index":0,"name":"","bytes":0,"total":0,"scanned":0,"phase":"writing","drive":"128GB"}
     // Sample input: {"t":"transferitem","id":12,"index":1,"name":"photos","ok":false,"err":"permission denied"}
-    // Sample input: {"t":"transferdone","id":12,"ok":1,"failed":1,"skipped":0,"cancelled":false}
+    // Sample input: {"t":"transferdone","id":12,"ok":1,"failed":1,"skipped":0,"cancelled":false,"note":"rclone uploads them in the background"}
+    // Sample input: {"t":"collisions","id":7,"total":1,"names":[{"n":"screenshot.png","d":false,"i":"image-x-generic"}]}
     // Sample input: {"t":"trashed","ok":1,"failed":0}
     // Sample input: {"t":"made","ok":true,"path":"/home/gm/Pictures/New Folder"}
     // Sample input: {"t":"undone","op":"move","ok":true}
+    // Sample input: {"t":"jumped","id":3,"favourites":["/home/gm/Projects"],"zoxide":["/home/gm/Documents"],"recent":[],"frecency":{"/home/gm/Documents":80},"ms":4.210}
     function receive(line) {
         if (!line || line.length === 0) {
             return
@@ -304,83 +372,7 @@ Item {
             root.failed("parse", "", "the backend sent a line this build cannot read", 0)
             return
         }
-        if (message.t === "listed") {
-            root.dirDev = message.v || 0
-            root.listed(message.n, message.read, message.sort)
-        } else if (message.t === "rows") {
-            root.rows(message.start, message.rows, message.ms, message.kinds || [])
-        } else if (message.t === "error") {
-            root.failed(message.where, message.path, message.msg, message.mode || 0)
-        } else if (message.t === "thumbed") {
-            root.thumbed(message.row, message.file)
-        } else if (message.t === "dirsized") {
-            root.dirSized(message.row, message.bytes, message.partial)
-        } else if (message.t === "searching") {
-            root.searching(message.n, message.scanned, message.ms)
-        } else if (message.t === "searched") {
-            root.searched(message.n, message.scanned, message.ms, message.cancelled)
-        } else if (message.t === "transferstarted") {
-            root.transferStarted(message.id, message.n, message.moving)
-        } else if (message.t === "transferprogress") {
-            root.transferProgress(message.id, message.index, message.name, message.bytes, message.total)
-        } else if (message.t === "transferitem") {
-            // err rides only on a failure, so an ok item has no field to read here.
-            root.transferItem(message.id, message.index, message.name, message.ok, message.err || "")
-        } else if (message.t === "transferdone") {
-            root.transferDone(message.id, message.ok, message.failed, message.skipped, message.cancelled, message.retryPaths || [])
-        } else if (message.t === "trashed") {
-            root.trashed(message.ok, message.failed)
-        } else if (message.t === "renamed") {
-            root.renamed(message.ok, message.path)
-        } else if (message.t === "made") {
-            root.made(message.ok, message.path)
-        } else if (message.t === "duplicated") {
-            root.duplicated(message.ok, message.path)
-        } else if (message.t === "undone") {
-            root.undone(message.op, message.ok)
-        } else if (message.t === "redone") {
-            root.redone(message.op, message.ok)
-        } else if (message.t === "redostarted") {
-            root.redoStarted(message.id, message.n, message.op)
-        } else if (message.t === "paths") {
-            root.paths(message.paths || [])
-        } else if (message.t === "located") {
-            root.located(message)
-        } else if (message.t === "trashbrowse") {
-            root.trashResult(message)
-        } else if (message.t === "permissions") {
-            root.permissionsResult(message)
-        } else if (message.t === "picker") {
-            root.pickerResult(message)
-        } else if (message.t === "menuaction") {
-            root.menuResult(message)
-        } else if (message.t === "meta") {
-            root.metaResult(message)
-            root.meta(message.row, message.w, message.h, message.ms, message.rate, message.entries, message.unpacked, message.afailed, message.names, message.lines, message.partial, message.lfailed === true, message.target, message.targetdir, message.owner || "")
-        } else if (message.t === "fsinfo") {
-            root.fsInfo(message.fs, message.free)
-        } else if (message.t === "changed") {
-            root.changed(message.path || "")
-        } else if (message.t === "peeked") {
-            root.peeked(message.path, message.hidden === true, message.n, message.rows || [], message.failed === true, message.mode || 0)
-        } else if (message.t === "formats") {
-            root.archiveFormats = message.archive || []
-            root.canConvert = message.convert === true
-            root.extraction = message.extract || ({archive: false, sevenZip: false})
-            root.providers = message.providers || ({})
-            root.formatsResult(message)
-        } else if (message.t === "archivestarted") {
-            root.archiveStarted(message.id)
-        } else if (message.t === "archivedone") {
-            root.archiveDone(message.id, message.ok, message.verified !== false, message.err || "")
-        } else if (message.t === "convertchecked") {
-            root.convertChecked(message)
-        } else if (message.t === "convertstarted") {
-            root.convertStarted(message.id, message.requestId || 0, message.source || "")
-        } else if (message.t === "convertdone") {
-            root.convertDone(message.id, message.ok, message.path || "", message.err || "", message.requestId || 0,
-                             message.source || "", message.collision === true)
-        }
+        Messages.route(root, message)
     }
 
     // Longer than the backend's own 25 s drain limit, so this only fires for a child that never
@@ -404,6 +396,7 @@ Item {
         }
 
         onStarted: {
+            if (root.pickerOnly && root.quitting) { child.signal(9); return }
             root.queueing = false
             // Asked once per process: which formats exist cannot change while the backend runs.
             root.askFormats()
@@ -418,7 +411,10 @@ Item {
             if (root.queueing && !child.running) {
                 root.queueing = false
                 root.pending = []
-                root.failed("backend", "", "the backend could not be started", 0)
+                // FailedToStart has no exited signal. A chooser already cancelling still owes its
+                // lifecycle an answer; a started child clears queueing and must be reaped in exited.
+                if (root.pickerOnly && root.quitting) root.quitReady()
+                else root.failed("backend", "", "the backend could not be started", 0)
             }
         }
 

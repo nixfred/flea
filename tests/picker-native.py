@@ -23,10 +23,102 @@ FRONTEND = "org.freedesktop.portal.Desktop"
 BACKEND = "org.freedesktop.impl.portal.desktop.flea"
 OBJECT = "/org/freedesktop/portal/desktop"
 DEADLINE = 20
+# A refused sort draws nothing to wait for, and a key that lands later still changes the order the next Back checks.
+NO_EVENT_WAIT_S = 0.5
 checks = 0
 processes = []
 current = None
 
+
+# The files the binary was built from, as cargo recorded them, so a #[cfg(test)] module a release build never reads cannot make it look stale.
+# Sample input, target/release/flea.d: "/repo/target/release/flea: /repo/keys.toml /repo/src/main.rs /repo/src/my\ dir/x.rs"
+def build_inputs(binary, repo=REPO):
+    glob = [*repo.glob("src/**/*.rs"), repo / "keys.toml"]
+    dep_info = binary.with_name(binary.name + ".d")
+    if not dep_info.is_file():
+        return glob, "source glob, no dep-info"
+    _, sep, listed = dep_info.read_text().partition(": ")
+    names, word, escaped = [], "", False
+    for char in listed.split("\n", 1)[0].strip():
+        if escaped:
+            word, escaped = word + char, False
+        elif char == "\\":
+            escaped = True
+        elif char == " ":
+            names, word = (names + [word]) if word else names, ""
+        else:
+            word += char
+    if word:
+        names.append(word)
+    paths = [Path(name) for name in names]
+    if not sep or not any(path.suffix == ".rs" for path in paths):
+        return glob, "source glob, dep-info cut short"
+    foreign = [path for path in paths if not in_tree(path, repo)]
+    if foreign:
+        return foreign, "another tree"
+    return paths, "dep-info"
+
+# Under repo and in no checkout nested inside it, since a worktree under .superpowers/ shares the prefix but is another tree.
+def in_tree(path, repo):
+    if not path.is_relative_to(repo):
+        return False
+    return not any((parent / ".git").exists() for parent in path.parents if parent != repo and parent.is_relative_to(repo))
+
+# The newest input and the listed inputs that are gone, which make any binary stale since the build that listed them.
+def newest_input(inputs):
+    missing = [path for path in inputs if not path.exists()]
+    present = [path for path in inputs if path.exists()]
+    newest = max(present, key=lambda path: path.stat().st_mtime_ns, default=None)
+    return newest, missing
+
+# Whether the binary is at least as new as every input, and the detail a failure names.
+def fresh(binary, inputs, how):
+    newest, missing = newest_input(inputs)
+    detail = {"inputs": how, "newest": str(newest), "missing": [str(path) for path in missing]}
+    return not missing and newest is not None and binary.stat().st_mtime_ns >= newest.stat().st_mtime_ns, detail
+
+# The freshness gate's own adversarial cases on a scratch tree: escaped space, test-only file, file gone, cut short, no source, another tree.
+def check_build_inputs():
+    with tempfile.TemporaryDirectory() as scratch:
+        repo = Path(scratch) / "repo"
+        (repo / "src" / "my dir").mkdir(parents=True)
+        (repo / "target" / "release").mkdir(parents=True)
+        main, spaced, test_only = repo / "src" / "main.rs", repo / "src" / "my dir" / "x.rs", repo / "src" / "only_tests.rs"
+        for path in (main, spaced, repo / "keys.toml"):
+            path.write_text("")
+        binary = repo / "target" / "release" / "flea"
+        binary.write_text("")
+        dep_info = binary.with_name("flea.d")
+        dep_info.write_text(f"{binary}: {repo}/keys.toml {main} {repo}/src/my\\ dir/x.rs\n")
+        check("dep-info parses an escaped space", build_inputs(binary, repo) == ([repo / "keys.toml", main, spaced], "dep-info"))
+        ns_per_second, base_stamp = 10**9, 10**18
+        for age, path in enumerate((repo / "keys.toml", spaced, main)):
+            os.utime(path, ns=(base_stamp + age * ns_per_second,) * 2)
+        os.utime(binary, ns=(base_stamp + 2 * ns_per_second,) * 2)
+        check("the newest listed input is the one judged", newest_input([repo / "keys.toml", main, spaced])[0] == main)
+        check("a binary exactly as new as its newest input is fresh", fresh(binary, build_inputs(binary, repo)[0], "dep-info")[0])
+        os.utime(spaced, ns=(base_stamp + 3 * ns_per_second,) * 2)
+        check("an input newer than the binary makes it stale", not fresh(binary, build_inputs(binary, repo)[0], "dep-info")[0])
+        test_only.write_text("")
+        check("a test-only file cargo never listed does not count", test_only not in build_inputs(binary, repo)[0])
+        spaced.unlink()
+        gone_fresh, gone_detail = fresh(binary, build_inputs(binary, repo)[0], "dep-info")
+        check("a listed input that is gone counts as stale", not gone_fresh and gone_detail["missing"] == [str(spaced)])
+        glob = sorted([*repo.glob("src/**/*.rs"), repo / "keys.toml"])
+        for label, text in (("cut short", f"{binary}"), ("with no Rust source", f"{binary}: {repo}/keys.toml\n")):
+            dep_info.write_text(text)
+            listed, how = build_inputs(binary, repo)
+            check(f"dep-info {label} falls back to the whole source glob", (sorted(listed), how) == (glob, "source glob, dep-info cut short"))
+        dep_info.unlink()
+        listed, how = build_inputs(binary, repo)
+        check("no dep-info falls back to the whole source glob", (sorted(listed), how) == (glob, "source glob, no dep-info"))
+        dep_info.write_text(f"{binary}: /elsewhere/src/main.rs\n")
+        check("dep-info naming another tree is a foreign binary", build_inputs(binary, repo) == ([Path("/elsewhere/src/main.rs")], "another tree"))
+        nested = repo / "wt" / "cand"
+        (nested / "src").mkdir(parents=True)
+        (nested / ".git").write_text("gitdir: elsewhere\n")
+        dep_info.write_text(f"{binary}: {nested}/src/main.rs\n")
+        check("dep-info from a checkout nested in the tree is a foreign binary", build_inputs(binary, repo)[1] == "another tree")
 
 def run(args, env=None):
     return subprocess.run([str(arg) for arg in args], env=env, text=True, capture_output=True, check=True, timeout=30).stdout.strip()
@@ -38,6 +130,14 @@ def check(label, condition, observed=None):
         raise AssertionError(f"{label}: {observed!r}")
     checks += 1
     print(f"PICKER_CHECK {checks} {label} {json.dumps(observed)}", flush=True)
+
+
+def kill_if_alive(pid):
+    # Cleanup only, so a child that already died cannot mask the assertion that brought us here.
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def wait(label, predicate):
@@ -136,7 +236,7 @@ class Request:
         check(f"{self.name}: candidate UI", environ.get(b"FLEA_UI", b"").decode() == str(UI), environ.get(b"FLEA_UI", b"").decode())
         self.reply_path = guard(environ[b"FLEA_PICKER_REPLY"].decode())
         command = Path(f"/proc/{self.pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
-        check(f"{self.name}: native config", str(UI / "picker.qml") in command, command)
+        check(f"{self.name}: native config", str(UI / "boot" / "picker.qml") in command, command)
         drive("focus", self.title)
         self.until("ready listing", lambda state: state["state"] != "loading" and not state["marksBusy"] and (state["total"] == 0 or state["rows"]))
         children = Path(f"/proc/{self.pid}/task/{self.pid}/children").read_text().split()
@@ -442,16 +542,22 @@ def test_failure():
         before = lost.state()
         children = Path(f"/proc/{lost.pid}/task/{lost.pid}/children").read_text().split()
         backends = [int(pid) for pid in children if Path(f"/proc/{pid}/exe").resolve() == BIN]
-        check("backend failure targets only owned candidate child", len(backends) == 1, backends)
-        # Stop only this backend to make the UI's outstanding check observable before killing it.
-        os.kill(backends[0], signal.SIGSTOP)
+        # The chooser owns exactly two candidate children: the identity checks and the listing worker.
+        check("backend failure targets both owned candidate children", len(backends) == 2, backends)
+        stopped = []
         try:
+            # This case navigates nowhere after the read above, so the chooser replaces no worker and a missing child is a defect.
+            for backend in backends:
+                os.kill(backend, signal.SIGSTOP)
+                stopped.append(backend)
             lost.click("Save" if mode == "save" else "Open")
             lost.until("acceptance waits on the real stopped backend", lambda state: state["submitting"])
             lost.until("submission keeps enabled Cancel focused", lambda state: any(
                 control["name"] == "Cancel" and control["focused"] and control["enabled"] for control in state["controls"]))
         finally:
-            os.kill(backends[0], signal.SIGKILL)
+            # A stopped process cannot exit, so its PID was never reaped and is still the child this run signalled.
+            for backend in stopped:
+                kill_if_alive(backend)
         after = lost.until("lost backend clears checks and disables acceptance", lambda state: state["backendUnavailable"] and not state["submitting"] and not state["marksBusy"] and not state["saveBusy"] and not state["canAccept"] and state["messageError"])
         check("backend loss retains selected identities and draft", after["marks"] == before["marks"] and after["saveName"] == before["saveName"])
         check("backend loss advertises only cancellation", after["hints"] == "Esc cancel", after["hints"])
@@ -547,10 +653,154 @@ def test_keys():
         small.cancel()
 
 
+def names(state):
+    return [row["n"] for row in state["rows"]]
+
+
+def test_sorting():
+    # The fixture's name, size, modified and kind orders all differ, so a marked order over other rows is caught by names.
+    ordered = guard(root / "ordered")
+    for directory in [ordered, ordered / "folder", ordered / "refused"]:
+        guard(directory).mkdir()
+    for name, size, year in [("alpha.txt", 200, 2022), ("bravo.txt", 3000, 2020), ("charlie.txt", 1, 2021),
+                             ("photo.png", 1500, 2019), (".dot.txt", 50, 2024)]:
+        write(ordered / name, "x" * size)
+        stamp = time.mktime((year, 1, 1, 12, 0, 0, 0, 0, -1))
+        os.utime(guard(ordered / name), (stamp, stamp))
+    by_name = ["folder", "refused", "alpha.txt", "bravo.txt", "charlie.txt", "photo.png"]
+    by_size = ["folder", "refused", "charlie.txt", "alpha.txt", "photo.png", "bravo.txt"]
+    by_modified = ["folder", "refused", "photo.png", "bravo.txt", "charlie.txt", "alpha.txt"]
+    by_modified_shown = by_modified + [".dot.txt"]
+    by_kind = ["folder", "refused", "photo.png", "alpha.txt", "bravo.txt", "charlie.txt"]
+    saved = json.dumps({"sort": {"key": "kind", "reverse": False}})
+    write(state_file, saved)
+    # Recent's newest-first order matches none of the fixture's sort orders, so a Recent that sorts is caught.
+    recent_order = ["bravo.txt", "alpha.txt", "photo.png", "charlie.txt"]
+    # Written in yet another order, so a Recent that keeps the file's order instead of the visit times is caught too.
+    file_order = ["photo.png", "charlie.txt", "bravo.txt", "alpha.txt"]
+    bookmarks = "".join(f'<bookmark href="{(ordered / name).as_uri()}" visited="2026-09-0{9 - recent_order.index(name)}T12:00:00Z"/>'
+                        for name in file_order)
+    write(root / "data/recently-used.xbel", f'<?xml version="1.0" encoding="UTF-8"?><xbel version="1.0">{bookmarks}</xbel>')
+
+    sorting = Request("SP11-sorting", folder=ordered, multiple=GLib.Variant("b", True)).opened()
+    inherited = sorting.until("the window's saved kind order is inherited", lambda state: state["sortBy"] == "kind" and state["state"] == "ready" and names(state) == by_kind)
+    kind_order = names(inherited)
+    sorting.key("S")
+    # Descending reverses kind and its name tie-break together inside the folders-first group (src/backend/ordering.rs).
+    reverse_kind = ["refused", "folder", "charlie.txt", "bravo.txt", "alpha.txt", "photo.png"]
+    sorting.until("S reverses an inherited kind order", lambda state: state["sortBy"] == "kind" and state["sortDesc"]
+                  and state["state"] == "ready" and names(state) == reverse_kind)
+    sorting.key("s")
+    sorting.until("s leaves kind for name", lambda state: state["sortBy"] == "name" and not state["sortDesc"] and names(state) == by_name)
+    sorting.key("s")
+    sorting.until("s steps to size", lambda state: state["sortBy"] == "size" and names(state) == by_size)
+    sorting.key("s")
+    sorting.until("s steps to modified", lambda state: state["sortBy"] == "mtime" and names(state) == by_modified)
+    sorting.key("s")
+    sorting.until("s wraps to name and never lands on kind", lambda state: state["sortBy"] == "name" and names(state) == by_name)
+
+    sorting.mark("bravo.txt")
+    sorting.click("Sort by Size")
+    sorting.until("a header click sorts that column ascending, returns to the first row and keeps the list's keys",
+                  lambda state: state["sortBy"] == "size" and not state["sortDesc"] and names(state) == by_size
+                  and state["cursor"] == 0 and state["listFocus"] and state["headerMark"] == "size")
+    sorting.click("Sort by Size")
+    reverse_size = ["refused", "folder", "bravo.txt", "photo.png", "alpha.txt", "charlie.txt"]
+    clicked = sorting.until("a second click reverses it", lambda state: state["sortDesc"] and names(state) == reverse_size)
+    check("SP11 the mark is a path and survives both reorders", [mark["path"] for mark in clicked["marks"]] == [str(ordered / "bravo.txt")], clicked["marks"])
+    sorting.capture("size-descending")
+    sorting.click("Sort by Modified")
+    sorting.until("a click on another column starts ascending", lambda state: state["sortBy"] == "mtime" and not state["sortDesc"] and names(state) == by_modified)
+
+    sorting.key(".")
+    sorting.until("the hidden toggle re-reads the folder in the chosen order", lambda state: state["state"] == "ready" and state["sortBy"] == "mtime" and names(state) == by_modified_shown)
+    sorting.key(".")
+    sorting.until("and hides the dotfile again", lambda state: state["state"] == "ready" and names(state) == by_modified)
+    write(ordered / "delta.txt", "xx")
+    sorting.until("a watched refresh keeps the chosen order", lambda state: names(state) == by_modified + ["delta.txt"])
+    guard(ordered / "delta.txt").unlink()
+    sorting.until("and keeps it when the file goes", lambda state: names(state) == by_modified)
+
+    guard(ordered / "refused").chmod(0)
+    try:
+        sorting.row("refused")
+        sorting.key("-k", "Return")
+        sorting.until("a refused folder is told apart from an empty one", lambda state: state["path"] == str(ordered / "refused")
+                      and state["listingFailed"] and not state["sortable"] and state["total"] == 0)
+        check("SP11 the header is disabled over a refused folder", not sorting.control("Sort by Name")["enabled"], sorting.state()["controls"])
+        sorting.key("s")
+        sorting.key("S")
+        sorting.click("Sort by Name")
+        time.sleep(NO_EVENT_WAIT_S)
+        refused = sorting.state()
+        check("SP11 no sort draws the previous folder's rows under a refused path",
+              refused["total"] == 0 and refused["rows"] == [] and refused["sortBy"] == "mtime" and not refused["sortDesc"], refused)
+    finally:
+        guard(ordered / "refused").chmod(0o700)
+    sorting.click("Back")
+    sorting.until("Back restores a sortable listing in the chosen order", lambda state: state["path"] == str(ordered)
+                  and state["sortable"] and not state["listingFailed"] and names(state) == by_modified)
+
+    sorting.click("Recent")
+    recent = sorting.until("Recent draws no sort mark and cannot be sorted", lambda state: state["path"] == "flea:recent"
+                           and state["state"] != "loading" and not state["sortable"] and state["listFocus"]
+                           and state["headerMark"] == "" and [Path(name).name for name in names(state)] == recent_order)
+    check("SP11 the header is disabled over Recent", not sorting.control("Sort by Name")["enabled"], recent["controls"])
+    sorting.key("s")
+    sorting.click("Sort by Name")
+    time.sleep(NO_EVENT_WAIT_S)
+    check("SP11 Recent keeps the desktop's order", names(sorting.state()) == names(recent) and sorting.state()["sortBy"] == "mtime", sorting.state())
+    sorting.capture("recent")
+    sorting.click("Back")
+    sorting.until("leaving Recent restores the chosen order", lambda state: state["path"] == str(ordered) and names(state) == by_modified)
+    check("SP11 ui.json is byte for byte what the window saved", state_file.read_text() == saved, state_file.read_text())
+    guard(root / "data/recently-used.xbel").unlink()
+    # The two requests below start from name, the order a box with nothing saved opens in.
+    guard(state_file).unlink()
+    sorting.row("alpha.txt")
+    sorting.key("-k", "Return")
+    sorting.answered(0, [(ordered / "bravo.txt").as_uri()])
+
+    write(large / "aaa-first.txt", "x" * 5000)
+    scrolled = Request("SP12-sorting-scrolled", folder=large).opened()
+    scrolled.key("-k", "End")
+    scrolled.until("the viewport left the top", lambda state: state["held"] > 0)
+    scrolled.key("s")
+    # A sort is refused while a listing is loading, so S sent on the heels of s can be dropped.
+    scrolled.until("the first sort lands before the second is asked for",
+                   lambda state: state["sortBy"] == "size" and not state["sortDesc"] and state["state"] == "ready"
+                   and state["held"] == 0 and state["cursor"] == 0)
+    scrolled.key("-k", "End")
+    scrolled.until("the viewport left the top again", lambda state: state["held"] > 0)
+    scrolled.key("S")
+    scrolled.until("a sort returns the viewport and the cursor to the first row",
+                   lambda state: state["sortBy"] == "size" and state["sortDesc"] and state["held"] == 0
+                   and state["cursor"] == 0 and names(state)[:2] == ["aaa-first.txt", "zz-last.png"])
+    scrolled.cancel()
+    guard(large / "aaa-first.txt").unlink()
+
+    write(ordered / "report.txt", "taken")
+    saving = Request("SP13-sorting-save", method="SaveFile", folder=ordered, current_name=GLib.Variant("s", "report.txt")).opened()
+    saving.until("the collision is reviewed", lambda state: state["saveReady"] and state["collision"])
+    saving.key("s")
+    saving.until("a sort keeps the filename and its collision answer", lambda state: state["sortBy"] == "size"
+                 and state["state"] == "ready" and state["saveName"] == "report.txt" and state["saveReady"] and state["collision"])
+    saving.focus_control("Filename")
+    saving.key("-k", "End")
+    # One key per call: omarchy-drive joins several arguments with a space, which the field would take as text.
+    saving.key("s")
+    saving.key("S")
+    typed = saving.until("s and S typed into Filename are text", lambda state: state["saveName"] == "report.txtsS")
+    check("SP13 typing in Filename sorts nothing", typed["sortBy"] == "size" and not typed["sortDesc"], typed)
+    saving.cancel()
+    guard(ordered / "report.txt").unlink()
+
+
 def main():
     groups = {"single": test_single, "multiple": test_multiple, "directory": test_directory,
               "filters": test_filters, "changed": test_changed, "save": test_save,
-              "cancel": test_cancel, "failure": test_failure, "keys": test_keys}
+              "cancel": test_cancel, "failure": test_failure, "keys": test_keys,
+              "sorting": test_sorting}
     selected = sys.argv[1:] or list(groups)
     for name in selected:
         if name not in groups:
@@ -595,10 +845,13 @@ try:
     dirty = run(["git", "-C", REPO, "status", "--porcelain"])
     check("candidate source clean", not dirty, dirty)
     check("candidate UI belongs to source tree", UI == REPO / "ui", str(UI))
-    inputs = [*REPO.glob("src/**/*.rs"), REPO / "Cargo.toml", REPO / "Cargo.lock", REPO / "keys.toml"]
+    check_build_inputs()
+    listed, how = build_inputs(BIN)
+    check("candidate binary built from this tree", how != "another tree", {"inputs": how, "foreign": [str(path) for path in listed[:3]]})
+    inputs = [*listed, REPO / "Cargo.toml", REPO / "Cargo.lock"]
     if (REPO / "build.rs").is_file(): inputs.append(REPO / "build.rs")
-    newest = max(path.stat().st_mtime_ns for path in inputs)
-    check("candidate binary newer than build inputs", BIN.stat().st_mtime_ns >= newest)
+    is_fresh, detail = fresh(BIN, inputs, how)
+    check("candidate binary newer than build inputs", is_fresh, detail)
     manifest = {"head": head, "dirty": dirty,
                 "binary": str(BIN), "binarySha256": hashlib.sha256(BIN.read_bytes()).hexdigest(), "ui": str(UI), "session": {key: drive_env[key] for key in expected}}
     write(root / "candidate.json", json.dumps(manifest, indent=2))

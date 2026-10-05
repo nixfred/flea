@@ -31,28 +31,26 @@ pub enum Ran {
     NotStarted,
 }
 
-// The deadline and both syscall failures have to end the child, and only the caller knows what its ending means.
-fn kill_and_reap(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+// The deadline and both syscall failures have to end every process in the jail, not just bwrap.
+fn kill_and_reap(jailed: &mut crate::backend::jail::Jailed) {
+    crate::backend::jail::kill_tree(jailed);
 }
 
 // thumbargv builds the inner argv and sandbox wraps it; this runs the result and reports which of the three things happened.
 pub fn run_with_timeout(full: &[String], limit: Duration) -> Ran {
-    let mut cmd = std::process::Command::new(&full[0]);
-    cmd.args(&full[1..]);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
+    let mut jailed = match crate::backend::jail::spawn_jailed(full, |cmd| {
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+    }) {
+        Ok(j) => j,
         Err(_) => return Ran::NotStarted,
     };
     // A child that exited before this line is a zombie std has not waited on, so the pid is still ours and cannot have been reused.
-    let raw = unsafe { pidfd_open(child.id() as i32, 0) };
+    let raw = unsafe { pidfd_open(jailed.child.id() as i32, 0) };
     if raw < 0 {
         // corner: a descriptor this process could not open is the machine's fault and never the file's, so no marker is recorded, see AGENTS.md "Thumbnail pool".
-        kill_and_reap(&mut child);
+        kill_and_reap(&mut jailed);
         return Ran::NotStarted;
     }
     // OwnedFd closes on Drop, so every path out of this function releases the descriptor without anyone remembering to.
@@ -69,17 +67,17 @@ pub fn run_with_timeout(full: &[String], limit: Duration) -> Ran {
         }
         if ready == 0 {
             // A decoder still running at the deadline is one of the two paths that record a marker, the other being a non-zero exit.
-            kill_and_reap(&mut child);
+            kill_and_reap(&mut jailed);
             return Ran::Failed;
         }
         // corner: a ready descriptor with no POLLIN cannot happen for a pidfd and a poll error is the machine's, so neither judges the file, see AGENTS.md "Thumbnail pool".
         if ready > 0 || std::io::Error::last_os_error().raw_os_error() != Some(EINTR) {
-            kill_and_reap(&mut child);
+            kill_and_reap(&mut jailed);
             return Ran::NotStarted;
         }
     }
     // poll says only that the child exited, so the status itself still comes from wait.
-    verdict(&mut child)
+    verdict(&mut jailed.child)
 }
 
 // Reading the status is its own function so a test can reap the child first and drive the wait that fails.
@@ -133,28 +131,71 @@ mod tests {
         assert!(matches!(verdict(&mut child), Ran::NotStarted));
     }
 
+    // A try_wait loop looking at fixed multiples of one period from its spawn, the step waiter this test must tell apart.
+    fn poll_wait(full: &[String], period: Duration) -> bool {
+        let spawned = Instant::now();
+        let mut child = std::process::Command::new(&full[0]).args(&full[1..])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).spawn().unwrap();
+        let mut looks: u32 = 1;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) => {
+                    std::thread::sleep((spawned + period * looks).saturating_duration_since(Instant::now()));
+                    looks += 1;
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Two sleeps GAP apart move a period-P step waiter's overshoot by GAP or P - GAP, so every P of at least twice GAP shows at least GAP.
+    const GAP: Duration = Duration::from_millis(5);
+    // The shortest step waiter the test promises to catch, at twice GAP.
+    const SLOWEST_CAUGHT: Duration = Duration::from_millis(10);
+
+    // How far one waiter's least overshoot moves between two sleeps GAP apart; load only delays an exact waiter, so its least run is its floor.
+    fn overshoot_drift(wait: &dyn Fn(&[String]) -> bool) -> Duration {
+        const NEAR_SLEEP: Duration = Duration::from_millis(30);
+        // Nine runs a sleep, so at least one of them meets an idle scheduler even on a loaded builder.
+        const RUNS: usize = 9;
+        // Four decimals, so a sub-millisecond gap is spelled out.
+        let argv = |sleep: Duration| vec!["/usr/bin/sleep".to_string(), format!("{:.4}", sleep.as_secs_f64())];
+        let mut near: Vec<Duration> = Vec::with_capacity(RUNS);
+        let mut far: Vec<Duration> = Vec::with_capacity(RUNS);
+        for _ in 0..RUNS {
+            for (sleep, out) in [(NEAR_SLEEP, &mut near), (NEAR_SLEEP + GAP, &mut far)] {
+                let started = Instant::now();
+                assert!(wait(&argv(sleep)), "the sleep child failed");
+                let took = started.elapsed();
+                // The lower bound is what stops a shortened child from making every overshoot zero and the test vacuous.
+                assert!(took >= sleep, "the child returned before its own sleep, at {took:?}");
+                out.push(took - sleep);
+            }
+        }
+        let least = |samples: &[Duration]| samples.iter().copied().min().unwrap_or_default();
+        least(&near).abs_diff(least(&far))
+    }
+
     #[test]
     fn a_child_is_noticed_when_it_exits_rather_than_at_the_next_poll_boundary() {
-        // The child sleeps 30 ms, which a 25 ms poll step could only notice at its 50 ms boundary.
-        const CHILD_SLEEP: Duration = Duration::from_millis(30);
-        // Nine runs, so a single scheduling stall cannot move the fifth value.
-        const RUNS: usize = 9;
-        // Above the exact wait's low single digits and well under the old step's 20 ms, so it is neither flaky nor vacuous.
-        const BOUND: Duration = Duration::from_millis(10);
-        // The argv is derived from the constant, so raising one cannot silently leave the other behind.
-        let full = vec!["/usr/bin/sleep".to_string(), format!("{:.3}", CHILD_SLEEP.as_secs_f64())];
-        let mut overshoot: Vec<Duration> = Vec::new();
-        for _ in 0..RUNS {
-            let started = Instant::now();
-            assert!(matches!(run_with_timeout(&full, A_LONG_LIMIT), Ran::Succeeded));
-            let took = started.elapsed();
-            // The lower bound is what stops a shortened child from making every overshoot zero and the test vacuous.
-            assert!(took >= CHILD_SLEEP, "the child returned before its own sleep, at {:?}", took);
-            overshoot.push(took - CHILD_SLEEP);
+        // A loaded builder can blur the reference itself; an attempt that cannot see a step judges nothing and is taken again.
+        const ATTEMPTS: usize = 3;
+        for attempt in 1..=ATTEMPTS {
+            let exact = overshoot_drift(&|full| matches!(run_with_timeout(full, A_LONG_LIMIT), Ran::Succeeded));
+            let stepped = overshoot_drift(&|full| poll_wait(full, SLOWEST_CAUGHT));
+            if stepped < GAP / 2 && attempt < ATTEMPTS {
+                continue;
+            }
+            assert!(stepped >= GAP / 2, "a {SLOWEST_CAUGHT:?} poll waiter moved only {stepped:?} in {ATTEMPTS} attempts, so this builder cannot see a step");
+            assert!(exact < GAP / 2, "least overshoot moves {exact:?} between a 30 ms and a 35 ms child, against {stepped:?} for a {SLOWEST_CAUGHT:?} poll waiter");
+            return;
         }
-        overshoot.sort();
-        let median = overshoot[RUNS / 2];
-        assert!(median < BOUND, "median overshoot was {:?} over {} runs", median, RUNS);
     }
 
     #[test]

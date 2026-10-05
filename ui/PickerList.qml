@@ -4,6 +4,8 @@ import "." as Flea
 import "js/Match.js" as Match
 import "js/Picker.js" as Picker
 import "js/Keymap.js" as Keymap
+import "js/Scroll.js" as Scroll
+import "js/Sort.js" as Sort
 
 // The picker's listing: ui/Row.qml drawn behind a check box, and the keys that move through it. The
 // window's own ui/List.qml is not reused, because every line of it that is not layout is a drag, a
@@ -13,6 +15,11 @@ ListView {
 
     property var picker: null
     property var backend: null
+
+    // Whether the listing shows the directory's dotfiles. The backend never sends what a request
+    // did not ask for, so the window re-reads the standing directory when this flips; `.` and the
+    // preset's toggleHidden chord are the two ways in, and the flag survives every walk.
+    property bool showHidden: false
 
     readonly property int visibleRows: Math.max(1, Math.ceil(root.height / Theme.rowHeight))
     // The board's content-box dimensions exclude the border; QML Rectangle dimensions include it.
@@ -30,7 +37,14 @@ ListView {
     Keys.onTabPressed: function(event) { root.picker.stepFocus(root, (event.modifiers & Qt.ShiftModifier) !== 0) }
     Keys.onBacktabPressed: root.picker.stepFocus(root, true)
     property bool firstArmed: false
+    // The previous tap path, so a rebuilt list never sends a row the first tap missed.
+    property string lastTapPath: ""
     Flea.FastScrollHandler { flickable: root }
+    Flea.ViewportScrollBar {
+        parent: root
+        anchors { top: parent.top; right: parent.right }
+        flickable: root
+    }
 
     delegate: Item {
         id: cell
@@ -48,7 +62,8 @@ ListView {
         readonly property bool markable: cell.row !== null && Picker.directory(cell.row) === root.picker.folderMode
         readonly property bool isMarked: cell.markable && Picker.marked(root.picker.marks, cell.rowPath)
 
-        width: root.width
+        // The scroll lane stays clear, the same rule the window's own list follows.
+        width: Scroll.contentWidth(root.width, Theme.spacing.rowPaddingX)
         height: Theme.rowHeight
 
         // The board's marked row: the accent wash and the accent bar, under the row's own text. The
@@ -56,7 +71,8 @@ ListView {
         // ui/Row.qml is left unselected here and the picker paints its own mark behind it.
         Rectangle {
             visible: cell.isMarked
-            anchors.fill: parent
+            width: root.width
+            height: parent.height
             color: Style.selectedAccentFill
         }
 
@@ -69,6 +85,7 @@ ListView {
 
         Flea.Row {
             anchors.fill: parent
+            paintWidth: root.width
             leadingSlot: root.checkSize + Theme.spacing.gap
             compactDate: true
             foregroundMetadata: true
@@ -107,19 +124,18 @@ ListView {
         TapHandler {
             id: tap
             acceptedButtons: Qt.LeftButton
-            // ui/js/Tap.js's rule, one tap selects and the second opens, with the chooser's one
-            // difference: the second tap on a file marks it and never sends, because a double click
-            // that hands a file to the caller is a send nobody asked for.
+            // One tap moves the cursor, a second tap on the same path opens or sends, a box tap toggles.
             onTapped: function (eventPoint, button) {
                 root.picker.cursorIndex = cell.listingIndex
                 root.forceActiveFocus()
                 var onBox = box.visible && eventPoint.position.x <= box.x + box.width + Theme.spacing.gap
+                var second = tap.tapCount === 2
+                var firstPath = root.lastTapPath
+                root.lastTapPath = cell.rowPath
                 if (onBox)
                     root.picker.toggleMark(cell.listingIndex)
-                else if (tap.tapCount === 2 && Picker.directory(cell.row))
-                    root.picker.open(cell.rowPath)
-                else if (tap.tapCount === 2 && cell.markable)
-                    root.picker.toggleMark(cell.listingIndex)
+                else if (second && Picker.sameTap(firstPath, cell.rowPath))
+                    root.picker.doubleActivate(cell.listingIndex, cell.rowPath, firstPath)
             }
         }
     }
@@ -164,6 +180,14 @@ ListView {
             root.picker.goUp()
         } else if (action === "historyBack") {
             root.picker.goBack()
+        } else if (action === "sortNext") {
+            root.picker.requestSort(Sort.nextOrder(Picker.SORT_ORDERS, root.picker.sortBy))
+        } else if (action === "sortReverse") {
+            root.picker.requestSort(Sort.reverseOrder(root.picker.sortBy, root.picker.sortDesc))
+        } else if (action === "toggleHidden") {
+            root.showHidden = !root.showHidden
+            if (root.picker.path.length > 0)
+                root.picker.openWithoutHistory(root.picker.path)
         } else {
             event.accepted = false
         }

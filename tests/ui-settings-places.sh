@@ -15,7 +15,7 @@ assert not any(row["text"] == "FAVORITES" for row in headers), "Empty Favorites 
 rows = [row for row in state["rows"] if row["group"] in ("trash", "device")]
 assert any(row["kind"] == "disk" for row in rows), "No native internal disk row for capacity proof"
 assert any(row["kind"] == "trash" for row in rows), "No native Trash row"
-edges = []
+edges, indicators = [], []
 for row in rows:
     if row["kind"] == "trash":
         expected = str(count) if enabled and count else ""
@@ -32,11 +32,22 @@ for row in rows:
     if expected:
         detail, slot = row["detailRect"], row["indicatorRect"]
         assert row["detailColor"] == muted and row["tabular"], row
-        assert slot["width"] == row["fontSize"], row
-        assert detail["x"] + detail["width"] < slot["x"], row
         assert row["kind"] != "disk" or not row["indicatorVisible"], row
-        edges.append(detail["x"] + detail["width"])
-assert len(set(edges)) <= 1, ("Rail detail right edges differ", edges)
+        # RailDetails rules 1 and 3 with their 2026-09-14 amendment: a drive size ends on the sizes'
+        # own x with the 12px slot reserved after it, dot or no dot, and the Trash count is an
+        # indicator, so it sits in that slot on the same edge as the dots and the NETWORK plus.
+        if row["kind"] == "trash":
+            assert slot["width"] == 0, row
+            indicators.append(detail["x"] + detail["width"])
+        else:
+            assert slot["width"] == row["fontSize"], row
+            assert detail["x"] + detail["width"] < slot["x"], row
+            edges.append(detail["x"] + detail["width"])
+for row in state["rows"]:
+    if row["indicatorVisible"]:
+        indicators.append(row["indicatorRect"]["x"] + row["indicatorRect"]["width"])
+assert len(set(edges)) <= 1, ("Rail size right edges differ", edges)
+assert len(set(indicators)) <= 1, ("Rail indicator right edges differ", indicators)
 print("RAIL_DETAILS " + json.dumps(state, sort_keys=True))
 PY
     [[ "$?" == 0 ]] || fail "rail: actual detail text, geometry, or semantic role differs"
@@ -147,6 +158,18 @@ places_click_part() {
     settle
 }
 
+# The one action that governs the whole group rides its heading, so it is clicked by row id.
+places_click_heading() {
+    local id="$1" wx wy ww wh x y
+    settings_focus_row "$id"
+    read -r x y <<< "$(ipc settingsRowCentre "$id")"
+    read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
+    [[ "$x" =~ ^[0-9]+$ && "$y" =~ ^[0-9]+$ ]] || fail "places: $id has no actual centre"
+    (( x > 0 && y > 0 && x < ww && y < wh )) || fail "places: $id is outside the viewport"
+    omarchy-drive click "$((wx + x))" "$((wy + y))" left >/dev/null
+    settle
+}
+
 places_click_menu() {
     local label="$1" index x y wx wy ww wh
     index=$(menu_row_index "$label") || fail "places: menu lacks $label"
@@ -198,11 +221,14 @@ places_drag_row() {
 places_concurrent() (
     local dir="$1" expected="$2" first_pid first_id second_pid="" second_id="" second_address=""
     local instance pid address attempt rows width cursor active permissions_checks=0
+    local addition="$dir/rail-add"
+    sandbox_require "$addition"
+    mkdir "$addition" || fail "places: distinct rail identity fixture creation failed"
     first_pid=$(flea_pid)
-    first_id=$(qs list --all --json | jq -er --arg path "$flea_ui/shell.qml" --argjson pid "$first_pid" '.[] | select(.config_path == $path and .pid == $pid) | .id')
+    first_id=$(qs list --all --json | jq -er --arg path "$flea_ui/boot/shell.qml" --argjson pid "$first_pid" '.[] | select(.config_path == $path and .pid == $pid) | .id')
     key -M ctrl -k n -m ctrl >/dev/null
     for attempt in $(seq 1 100); do
-        rows=$(qs list --all --json | jq -c --arg path "$flea_ui/shell.qml" '[.[] | select(.config_path == $path)]')
+        rows=$(qs list --all --json | jq -c --arg path "$flea_ui/boot/shell.qml" '[.[] | select(.config_path == $path)]')
         [[ "$(jq length <<< "$rows")" == 2 ]] && break
         sleep 0.05
     done
@@ -219,7 +245,7 @@ places_concurrent() (
         flea_process_owned "$first_pid" || fail "places: first window run ownership changed"
         flea_process_owned "$second_pid" || fail "places: second window run ownership changed"
         [[ "$owned_pid" =~ ^[0-9]+$ && -r "/proc/$owned_pid/environ" ]] || fail "places: owned window process vanished"
-        qs list --all --json | jq -e --arg path "$flea_ui/shell.qml" --arg id "$owned_id" --argjson pid "$owned_pid" \
+        qs list --all --json | jq -e --arg path "$flea_ui/boot/shell.qml" --arg id "$owned_id" --argjson pid "$owned_pid" \
             'any(.[]; .config_path == $path and .id == $id and .pid == $pid)' >/dev/null || fail "places: instance ownership changed"
         tr '\0' '\n' < "/proc/$owned_pid/environ" | grep -Fx "FLEA_BIN=$flea_bin" >/dev/null || fail "places: candidate binary changed"
         tr '\0' '\n' < "/proc/$owned_pid/environ" | grep -Fx "FLEA_UI=$flea_ui" >/dev/null || fail "places: candidate UI changed"
@@ -263,24 +289,19 @@ places_concurrent() (
     settings_open_key; settle
     settings_section places
     settings_focus_row "favourite:$(jq 'length - 1' <<< "$expected")"
-    settings_focus_row favouriteActions
-    key l >/dev/null; settle
+    settle
     places_use "$second_id" "$second_pid"
     settings_open_key; settle
     settings_section places
     settings_focus_row "favourite:$(jq 'length - 1' <<< "$expected")"
-    settings_focus_row favouriteActions
-    key l >/dev/null
     places_require_store
-    key -k Return >/dev/null; settle
+    key x >/dev/null; settle
     expected=$(jq -c '.[0:-1]' <<< "$expected")
     places_wait_records "$expected"
     places_use "$first_id" "$first_pid"
     places_wait_records "$expected"
-    ipc settingsModel | jq -e 'any(.[]; .id == "favouriteActions" and .canRemove == false)' >/dev/null \
-        || fail "places: external removal left a different record selected for Remove"
-    places_require_store
-    key -k Return >/dev/null; settle
+    ipc settingsModel | jq -e --argjson i "$(ipc settingsCursor)" '.[$i].action == "addFavourite"' >/dev/null \
+        || fail "places: external removal left the cursor on a row that is gone, at $(ipc settingsCursor)"
     places_wait_records "$expected"
     settings_focus_row places.sidebarWidth
     key l >/dev/null; settle
@@ -327,14 +348,16 @@ places_concurrent() (
         [[ "$(ipc settingsOpen)" == true ]] || { settings_open_key; settle; }
         settings_section places
         settings_focus_row "favourite:$(jq 'length - 1' <<< "$expected")"
-        settings_focus_row favouriteActions
-        key l >/dev/null
         places_require_store
-        key -k Return >/dev/null; settle
+        key x >/dev/null; settle
         expected=$(jq -c '.[0:-1]' <<< "$expected")
         places_wait_records "$expected"
     }
     local group target original_target target_path
+    # Beta is already saved. Use an unfavourited folder so each add moves the rail by one row.
+    places_use "$second_id" "$second_pid"
+    key -M ctrl -k l -m ctrl "$addition" -k Return >/dev/null
+    wait_path "$addition"; wait_listing 0
     for group in network device; do
         places_use "$first_id" "$first_pid"
         target=$(ipc railEntries | jq -er --arg group "$group" \
@@ -346,11 +369,13 @@ places_concurrent() (
         places_use "$second_id" "$second_pid"
         [[ "$(ipc settingsOpen)" == true ]] || { settings_open_key; settle; }
         settings_section places
-        settings_focus_row favouriteActions
-        key h >/dev/null
+        settings_focus_row addFavourite
+        [[ "$(ipc path)" == "$addition" ]] || fail "places: rail identity Add names another folder"
+        jq -e --arg path "$addition" 'all(.[]; .path? != $path)' <<< "$expected" >/dev/null \
+            || fail "places: rail identity Add would repeat an existing favourite"
         places_require_store
         key -k Return >/dev/null; settle
-        expected=$(jq -c --arg path "$dir/listing/Beta" '. + [{label:"Beta",path:$path}]' <<< "$expected")
+        expected=$(jq -c --arg path "$addition" '. + [{label:"rail-add",path:$path}]' <<< "$expected")
         places_wait_records "$expected"
         places_use "$first_id" "$first_pid"
         places_wait_records "$expected"
@@ -383,6 +408,10 @@ places_concurrent() (
     trap - EXIT
 )
 
+# The sentences asserted here are the product's own: ViewState's watcher says "ui.json unreadable"
+# for a store it cannot read, ui/js/UiState.js says "invalid ui.json" for one it cannot parse, and
+# src/uistore.rs refuses a write it cannot read first. This case is not in tests/ui.sh's default
+# list, which is how it kept a phrase no build has ever printed.
 places_external_failure() {
     local dir="$1" expected doc="$XDG_STATE_HOME/flea/ui.json" attempt mode
     expected=$(jq -c '.places.favourites' "$doc")
@@ -393,10 +422,10 @@ places_external_failure() {
     sandbox_require "$dir/removed-ui.json"
     mv "$doc" "$dir/removed-ui.json"
     for attempt in $(seq 1 30); do
-        [[ "$(ipc lastMessage)" == *'ui.json could not be read'* ]] && break
+        [[ "$(ipc lastMessage)" == *'ui.json unreadable'* ]] && break
         sleep 0.1
     done
-    [[ "$(ipc statusError)" == true && "$(ipc lastMessage)" == *'ui.json could not be read'* ]] \
+    [[ "$(ipc statusError)" == true && "$(ipc lastMessage)" == *'ui.json unreadable'* ]] \
         || fail "places: missing live store did not report its read failure"
     ipc uiSettings | jq -e --argjson expected "$expected" '.places.favourites == $expected' >/dev/null \
         || fail "places: missing live store erased visible records"
@@ -438,49 +467,62 @@ places_external_failure() {
     [[ "$(ipc statusError)" == false ]] || fail "places: malformed-store acknowledgement left an unexplained error: $(ipc statusActivityState)"
     settings_open_key; settle
     settings_section places
-    settings_focus_row favouriteActions
-    key h >/dev/null
+    settings_focus_row addFavourite
     places_require_store
     key -k Return >/dev/null; settle
     expected=$(jq -cn --arg path "$dir/listing" '[{label:"listing",path:$path}]')
     places_wait_records "$expected"
     cmp "$doc.broken" "$dir/malformed.original" || fail "places: native recovery did not retain the exact malformed backup"
 
+    # The retry must add a new place, rather than ask the writer to deduplicate the listing again.
+    key -k Escape >/dev/null; settle
+    key -M ctrl -k l -m ctrl "$dir/listing/Beta" -k Return >/dev/null
+    wait_path "$dir/listing/Beta"; wait_listing 0
+    settings_open_key; settle
+    settings_section places
+    settings_focus_row addFavourite
     mode=$(stat -c %a "$doc")
     cp "$doc" "$dir/readable.original"
     places_require_store
     chmod 000 "$doc"
     for attempt in $(seq 1 30); do
-        [[ "$(ipc lastMessage)" == *'ui.json could not be read'* ]] && break
+        [[ "$(ipc lastMessage)" == *'ui.json unreadable'* ]] && break
         sleep 0.1
     done
-    [[ "$(ipc statusError)" == true && "$(ipc lastMessage)" == *'ui.json could not be read'* ]] \
+    [[ "$(ipc statusError)" == true && "$(ipc lastMessage)" == *'ui.json unreadable'* ]] \
         || fail "places: unreadable live store did not report its read failure: $(ipc statusActivityState)"
     key -k Return >/dev/null; settle
+    # The refused write queues behind the standing read error. Not an exact count: the watcher reports
+    # an unreadable store once per read it attempts, and ui/StatusBar.qml queues every report.
     for attempt in $(seq 1 30); do
-        ipc statusActivityState | jq -e '.errors == 2' >/dev/null && break
+        ipc statusActivityState | jq -e '.errors >= 2' >/dev/null && break
         sleep 0.1
     done
-    ipc statusActivityState | jq -e '.errors == 2' >/dev/null \
+    ipc statusActivityState | jq -e '.errors >= 2' >/dev/null \
         || fail "places: unreadable Add did not queue its write refusal: $(ipc statusActivityState)"
-    [[ "$(ipc lastMessage)" == *'ui.json could not be read'* ]] || fail "places: Add displaced the unacknowledged read error"
+    [[ "$(ipc lastMessage)" == *'ui.json unreadable'* ]] || fail "places: Add displaced the unacknowledged read error"
     key -k Escape >/dev/null; settle
     [[ "$(ipc settingsOpen)" == false ]] || fail "places: Escape did not close Settings before acknowledging errors"
     key -k Escape >/dev/null; settle
     places_require_store
     chmod "$mode" "$doc"
+    # The refusal is queued behind the watcher's own reports, which an Add against an unreadable store
+    # makes two of, so the queue is drained one Escape at a time until the writer's own sentence shows.
+    for attempt in $(seq 1 6); do
+        [[ "$(ipc lastMessage)" == *'could not be read, so the state file was not written'* ]] && break
+        key -k Escape >/dev/null; settle
+    done
     [[ "$(ipc statusError)" == true && "$(ipc lastMessage)" == *'could not be read, so the state file was not written'* ]] \
-        || fail "places: unreadable store did not refuse the real Add operation"
+        || fail "places: unreadable store did not refuse the real Add operation: $(ipc lastMessage)"
     places_wait_records "$expected"
     cmp "$doc" "$dir/readable.original" || fail "places: failed Add replaced an unreadable store"
     key -k Escape >/dev/null; settle
     [[ "$(ipc statusError)" == false ]] || fail "places: Add refusal acknowledgement left an unexplained error: $(ipc statusActivityState)"
     settings_open_key; settle
     settings_section places
-    settings_focus_row favouriteActions
-    key h >/dev/null
+    settings_focus_row addFavourite
     key -k Return >/dev/null; settle
-    expected=$(jq -c '. + .' <<< "$expected")
+    expected=$(jq -c --arg path "$dir/listing/Beta" '. + [{label:"Beta",path:$path}]' <<< "$expected")
     places_wait_records "$expected"
     shot places-read-failure-recovery
     printf 'PLACES_FAILURE missing-retention empty-retention malformed-retention exact-backup unreadable-refusal native-retry=ok\n'
@@ -500,19 +542,19 @@ case_settingsplaces() {
     places_wait_records '[]'
     settings_open_key; settle
     settings_section places
-    settings_focus_row favouriteActions
-    ipc settingsModel | jq -e 'any(.[]; .id == "favouriteActions" and .canRemove == false)' >/dev/null \
-        || fail "places: empty manager enables Remove"
-    key -k Space >/dev/null; settle
-    places_wait_records '[]'
-    places_click_part favouriteActions remove
+    settings_focus_row addFavourite
+    # Rule 4: Remove lives on the row it removes, so an empty manager offers no Remove to press at all.
+    ipc settingsModel | jq -e 'all(.[]; .kind != "favourite" and .kind != "favouriteActions")' >/dev/null \
+        || fail "places: the empty manager still draws a row to remove"
+    [[ -z "$(ipc settingsFavouriteControlCentre favourite:0 remove)" ]] \
+        || fail "places: an empty manager still offers a Remove control"
     places_wait_records '[]'
     shot places-empty
-    places_click_part favouriteActions add
+    places_click_heading addFavourite
     initial=$(jq -cn --arg path "$dir/listing" '[{label:"listing",path:$path}]')
     places_wait_records "$initial"
     key -k Return >/dev/null; settle
-    expected=$(jq -c '. + .' <<< "$initial")
+    expected="$initial"
     places_wait_records "$expected"
     key -k Escape >/dev/null; settle
 
@@ -533,7 +575,11 @@ case_settingsplaces() {
     key -k Escape >/dev/null; settle
     click_background; settle
     places_click_menu 'Add to Favorites'
-    expected=$(jq -c --arg path "$dir/listing" '. + [{label:"listing",path:$path}]' <<< "$expected")
+    places_wait_records "$expected"
+    seek_row_named Beta
+    click_row "$(ipc cursor)" right; settle
+    places_click_menu 'Add to Favorites'
+    expected=$(jq -c --arg path "$dir/listing/Beta" '. + [{label:"Beta",path:$path}]' <<< "$expected")
     places_wait_records "$expected"
     shot places-listing-add
 
@@ -562,16 +608,13 @@ case_settingsplaces() {
     expected=$(jq -c '.[1:3] |= reverse' <<< "$expected")
     places_wait_records "$expected"
     settings_focus_row "favourite:$(jq 'length - 1' <<< "$expected")"
-    settings_focus_row favouriteActions
-    key l >/dev/null; key -k Space >/dev/null; settle
-    places_wait_records "$expected"
     places_require_store
-    key -k Return >/dev/null; settle
+    key x >/dev/null; settle
     expected=$(jq -c '.[0:-1]' <<< "$expected")
     places_wait_records "$expected"
     settings_focus_row favourite:1
     local remove_x remove_y wx wy ww wh
-    read -r remove_x remove_y <<< "$(ipc settingsFavouriteControlCentre favouriteActions remove)"
+    read -r remove_x remove_y <<< "$(ipc settingsFavouriteControlCentre favourite:1 remove)"
     read -r wx wy ww wh < <(window_box) || fail "places: native window coordinates unavailable"
     [[ "$remove_x" =~ ^[0-9]+$ && "$remove_y" =~ ^[0-9]+$ ]] || fail "places: Remove has no actual control centre"
     (( remove_x > 0 && remove_y > 0 && remove_x < ww && remove_y < wh )) || fail "places: Remove is outside the viewport"
@@ -650,9 +693,9 @@ case_settingsplaces() {
     key -k Return >/dev/null; settle
     wait_path "$dir/listing/Alpha"
     wait_listing 0
-    settings_focus_row favouriteActions
-    key h >/dev/null; key -k Return >/dev/null; settle
-    expected=$(jq -c --arg path "$dir/listing/Alpha" '. + [{label:"Alpha",path:$path}]' <<< "$records")
+    settings_focus_row addFavourite
+    key -k Return >/dev/null; settle
+    expected="$records"
     places_wait_records "$expected"
     key -k Escape >/dev/null; settle
     launch "$dir/listing"; wait_listing 3

@@ -48,7 +48,7 @@ function scopeRoot(path, home, here) {
 
 // Enter commits: the walk starts and the keyboard goes back to the results, so j/k move again.
 function run(root) {
-    if (root.searchQuery.length === 0) {
+    if ((root.searchQuery || "").length === 0) {
         close(root)
         return
     }
@@ -73,6 +73,25 @@ function run(root) {
     root.listingState = "loading"
     root.clearSelection()
     root.backend.search(scope, root.searchQuery, root.showHidden)
+    // The walk's scope is a directory too, so its class rides the same line a list's does.
+    root.backend.askFsInfo()
+}
+
+// A navigation drops the search walk without re-listing, so the next listing lands on clean state.
+// Sample input: a pane with searchMode set answers true and reads searchMode "" after.
+function leaveWalk(root) {
+    var dropped = false
+    if ((root.searchMode || "").length > 0) {
+        if (root.searchRunning && root.backend) root.backend.searchcancel()
+        root.searchMode = OFF
+        root.searchQuery = ""
+        root.searchRunning = false
+        root.searchCancelled = false
+        root.searchScanned = 0
+        root.searchFrom = ""
+        dropped = true
+    }
+    return dropped
 }
 
 // Esc stops a running walk and leaves the results up; a second Esc is what returns to the listing.
@@ -178,9 +197,11 @@ function listingState(root, total) {
 }
 
 // The strip's right edge: the running count while there is one, the terminal word when there is not.
+// SearchFilter rule 6: the count and the state that changes it read together, on the one line the
+// query is on, because a count still growing says something different from a count that has settled.
 function note(total, running, cancelled) {
     if (total > 0) {
-        return total + " found"
+        return running ? Format.count(total) + " found · still scanning" : Format.count(total) + " found"
     }
     if (running) {
         return "searching"
@@ -188,35 +209,22 @@ function note(total, running, cancelled) {
     return cancelled ? "stopped" : "done"
 }
 
+// The strip's own right edge, SearchFilter's proposed drawing: while the walk runs esc stops it and
+// a second esc is what leaves, which is the pair the board prints as one line.
+function wayOut(running) {
+    return running ? "esc cancels, then returns" : "esc returns"
+}
+
 // The rule itself lives in Format.tilde, because the window chrome draws a path through the same one.
 function scope(path, home) {
     return Format.tilde(path, home)
 }
 
-// Scanned counts reach six figures on a real subtree, so they are grouped the way the canvas draws them.
-function grouped(n) {
-    var digits = String(n)
-    var out = ""
-    for (var i = 0; i < digits.length; i++) {
-        if (i > 0 && (digits.length - i) % 3 === 0) {
-            out += ","
-        }
-        out += digits.charAt(i)
-    }
-    return out
-}
-
 // The status bar's own left half while a search is up, the two lines the canvas draws.
 function statusLine(running, total, scanned, ms) {
+    var found = Format.count(total) + " found"
     if (running) {
-        return "Searching, " + grouped(scanned) + " scanned"
+        return found + " · Searching, " + Format.count(scanned) + " scanned"
     }
-    return grouped(scanned) + " scanned in " + (ms / 1000).toFixed(1) + " s"
-}
-
-// The status bar's right half: what the keys do, which changes the moment the walk stops.
-function statusKeys(running) {
-    return running
-        ? "esc cancels, enter opens, o reveals"
-        : "esc returns to the listing"
+    return found + " in " + (ms / 1000).toFixed(1) + " s"
 }

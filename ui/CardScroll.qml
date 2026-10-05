@@ -11,6 +11,10 @@ Flickable {
     readonly property real wanted: holder.childrenRect.height
 
     clip: true
+    // The lane kept clear at the right edge; menus pass 0 so rows use the whole frame.
+    property real gutter: Theme.spacing.rowPaddingX
+    // The holder's drawn width, so a probe reads the reserve without walking children.
+    readonly property real holderWidth: holder.width
     contentWidth: width
     contentHeight: root.wanted
     boundsBehavior: Flickable.StopAtBounds
@@ -45,8 +49,16 @@ Flickable {
         flickable: root
     }
 
+    Flea.ViewportScrollBar {
+        parent: root
+        // parent, not root: declared in the Flickable it starts in contentItem, where root is no parent or sibling.
+        anchors { top: parent.top; right: parent.right }
+        flickable: root
+    }
+
     Item {
         id: holder
-        width: root.width
+        // The scroll lane stays clear at the right edge, the same rule every listing follows.
+        width: Math.max(0, root.width - root.gutter)
     }
 }

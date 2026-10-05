@@ -2,13 +2,15 @@
 
 .import "Format.js" as Format
 
-// Errors reach the user as one sentence, never a raw path or errno.
-function sentence(where, message) {
+// Errors reach the user as one sentence, never a raw path or errno. StatusBar board rule 4: the
+// sentence names the input and drops advice nobody can act on. named is the failing directory's own
+// leaf, empty when the breadcrumb is already standing on it and there is nothing to add.
+function sentence(where, message, named) {
     if (where === "scan") {
         if (denied(where, message)) {
-            return "Permission was denied; check access and try again."
+            return named ? "Permission denied on " + named : "Permission denied"
         }
-        return "That directory could not be read; check the path and try again."
+        return named ? "That directory could not be read: " + named : "That directory could not be read."
     }
     if (where === "sort") {
         // Size and mtime are real orders, so the one refusal left is a key the wire never defined.
@@ -48,6 +50,10 @@ function sentence(where, message) {
     }
     if (where === "trash") {
         return "That could not be moved to Trash."
+    }
+    // The backend refused rows read from a listing it had already replaced, so nothing ran at all.
+    if (where === "stale") {
+        return "The listing changed before that arrived, so nothing was done."
     }
     if (where === "transfer" || where === "archive" || where === "convert") {
         return capitalised(message)
@@ -101,19 +107,6 @@ var OWNER_CAN_LIST = 0o500
 
 function notYours(mode) {
     return (mode & OWNER_CAN_LIST) === OWNER_CAN_LIST ? " · not yours" : ""
-}
-
-// The whole line a failed listing puts on the pane. Locked draws the directory's own mode string and
-// falls back to the sentence when the backend could not stat it either, so the surface is never a
-// mark with nothing under it.
-function paneLine(state, message, mode) {
-    // Named for what it is rather than "sentence", which is this file's own function one scope out.
-    var fallback = message === null || message === undefined ? "" : String(message)
-    if (state !== "locked") {
-        return fallback
-    }
-    var modeLine = lockedLine(mode)
-    return modeLine.length > 0 ? modeLine : fallback
 }
 
 // The one sentence a credentialed mount reaches the user as, lifted here in the 0.1.4 composition

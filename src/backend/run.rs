@@ -1,21 +1,18 @@
-use crate::backend::aliases::Aliases;
-use crate::backend::icons::Names;
-use crate::backend::kind::Kinds;
 use crate::backend::meta::stat_range;
-use crate::backend::archive::Formats;
 use crate::backend::archivereq::{formats_line, start_archive, start_convert};
 use crate::backend::convert;
 use crate::backend::peek::peek_line;
 use crate::backend::metareq::spawn as spawn_meta;
 use crate::backend::opsdispatch::{cancel_transfer, do_mkdir, do_newfile, do_rename, do_undo, report_op, resolve_rows, start_duplicate, start_trash, start_transfer, start_menu_transfer, start_redo, Ops};
 use crate::backend::opsreq::OpMsg;
-use crate::backend::mime::Db;
-use crate::backend::dirsizereq::{queue_dirsizes, walk_one_dirsize};
+use crate::backend::dirsizereq::{queue_dirsizes, seed_answered, start_next, report_done as report_dirsize};
+use crate::backend::dirsize::DirSize;
 use crate::backend::events::{spawn_forwarder, spawn_op_forwarder, spawn_reader, Event};
-use crate::backend::fsinfo::{fsinfo_line, read as read_fsinfo};
+use crate::backend::fsinfo::fsinfo_line;
 use crate::backend::fsinfo::dev_of;
+use crate::backend::fsinforeq::FsInfo;
 use crate::backend::listpaths;
-use crate::backend::proto::{error_line, error_line_with_mode, listed_line, parse_request, paths_line, thumbed_line, Request};
+use crate::backend::proto::{error_line, error_line_with_mode, listed_line, listed_line_anchor, parse_request, paths_line, thumbed_line, Request};
 use crate::backend::rows::rows_line;
 use crate::backend::sandbox;
 use crate::backend::scan::{mode_of, scan};
@@ -29,21 +26,22 @@ use crate::backend::thumbreq::{cancel_row, forget_one, report_done, thumb_rows};
 use crate::backend::thumbs::{Done, Pool};
 use crate::backend::thumbwrite::sweep_own_temps;
 use crate::backend::watch::{changed_line, Watch};
-use crate::backend::thumbspec::Thumbnailers;
 use crate::error::FleaError;
 use crate::heap;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-// Wider pools settle sooner and answer input later, and 4 is the widest that costs neither the first thumbnail nor the scroll; see AGENTS.md "Thumbnail requests".
-const THUMB_WORKERS: usize = 4;
+// Wider pools settle sooner and answer input later: 6 settles the media fixture ahead of strata for 5.5 ms of input under a full pool; see AGENTS.md "Thumbnail requests".
+const THUMB_WORKERS: usize = 6;
 // The whole shutdown budget: a running job is killed at the pool's own 20 s deadline, so waiting longer than that can never cut one short.
-const DRAIN_LIMIT: Duration = Duration::from_secs(25);
+pub(crate) const DRAIN_LIMIT: Duration = Duration::from_secs(25);
+// The UI gives up on a silent child after this; the budget above stays under it (ui/Backend.qml quitDeadline).
+pub(crate) const UI_QUIT_DEADLINE_SECS: u64 = 30;
+const _: () = assert!(DRAIN_LIMIT.as_secs() < UI_QUIT_DEADLINE_SECS);
+const _: () = assert!(crate::backend::archivework::CANCEL_DRAIN_SECS < DRAIN_LIMIT.as_secs());
 
 // The loop stops on Quit; every other request continues it, because errors are responses.
 #[derive(PartialEq)]
@@ -56,33 +54,15 @@ enum Control {
 pub fn run() -> i32 {
     // Before the first listing, because a threshold glibc has already ratcheted strands the next arena on the heap.
     heap::pin_mmap_threshold();
+    // Recorded when the first rows go out, the next launch's prefetch list; see src/prefetch.rs.
+    crate::prefetch::record_after_first_rows();
     let mut out = BufWriter::new(io::stdout());
-    let aliases = Arc::new(Aliases::load());
-    let thumbs = Arc::new(Thumbnailers::load(&aliases));
-    let tb = Tables {
-        mime: Db::load(),
-        icons: Names::load(),
-        aliases,
-        thumbs,
-        kinds: RefCell::new(Kinds::new()),
-        formats: Arc::new(Formats::probe()),
-    };
-    let mut st = State {
-        listing: Listing::new(),
-        base: PathBuf::new(),
-        asked: Vec::new(),
-        outstanding: 0,
-        dirsizes: HashMap::new(),
-        dirsize_queue: Vec::new(),
-        search: None,
-        search_reported: Instant::now(),
-    };
-
+    let tb = Tables::load();
     let (tx, rx) = channel::<Event>();
+    let mut st = State::new(super::dirsizeworker::Worker::new(tx.clone()));
     let (results, done) = channel::<Done>();
     let (op_tx, op_rx) = channel::<OpMsg>();
     let mut ops = Ops::new(op_tx);
-    // The pool shares this process's one parse of both tables rather than reading the same two files again.
     let pool = Pool::new(THUMB_WORKERS, results, default_root(), Arc::clone(&tb.aliases), Arc::clone(&tb.thumbs));
     let cache = Cache::new();
     // Every thumbnail job fails closed without these two, so the reason is said once here rather than never; see AGENTS.md "Thumbnail sandbox".
@@ -92,12 +72,14 @@ pub fn run() -> i32 {
     // The workers hold senders too, so no exit can come from a disconnect and every exit is an explicit event; see AGENTS.md "Thumbnail requests".
     spawn_forwarder(done, tx.clone());
     spawn_op_forwarder(op_rx, tx.clone());
-    spawn_reader(tx.clone());
+    spawn_reader(tx.clone(), Arc::clone(&ops.live));
+    let mut fsinfo = FsInfo::new(tx.clone());
     // Armed before the first request, so no listing is ever answered with nothing watching it.
     let mut watch = Watch::start(tx);
     loop {
-        // Idle (nothing queued and no walk running) this is exactly the old blocking recv, see docs/protocol.md "dirsize".
-        let event = if st.dirsize_queue.is_empty() && st.search.is_none() {
+        start_next(&mut st);
+        // Size results wake this receiver; only search still needs idle ticks.
+        let event = if st.search.is_none() {
             match rx.recv() {
                 Ok(e) => e,
                 Err(_) => break,
@@ -105,7 +87,7 @@ pub fn run() -> i32 {
         } else {
             match rx.try_recv() {
                 Ok(e) => e,
-                // No event waiting, so it is the walker's turn; looping back lets a meanwhile dirsizecancel be seen before the next row.
+                // Search takes one bounded step before checking requests again.
                 Err(TryRecvError::Empty) => {
                     tick_walkers(&mut out, &mut st, &pool);
                     continue;
@@ -115,11 +97,18 @@ pub fn run() -> i32 {
         };
         match event {
             Event::Request(line) => {
-                if handle_line(&line, &mut out, &mut st, &tb, &pool, &cache, &mut ops, &mut watch) == Control::Quit {
+                if handle_line(&line, &mut out, &mut st, &tb, &pool, &cache, &mut ops, &mut watch, &mut fsinfo) == Control::Quit {
                     break;
                 }
             }
             Event::Thumb(d) => report_done(&mut out, &mut st, d),
+            Event::DirSize(d) => report_dirsize(&mut out, &mut st, d),
+            // A slow mount's figures, printed only for the directory on screen now.
+            Event::FsInfo(d) => {
+                if let Some(info) = fsinfo.finish(d, &st.base) {
+                    say(&mut out, &fsinfo_line(&info, &st.base.to_string_lossy(), crate::backend::fsinforeq::slow_class(&st.base)));
+                }
+            }
             // The one line no client asked for, and only ever for the directory being listed now.
             Event::Changed(wd) => {
                 if watch.is_current(wd) {
@@ -136,6 +125,7 @@ pub fn run() -> i32 {
             Event::Closed => break,
         }
     }
+    st.dirsize_worker.cancel();
     drain(&mut out, &mut st, &mut ops, &rx, &pool, &cache);
     0
 }
@@ -155,7 +145,13 @@ fn handle_line(
     cache: &Cache,
     ops: &mut Ops,
     watch: &mut Watch,
+    fsinfo: &mut FsInfo,
 ) -> Control {
+    // Rows read from a numbering this listing has already replaced name other files, so they are refused.
+    if let Some(refused) = super::rowguard::refusal(line, st.generation) {
+        say(out, &refused);
+        return Control::Continue;
+    }
     match parse_request(line) {
         Request::Permissions { line } => say(out, &ops.permissions.handle(&line)),
         Request::Picker { line } => {
@@ -168,6 +164,8 @@ fn handle_line(
                 resolve_rows(Vec::new(), &[index], &st.base, &st.listing).into_iter().next().unwrap_or_default());
             super::opsdispatch::request_menu_action(out, ops, line, paths, cursor);
         }
+        // Directive 71: a CLI run of a second or more, so it answers on its own thread.
+        Request::LocalSend { op, peer, paths, id } => super::localsend::request(op, peer, paths, id, ops.tx.clone()),
         Request::TrashBrowse { line } => {
             let replies = ops.tx.clone();
             ops.trashbrowser.get_or_insert_with(|| super::trashbrowse::TrashBrowser::new(replies)).request(line);
@@ -182,7 +180,7 @@ fn handle_line(
             match scan(&path, hidden) {
                 Ok((mut l, read_ms)) => {
                     super::picker::filter_listing(&mut l, &tb.mime, line);
-                    let (pass_ms, sort_ms) = match ordering::request(&mut l, Path::new(&path), &tb.mime, line) {
+                    let (pass_ms, sort_ms, sized) = match ordering::request(&mut l, Path::new(&path), &tb.mime, line) {
                         Ok(timing) => timing,
                         Err(msg) => {
                             watch.abandon();
@@ -190,18 +188,15 @@ fn handle_line(
                             return Control::Continue;
                         }
                     };
-                    // base and listing only move together, so a failed list cannot mix them.
-                    st.base = PathBuf::from(&path);
-                    st.listing = l;
                     watch.commit();
-                    forget_rows(st, pool);
                     // Said once per listing, because a folder nobody can watch goes stale in silence.
                     if watch.refused() {
                         eprintln!("flea: {} will not follow outside changes, inotify refused a watch on it", path);
                     }
-                    writeln!(out, "{}", listed_line(st.listing.len(), read_ms + pass_ms, sort_ms, dev_of(&st.base))).ok();
-                    // Rides along unasked: asking costs a 60 ms round trip at first paint.
-                    write_window(out, st, 0, first, tb);
+                    adopt(out, st, pool, tb, &path, l, (read_ms + pass_ms, sort_ms), &sized, first);
+                    out.flush().ok();
+                    // After the rows, because a statfs beside gio's own listing slows it on the share.
+                    fsinfo.list_arrived(Path::new(&path));
                 }
                 Err(e) => {
                     // The listing did not move, so neither does its watch.
@@ -212,6 +207,7 @@ fn handle_line(
                 }
             }
             out.flush().ok();
+            crate::prefetch::first_rows_sent();
         }
         // A set of named paths is not a directory, so the watch stops rather than following its base.
         Request::ListPaths { paths, first } => {
@@ -232,7 +228,7 @@ fn handle_line(
             watch.stop();
             forget_rows(st, pool);
             // The client is told at once that its old rows are gone, then the count grows as matches arrive.
-            writeln!(out, "{}", listed_line(0, 0.0, 0.0, dev_of(&st.base))).ok();
+            writeln!(out, "{}", listed_line(0, 0.0, 0.0, dev_of(&st.base), &st.base.to_string_lossy())).ok();
             st.search = Some(Search::new(&path, &query, hidden));
             st.search_reported = Instant::now();
             out.flush().ok();
@@ -242,7 +238,7 @@ fn handle_line(
                 forget_rows(st, pool);
             }
         }
-        Request::Sort { by, desc: _ } => {
+        Request::Sort { by, desc: _, anchor } => {
             // The walk owns the listing sort would reorder, so it ends first rather than racing it.
             if finish_search(out, st, true) {
                 forget_rows(st, pool);
@@ -253,15 +249,26 @@ fn handle_line(
                     let e = FleaError { where_: "sort".to_string(), path: by.clone(), msg: msg.to_string() };
                     writeln!(out, "{}", error_line(&e)).ok();
                 }
-                Ok((pass_ms, sort_ms)) => {
+                Ok((pass_ms, sort_ms, sized)) => {
                     forget_rows(st, pool);
-                    writeln!(out, "{}", listed_line(st.listing.len(), pass_ms, sort_ms, dev_of(&st.base))).ok();
+                    // After forget_rows, which clears the very map this seeds.
+                    seed_answered(st, &sized);
+                    let line = match anchor.as_deref() {
+                        // The listing is a snapshot, so only a path it never held answers -1.
+                        Some(anchor) => listed_line_anchor(
+                            st.listing.len(), pass_ms, sort_ms, dev_of(&st.base),
+                            &st.base.to_string_lossy(), anchor,
+                            st.listing.index_of(&st.base, Path::new(anchor)).map(|index| index as isize).unwrap_or(-1),
+                        ),
+                        None => listed_line(st.listing.len(), pass_ms, sort_ms, dev_of(&st.base), &st.base.to_string_lossy()),
+                    };
+                    writeln!(out, "{}", line).ok();
                 }
             }
             out.flush().ok();
         }
-        Request::Thumb { rows } => {
-            thumb_rows(out, &rows, st, tb, pool, cache);
+        Request::Thumb { rows, cache_only } => {
+            thumb_rows(out, &rows, st, tb, pool, cache, cache_only);
             out.flush().ok();
         }
         Request::ThumbCancel { rows } => {
@@ -282,15 +289,19 @@ fn handle_line(
         // No rows form: a stale row from a scrolled-past viewport would delay the rows the new one wants, see docs/protocol.md "dirsizecancel".
         Request::DirSizeCancel => {
             st.dirsize_queue.clear();
+            st.dirsize_worker.cancel();
         }
-        Request::Transfer { op, paths, rows, dest, menu_id } => {
-            if menu_id != 0 {
-                start_menu_transfer(out, ops, &op, menu_id, &dest)
+        Request::Transfer { op, paths, rows, dest, menu_id, shelf, collide } => {
+            if !shelf.is_empty() {
+                crate::backend::shelfdrop::start(out, ops, &shelf, &dest, collide)
+            } else if menu_id != 0 {
+                start_menu_transfer(out, ops, &op, menu_id, &dest, collide)
             } else {
                 let named = resolve_rows(paths, &rows, &st.base, &st.listing);
-                start_transfer(out, ops, &op, named, &dest)
+                start_transfer(out, ops, &op, named, &dest, collide)
             }
         }
+        Request::Collisions { id, paths, rows, dest, menu_id } => super::collide::ask_beside(ops, id, menu_id, resolve_rows(paths, &rows, &st.base, &st.listing), &dest, &tb.mime, &tb.icons),
         Request::TransferCancel { id } => cancel_transfer(ops, id),
         Request::Trash { paths, rows, menu_id } => {
             let named = resolve_rows(paths, &rows, &st.base, &st.listing);
@@ -306,8 +317,8 @@ fn handle_line(
         Request::Undo => do_undo(out, ops),
         Request::Redo => start_redo(out, ops),
         // Never touches st.listing, which is the whole point: a column is not the pane's own listing.
-        Request::Peek { path, first, hidden, focus } =>
-            say(out, &peek_line(&path, first, hidden, &focus, &tb.mime, &tb.icons)),
+        Request::Peek { path, first, hidden, hidden_last, focus } =>
+            say(out, &peek_line(&path, first, hidden, hidden_last, &focus, &tb.mime, &tb.icons)),
         // A compress names absolute paths and no path; an extract names the one archive in path.
         Request::Archive { op, paths, path, dest, format, menu_id } => start_archive(
             out, ops, Arc::clone(&tb.formats), &op,
@@ -319,7 +330,11 @@ fn handle_line(
             line.insert_str(line.len() - 1, &format!(r#", "id":{},"providers":{}"#, id, super::providers::facts()));
             say(out, &line);
         }
-        Request::FsInfo => say(out, &fsinfo_line(&read_fsinfo(&st.base))),
+        // The class rides beside the figures once per directory change; a slow mount's fresh figures follow as a second line.
+        Request::FsInfo => {
+            let (info, class) = fsinfo.answer(&st.base);
+            say(out, &fsinfo_line(&info, &st.base.to_string_lossy(), class));
+        }
         // One row, only when a client asked: the same no-sweep rule thumb and dirsize already follow.
         Request::Meta { row, text, media, archive, token } => {
             if row < st.listing.len() {
@@ -349,6 +364,7 @@ fn handle_line(
             if error.is_some() { matches.clear(); }
             say(out, &super::proto::located_many_line(&st.base.to_string_lossy(), id, transfer_id, &matches, error.as_deref()));
         }
+        Request::Jump { id, favourites, recent } => super::jump::request(id, favourites, recent, ops.tx.clone()),
         Request::Quit => return Control::Quit,
         // corner: an unrecognised line is answered with silence, see AGENTS.md.
         Request::Unknown => {}
@@ -358,19 +374,30 @@ fn handle_line(
 
 // A new row order invalidates every outstanding index, so the queue goes and no result can be reported against the new listing.
 pub fn forget_rows(st: &mut State, pool: &Pool) {
+    st.generation += 1;
     st.outstanding = st.outstanding.saturating_sub(pool.cancel_all().len());
     st.asked.clear();
     // A list or a sort changes which row an index names, the same reason thumbnails clear their map.
     st.dirsizes.clear();
     st.dirsize_queue.clear();
+    st.dirsize_worker.cancel();
 }
 
-// dirsize first: its rows are on screen now, while a search walk is work the client asked for and can wait a tick.
+// A list's scanned and ordered result becomes the listing and is answered: its listed line, then its first rows.
+pub(crate) fn adopt(out: &mut impl Write, st: &mut State, pool: &Pool, tb: &Tables, path: &str, l: Listing, (read_ms, sort_ms): (f64, f64), sized: &[Option<DirSize>], first: usize) {
+    // base and listing only move together, so a failed list cannot mix them.
+    st.base = PathBuf::from(path);
+    st.listing = l;
+    forget_rows(st, pool);
+    // After forget_rows, which clears the very map this seeds.
+    seed_answered(st, sized);
+    writeln!(out, "{}", listed_line(st.listing.len(), read_ms, sort_ms, dev_of(&st.base), &st.base.to_string_lossy())).ok();
+    // Rides along unasked: asking costs a 60 ms round trip at first paint.
+    write_window(out, st, 0, first, tb);
+}
+
+// Search advances only when the request channel is idle.
 fn tick_walkers(out: &mut BufWriter<io::Stdout>, st: &mut State, pool: &Pool) {
-    if !st.dirsize_queue.is_empty() {
-        walk_one_dirsize(out, st);
-        return;
-    }
     // A finished walk hands back its rows in ranked order, which renames every outstanding index.
     if step_search(out, st) {
         forget_rows(st, pool);
@@ -378,8 +405,8 @@ fn tick_walkers(out: &mut BufWriter<io::Stdout>, st: &mut State, pool: &Pool) {
 }
 
 // A worker inside a child owns a temp file in the shared cache that only its own return publishes or removes; see AGENTS.md "Thumbnail requests".
-fn drain(
-    out: &mut BufWriter<io::Stdout>,
+pub(crate) fn drain(
+    out: &mut impl Write,
     st: &mut State,
     ops: &mut Ops,
     rx: &Receiver<Event>,
@@ -387,12 +414,12 @@ fn drain(
     cache: &Cache,
 ) {
     let deadline = Instant::now() + DRAIN_LIMIT;
-    // A clean shutdown cancels the operation rather than abandoning it: a cancelled copy removes its own
-    // partial destination, a file by copy_file and a tree by copy_dir, so quitting leaves nothing behind.
-    if ops.running.is_some() {
-        ops.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    // A clean shutdown cancels the slot operation and each detached job, so a cancelled copy removes its partial destination and each Work cleanup runs.
+    if let Some(id) = ops.live.running() {
+        ops.live.cancel(id);
     }
-    while st.outstanding > 0 || ops.running.is_some() {
+    ops.detached.cancel_all();
+    while st.outstanding > 0 || ops.live.running().is_some() || !ops.detached.is_empty() {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Event::Thumb(d)) => report_done(out, st, d),
             Ok(Event::Op(m)) => report_op(out, ops, m),
@@ -412,14 +439,10 @@ fn drain(
     out.flush().ok();
 }
 
-pub fn since(t: Instant) -> f64 {
-    t.elapsed().as_secs_f64() * 1000.0
-}
-
 pub fn write_window(out: &mut impl Write, st: &State, start: usize, count: usize, tb: &Tables) {
     let (metas, ms) = stat_range(&st.base, &st.listing, start, count);
     let start = start.min(st.listing.len());
     let mut kinds = tb.kinds.borrow_mut();
     let line = rows_line(&st.listing, &metas, start, ms, &tb.mime, &tb.icons, &tb.aliases, &tb.thumbs, &mut kinds);
-    writeln!(out, "{}", line).ok();
+    writeln!(out, "{}", super::rowguard::stamped(line, st.generation)).ok();
 }

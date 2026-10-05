@@ -1,6 +1,7 @@
 .pragma library
 
 .import "Ops.js" as Ops
+.import "Swap.js" as Swap
 
 // A drop is a gesture that calls the transfer request Ops.moveToDropbox already sends, with the folder
 // row under the pointer as its destination, so there is no second copy path here. States.dc.html
@@ -49,15 +50,13 @@ function line(n, name, copy) {
     return verb + Ops.items(n) + where + (copy ? "" : " · ctrl at lift copies")
 }
 
-// The drop: rows, not paths, for the reason Ops.moveToDropbox gives, and the clipboard is left alone
-// for its reason too. Answers whether a request went out, so a refused drop is silent by design.
-function drop(pane, rows, index, copy) {
+// Rows as Ops.moveToDropbox sends them, named in the listing of the lift; answers whether the card's question went out.
+function drop(pane, rows, index, copy, listing) {
     var row = pane.rowFor(index)
     if (!canDrop(rows, index, row)) {
         return false
     }
-    pane.backend.send({ c: "transfer", op: copy ? "copy" : "move", rows: rows, dest: pane.join(pane.path, row.n) })
-    return true
+    return pane.collide.ask(Swap.named({ c: "transfer", op: copy ? "copy" : "move", rows: rows, dest: pane.join(pane.path, row.n) }, listing))
 }
 
 // The local paths an external drag carries. Qt hands these over as file:// URIs, and anything that is
@@ -84,6 +83,20 @@ function pathsFromUrls(urls) {
 // indistinguishable from a foreign drop, take the always-copy path below, and leave the source behind
 // while still looking like it worked.
 var ROWS_MIME = "application/x-flea-rows"
+
+// DragOut rule 4: Flea is the one named receiver of a shelf drag. The payload is the single-use
+// token the shelf minted and the intent it fixed at the lift, in that order, one per line. The token
+// is the authority: the backend reads the entries and the intent out of its own record, and this
+// second line is only so the receiver can say the right word before the drop lands.
+var SHELF_MIME = "application/x-flea-shelf"
+
+function shelfToken(payload) {
+    return String(payload || "").split("\n")[0]
+}
+
+function shelfCopying(payload) {
+    return String(payload || "").split("\n")[1] === "copy"
+}
 
 // A value unique to this running Flea. ROWS_MIME names the application, and two Flea windows are two
 // processes: a drag from the other one carries row indices that mean nothing in this listing, so the
@@ -208,13 +221,17 @@ function canDropInto(marker, urls, dest) {
 // The transfer for a drop that resolves by path. verbFor decides move against copy the same way a
 // row drop does, from the marker's own device against the destination's; a drop from anywhere but
 // this window copies, so no source deletes a file on the strength of a drop it did not deliver.
-function dropInto(pane, marker, urls, dest, destDev) {
+function dropInto(pane, marker, urls, dest, destDev, shelf) {
     if (!canDropInto(marker, urls, dest)) {
         return false
     }
+    // Rule 4: a shelf drag is redeemed rather than re-read as a list of URIs, because a fallback to
+    // a URI copy after the shelf promised a move is the silent wrong answer it forbids; its URIs only ask first.
+    if (shelfToken(shelf).length > 0) {
+        return pane.collide.ask({ c: "transfer", op: "", paths: [], dest: dest, shelf: shelfToken(shelf) }, pathsFromUrls(urls))
+    }
     var verb = verbFor(isOwnDrag(marker), markerCopying(marker), markerDev(marker), destDev)
-    pane.backend.send({ c: "transfer", op: verb, paths: pathsFromUrls(urls), dest: dest })
-    return true
+    return pane.collide.ask({ c: "transfer", op: verb, paths: pathsFromUrls(urls), dest: dest })
 }
 
 // THE one place the verb is decided, so the label the operator reads and the request that is sent
@@ -248,17 +265,28 @@ function reachNote(canLeave) {
 }
 
 // Sample marker: "<instance>\n1,3\nmove\n/source\n42"; feedback never becomes destination row indices.
-function feedbackFor(marker, urls) {
+function feedbackFor(marker, urls, shelf) {
     var fields = String(marker).split("\n")
     var own = fields[0] === INSTANCE
     var paths = pathsFromUrls(urls)
+    // Rule 4: the shelf fixed its verb at the lift, so Flea says that word rather than deriving one
+    // from a marker the shelf never sent, which would read as a copy for every move.
+    if (shelfToken(shelf).length > 0) {
+        return { own: true, copy: shelfCopying(shelf), dev: 0, fixed: shelfCopying(shelf),
+                 count: paths.length, canLeave: paths.length > 0 }
+    }
     return { own: own, copy: fields[2] === "copy", dev: Number(fields[4]) || 0,
              count: own && fields[1] ? fields[1].split(",").length : paths.length,
              canLeave: paths.length > 0 }
 }
 
+function copyingFor(feedback, destDev) {
+    if (!feedback) return true
+    return feedback.fixed !== undefined ? feedback.fixed === true
+        : verbFor(feedback.own, feedback.copy, feedback.dev, destDev) === "copy"
+}
+
 function feedbackLine(feedback, name, destDev) {
     if (!feedback || feedback.count === 0) return ""
-    return line(feedback.count, name, verbFor(feedback.own, feedback.copy, feedback.dev, destDev) === "copy")
-        + reachNote(feedback.canLeave)
+    return line(feedback.count, name, copyingFor(feedback, destDev)) + reachNote(feedback.canLeave)
 }

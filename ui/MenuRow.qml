@@ -1,3 +1,6 @@
+// Bound: the brand-mark Components below read this row's root, and are only ever built by this row's own Loaders.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import qs.Commons
@@ -15,10 +18,6 @@ Item {
     // A pick list's chosen row, drawn as the canvas draws the convert popup and the share list:
     // accent ink over an accent tint, where a plain menu row only takes the foreground lift below.
     property bool picked: false
-    // A menu the rail raised takes the rail's own row height and mark slot, so it reads as part of the
-    // rail instead of the listing's menu parked against it. ui/js/Mounts.js gives a rail row at most
-    // one entry and never gives it a listing row's, so nobody can see one menu at two sizes.
-    property bool compact: false
 
     signal activated()
     // The parent owns the cursor, so a pointer that moves onto the row asks for it; a menu opened under a resting pointer asks nothing, or Enter would fire the pointer's row (0d626ed).
@@ -26,9 +25,8 @@ Item {
     // For a parent that lights the pointer's row without moving its own cursor, as ui/ShareBrowser.qml does.
     readonly property bool hovered: pointer.hovered
     // For ui/Ipc.qml's contextMenuRowProbe: whether the pointer is over this row and where, before a test judges a move.
-    function probe() { return pointer.hovered + " " + Math.round(pointer.point.position.x) + " " + Math.round(pointer.point.position.y) + " " + Math.round(pointer.restingAt.x) + " " + Math.round(pointer.restingAt.y) }
-    // Where any row of this menu last saw the pointer, so a row can tell a pointer that moved onto
-    // it from a row that scrolled under a pointer standing still. ui/ContextMenu.qml owns the value.
+    function probe() { return pointer.hovered + " " + Math.round(pointer.point.scenePosition.x) + " " + Math.round(pointer.point.scenePosition.y) + " " + Math.round(pointer.restingAt.x) + " " + Math.round(pointer.restingAt.y) }
+    // The scene point (despite the name) any row of the menu last saw, compared exactly; ui/ContextMenu.qml owns it.
     property point lastPointerGlobal: Qt.point(-1, -1)
     signal pointerSeen(point at)
 
@@ -56,12 +54,15 @@ Item {
 
     // The hover lift Row.qml uses, so a menu row and a list row read alike.
     readonly property real hoverOpacity: 0.08
+    // The rail's mount-status square and the gap the Update Flea board puts between it and the version.
+    readonly property int statusSquareSize: 6
+    readonly property int statusSquareGap: 7
     // Menus.html resolves the separator to rowGap + hairline, 10 px at base size 14.
     readonly property int separatorHeight: Theme.spacing.gap + Theme.spacing.hairline
     readonly property real separatorOpacity: 0.4
 
-    // The rail's mark slot is its icon size, exactly as ui/SidebarRow.qml sizes its own.
-    readonly property int slotSize: root.compact ? Theme.railIconSize : Theme.markSize
+    // Every menu row uses the listing's own mark slot and row height, so a rail menu reads as the main menu.
+    readonly property int slotSize: Theme.markSize
     // OpenWith.html: an application's own Icon= rides in the mark slot, full colour and no plate.
     // The ladder is AppLibrary.qml's iconSource: the backend's app and device index has already
     // answered with a path where it could, and only a name it could not place reaches the themed
@@ -75,8 +76,7 @@ Item {
     // That board draws the mark at 16 of the slot's 19 units, where a stroked glyph takes the slot whole.
     readonly property int appIconSize: Math.round(root.slotSize * 16 / 19)
 
-    height: root.isSeparator ? root.separatorHeight
-          : (root.compact ? Theme.railRowHeight : Theme.rowHeight)
+    height: root.isSeparator ? root.separatorHeight : Theme.rowHeight
 
     Rectangle {
         anchors.fill: parent
@@ -132,18 +132,52 @@ Item {
             asynchronous: true
         }
 
-        Flea.TailscaleMark {
+        // Each brand mark is built only on the row whose entry names it: carried hidden by every row, the
+        // four were most of a menu's build, and a Loader has no pointer semantics to lose (rows stay eager).
+        Loader {
             anchors.centerIn: parent
-            visible: root.entry.mark === "tailscale"
-            iconSize: root.slotSize
-            color: root.markColor
+            active: root.entry.mark === "tailscale"
+            sourceComponent: Component {
+                Flea.TailscaleMark {
+                    iconSize: root.slotSize
+                    color: root.markColor
+                }
+            }
         }
 
-        Flea.DropboxMark {
+        Loader {
             anchors.centerIn: parent
-            visible: root.entry.mark === "dropbox"
-            iconSize: root.slotSize
-            color: root.markColor
+            active: root.entry.mark === "dropbox"
+            sourceComponent: Component {
+                Flea.DropboxMark {
+                    iconSize: root.slotSize
+                    color: root.markColor
+                }
+            }
+        }
+
+        Loader {
+            anchors.centerIn: parent
+            active: root.entry.mark === "localsend"
+            sourceComponent: Component {
+                Flea.LocalSendMark {
+                    iconSize: root.slotSize
+                    color: root.markColor
+                }
+            }
+        }
+
+        // The shelf is Flea's own destination, so it carries Flea's own mark rather than a cut glyph.
+        Loader {
+            anchors.centerIn: parent
+            active: root.entry.mark === "flea"
+            sourceComponent: Component {
+                Flea.FleaMark {
+                    width: root.slotSize
+                    height: root.slotSize
+                    color: root.markColor
+                }
+            }
         }
     }
 
@@ -152,7 +186,7 @@ Item {
         visible: !root.isSeparator
         anchors.left: markSlot.right
         anchors.leftMargin: Theme.spacing.gap
-        anchors.right: hintText.left
+        anchors.right: statusSquare.visible ? statusSquare.left : hintText.left
         anchors.rightMargin: Theme.spacing.gap
         anchors.verticalCenter: parent.verticalCenter
         text: root.entry.label !== undefined ? root.entry.label : ""
@@ -162,6 +196,18 @@ Item {
         font.pixelSize: Theme.font.body
         textFormat: Text.PlainText
         elide: Text.ElideRight
+    }
+
+    // The rail's 6 px mount-status square, borrowed by a row whose hint is a state rather than a key: Update Flea's newer version.
+    Rectangle {
+        id: statusSquare
+        visible: root.entry.hintSquare === true && root.hint.length > 0
+        anchors.right: hintText.left
+        anchors.rightMargin: root.statusSquareGap
+        anchors.verticalCenter: parent.verticalCenter
+        width: root.statusSquareSize
+        height: root.statusSquareSize
+        color: Theme.color.accent
     }
 
     // The shortcut hint. An unbound row draws nothing and takes no width, so a menu of unbound rows
@@ -186,6 +232,8 @@ Item {
         color: root.available ? root.labelColor : Theme.color.foreground
         font.family: Theme.font.family
         font.pixelSize: Theme.font.caption
+        // A version beside the status square is a number, so its digits keep one width the way the rail's sizes do.
+        font.features: root.entry.hintSquare === true ? { "tnum": 1 } : ({})
         textFormat: Text.PlainText
     }
 
@@ -209,19 +257,16 @@ Item {
     HoverHandler {
         id: pointer
         enabled: !root.isSeparator && root.available
-        // Global coordinates distinguish actual motion from a row moving beneath the resting pointer.
+        // Scene coordinates distinguish actual motion from a row moving beneath the resting pointer.
         property bool armed: false
         property point restingAt
-        // A menu that opens under a pointer standing still delivers no hover at all here, measured on
-        // this box, so the hover that does arrive was caused by the pointer moving and must light the
-        // row. The one exception is a row arriving under a pointer that has not moved, which reports
-        // the position the menu last saw; that one only records where the pointer is.
+        // A first hover at the menu's last point is a row arriving under a still pointer; ui/ContextMenu.qml's pointerSettling discounts the rest.
         onHoveredChanged: {
             if (!pointer.hovered) {
                 pointer.armed = false
                 return
             }
-            var position = root.mapToGlobal(pointer.point.position)
+            var position = pointer.point.scenePosition
             pointer.armed = true
             pointer.restingAt = position
             // Read the coordinates out before reporting the new one: the shared property is live, so
@@ -234,7 +279,7 @@ Item {
         onPointChanged: {
             if (!pointer.hovered)
                 return
-            var position = root.mapToGlobal(pointer.point.position)
+            var position = pointer.point.scenePosition
             if (!pointer.armed) {
                 var firstX = root.lastPointerGlobal.x, firstY = root.lastPointerGlobal.y
                 pointer.armed = true

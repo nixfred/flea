@@ -13,14 +13,14 @@ pub const PEEK_CAP: usize = 512;
 // Phase 1 only: a column row draws a mark and a name, so no row here is ever stat'd. That is what
 // makes a peek cheap enough to run once per ancestor on every directory change.
 // corner: a symlink therefore draws its own mark rather than its target's, unlike a listing row.
-pub fn peek_line(path: &str, first: usize, hidden: bool, focus: &str, mime: &Db, icons: &Names) -> String {
+pub fn peek_line(path: &str, first: usize, hidden: bool, hidden_last: bool, focus: &str, mime: &Db, icons: &Names) -> String {
     let (mut listing, _read_ms) = match scan(path, hidden) {
         Ok(v) => v,
         // An unreadable ancestor is still not an error for the pane it belongs to, but it is not an
         // empty directory either, and the column drew those two the same way until this line.
-        Err(_) => return failed_peek(path, hidden),
+        Err(_) => return failed_peek(path, first, hidden, hidden_last),
     };
-    sort_by_name(&mut listing, false);
+    sort_by_name(&mut listing, false, hidden_last);
     let total = listing.len();
     let count = first.min(PEEK_CAP).min(total);
     let start = if focus.is_empty() { 0 } else {
@@ -28,11 +28,10 @@ pub fn peek_line(path: &str, first: usize, hidden: bool, focus: &str, mime: &Db,
             .map(|i| i.saturating_sub(count / 2).min(total - count)).unwrap_or(0)
     };
     let mut out = String::with_capacity(count * 64);
-    // Echoed so the columns view and the path bar's Tab tell their two replies apart; both ask with
-    // pane.windowSize, so first cannot differ between them and path plus hidden is the whole key.
+    // Echoed so peek clients tell replies apart: NetworkMounts asks with 1 and 512 while the columns view asks with the pane's window size.
     out.push_str(&format!(
-        r#"{{"t":"peeked","path":"{}","hidden":{},"n":{},"rows":["#,
-        escape(path), hidden, total
+        r#"{{"t":"peeked","path":"{}","hidden":{},"hiddenLast":{},"first":{},"n":{},"rows":["#,
+        escape(path), hidden, hidden_last, first, total
     ));
     for i in start..start + count {
         if i > start {
@@ -55,12 +54,12 @@ pub fn peek_line(path: &str, first: usize, hidden: bool, focus: &str, mime: &Db,
 // A scan that failed answers zero rows, which is the exact count an empty directory answers, so the
 // line says which of the two it is. mode carries the directory's own permissions when the stat
 // outlived the refused read, and is left out when it did not, the same rule the error line follows.
-fn failed_peek(path: &str, hidden: bool) -> String {
+fn failed_peek(path: &str, first: usize, hidden: bool, hidden_last: bool) -> String {
     let mode = mode_of(path);
     let mode_field = if mode == 0 { String::new() } else { format!(r#","mode":{}"#, mode) };
     format!(
-        r#"{{"t":"peeked","path":"{}","hidden":{},"n":0,"failed":true{},"rows":[]}}"#,
-        escape(path), hidden, mode_field
+        r#"{{"t":"peeked","path":"{}","hidden":{},"hiddenLast":{},"first":{},"n":0,"failed":true{},"rows":[]}}"#,
+        escape(path), hidden, hidden_last, first, mode_field
     )
 }
 
@@ -81,7 +80,7 @@ mod tests {
         d.file("a.txt", "body");
         d.file("b.png", "");
         let (mime, icons) = tables();
-        let line = peek_line(&d.path().to_string_lossy(), 10, false, "", &mime, &icons);
+        let line = peek_line(&d.path().to_string_lossy(), 10, false, false, "", &mime, &icons);
         assert!(line.starts_with(r#"{"t":"peeked""#));
         // The flag the request carried, so an asker can tell its own reply from the other's.
         assert!(line.contains(r#""hidden":false"#), "the reply says what it was asked for: {}", line);
@@ -100,19 +99,35 @@ mod tests {
         d.file("visible.txt", "");
         d.file(".secret", "");
         let (mime, icons) = tables();
-        let shown = peek_line(&d.path().to_string_lossy(), 10, false, "", &mime, &icons);
+        let shown = peek_line(&d.path().to_string_lossy(), 10, false, false, "", &mime, &icons);
         assert!(!shown.contains(".secret"));
         assert!(shown.contains(r#""hidden":false"#));
-        let all = peek_line(&d.path().to_string_lossy(), 10, true, "", &mime, &icons);
+        let all = peek_line(&d.path().to_string_lossy(), 10, true, false, "", &mime, &icons);
         assert!(all.contains(".secret"));
         assert!(all.contains(r#""hidden":true"#), "the two replies differ in the field that tells them apart");
+    }
+
+    #[test]
+    fn hidden_last_orders_a_peek_like_the_listing_it_sits_beside() {
+        let d = TestDir::new("peekhiddenlast");
+        d.file("notes.md", "");
+        d.file(".cache", "");
+        let (mime, icons) = tables();
+        let off = peek_line(&d.path().to_string_lossy(), 10, true, false, "", &mime, &icons);
+        let cache = off.find(r#""n":".cache""#).expect("the dotfile row");
+        let notes = off.find(r#""n":"notes.md""#).expect("the visible row");
+        assert!(cache < notes, "off keeps today's dotfiles-first order: {}", off);
+        let on = peek_line(&d.path().to_string_lossy(), 10, true, true, "", &mime, &icons);
+        let cache = on.find(r#""n":".cache""#).expect("the dotfile row");
+        let notes = on.find(r#""n":"notes.md""#).expect("the visible row");
+        assert!(notes < cache, "on keeps every dotfile last, like the listing: {}", on);
     }
 
     #[test]
     fn a_directory_that_cannot_be_read_is_never_an_error_but_says_it_failed() {
         let d = TestDir::new("peekmissing");
         let (mime, icons) = tables();
-        let line = peek_line(&d.join("never-existed").to_string_lossy(), 10, false, "", &mime, &icons);
+        let line = peek_line(&d.join("never-existed").to_string_lossy(), 10, false, false, "", &mime, &icons);
         assert!(line.starts_with(r#"{"t":"peeked""#), "still an answer and not an error: {}", line);
         // A refusal is still a reply to one of the two askers, so it carries the flag too.
         assert!(line.contains(r#""hidden":false"#), "a refusal is still a reply to a request: {}", line);
@@ -132,8 +147,8 @@ mod tests {
         let (mime, icons) = tables();
 
         // The sandbox marker is a dotfile, so hidden false makes this directory look empty.
-        let empty_line = peek_line(&empty.path().to_string_lossy(), 10, false, "", &mime, &icons);
-        let locked_line = peek_line(&inner.to_string_lossy(), 10, false, "", &mime, &icons);
+        let empty_line = peek_line(&empty.path().to_string_lossy(), 10, false, false, "", &mime, &icons);
+        let locked_line = peek_line(&inner.to_string_lossy(), 10, false, false, "", &mime, &icons);
 
         assert!(empty_line.contains(r#""n":0"#), "got {}", empty_line);
         assert!(locked_line.contains(r#""n":0"#), "got {}", locked_line);
@@ -152,7 +167,7 @@ mod tests {
             d.file(&format!("f{:03}.txt", i), "");
         }
         let (mime, icons) = tables();
-        let line = peek_line(&d.path().to_string_lossy(), 5, false, "", &mime, &icons);
+        let line = peek_line(&d.path().to_string_lossy(), 5, false, false, "", &mime, &icons);
         assert!(line.contains(r#""n":12"#), "the total is the whole directory: {}", line);
         assert_eq!(line.matches(r#""d":"#).count(), 5, "only five rows were asked for");
     }
@@ -163,15 +178,32 @@ mod tests {
         for i in 0..20 { d.dir(&format!("d{:02}", i)); }
         let (mime, icons) = tables();
         for focus in ["d00", "d10", "d19"] {
-            let line = peek_line(&d.path().to_string_lossy(), 5, false, focus, &mime, &icons);
+            let line = peek_line(&d.path().to_string_lossy(), 5, false, false, focus, &mime, &icons);
             assert!(line.contains(&format!(r#""n":"{}""#, focus)), "{}", line);
             assert_eq!(line.matches(r#""d":"#).count(), 5);
         }
-        let initial = peek_line(&d.path().to_string_lossy(), 5, false, "", &mime, &icons);
-        let missing = peek_line(&d.path().to_string_lossy(), 5, false, "gone", &mime, &icons);
+        let initial = peek_line(&d.path().to_string_lossy(), 5, false, false, "", &mime, &icons);
+        let missing = peek_line(&d.path().to_string_lossy(), 5, false, false, "gone", &mime, &icons);
         assert_eq!(missing, initial);
-        let zero = peek_line(&d.path().to_string_lossy(), 0, false, "d19", &mime, &icons);
+        let zero = peek_line(&d.path().to_string_lossy(), 0, false, false, "d19", &mime, &icons);
         assert!(zero.ends_with(r#""rows":[]}"#));
+    }
+
+    #[test]
+    fn a_peeked_line_echoes_hidden_last_the_way_it_echoes_hidden() {
+        let d = TestDir::new("peekecho");
+        d.file("a.txt", "");
+        let (mime, icons) = tables();
+        let off = peek_line(&d.path().to_string_lossy(), 10, false, false, "", &mime, &icons);
+        assert!(off.contains(r#""hiddenLast":false"#), "the reply says which order it was asked for: {}", off);
+        let on = peek_line(&d.path().to_string_lossy(), 10, true, true, "", &mime, &icons);
+        assert!(on.contains(r#""hiddenLast":true"#), "a stale dotfiles-first column must not survive the toggle: {}", on);
+        let mixed = peek_line(&d.path().to_string_lossy(), 10, false, true, "", &mime, &icons);
+        assert!(mixed.contains(r#""hidden":false"#) && mixed.contains(r#""hiddenLast":true"#), "the mixed pair echoes each flag in its own place: {}", mixed);
+        let swapped = peek_line(&d.path().to_string_lossy(), 10, true, false, "", &mime, &icons);
+        assert!(swapped.contains(r#""hidden":true"#) && swapped.contains(r#""hiddenLast":false"#), "the reverse pair does too: {}", swapped);
+        let missing = peek_line(&d.join("never-existed").to_string_lossy(), 10, true, true, "", &mime, &icons);
+        assert!(missing.contains(r#""hiddenLast":true"#), "a refusal is still a reply to a request: {}", missing);
     }
 
     #[test]
@@ -179,7 +211,20 @@ mod tests {
         let d = TestDir::new("peekescape");
         d.file(r#"say "hi".txt"#, "");
         let (mime, icons) = tables();
-        let line = peek_line(&d.path().to_string_lossy(), 10, false, "", &mime, &icons);
+        let line = peek_line(&d.path().to_string_lossy(), 10, false, false, "", &mime, &icons);
         assert!(line.contains(r#"say \"hi\".txt"#), "got {}", line);
+    }
+
+    #[test]
+    fn a_peeked_line_echoes_first_so_a_repair_reply_cannot_land_in_a_column() {
+        let d = TestDir::new("peekfirst");
+        d.file("a.txt", "");
+        let (mime, icons) = tables();
+        let one = peek_line(&d.path().to_string_lossy(), 1, false, false, "", &mime, &icons);
+        assert!(one.contains(r#""first":1"#), "the column tells its own reply from a repair peek: {}", one);
+        let wide = peek_line(&d.path().to_string_lossy(), 512, false, false, "", &mime, &icons);
+        assert!(wide.contains(r#""first":512"#), "got {}", wide);
+        let missing = peek_line(&d.join("never-existed").to_string_lossy(), 1, true, true, "", &mime, &icons);
+        assert!(missing.contains(r#""first":1"#), "a refusal is still a reply to a request: {}", missing);
     }
 }

@@ -13,19 +13,19 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-# Both profiles unconditionally, seven suites driving the debug binary and thumbs.sh the release one: an `[ ! -x <path> ]` guard is satisfied by a stale binary from an older commit, and measured on 2026-09-05 the debug and release hashes were unchanged across a whole run-all over edited source.
-printf 'run-all: building target/debug/flea, seven suites need it\n'
+# Both profiles unconditionally, the debug binary for the suites that drive it and the release one for thumbs.sh: an `[ ! -x <path> ]` guard is satisfied by a stale binary from an older commit, and measured on 2026-09-05 the debug and release hashes were unchanged across a whole run-all over edited source.
+printf 'run-all: building target/debug/flea, the debug-binary suites need it\n'
 cargo build -q || { printf 'run-all: cargo build failed, nothing else was run\n' >&2; exit 1; }
 printf 'run-all: building target/release/flea, thumbs.sh needs it\n'
 cargo build -q --release || { printf 'run-all: release build failed, nothing else was run\n' >&2; exit 1; }
 
-headless="js keymap-gen charts budget empty-state sandbox capability-ownership gio-auth gvfs ops modes protocol portal archive thumbs network-open-share mount-listing uistate uiwriter media filemanager1 dragwire shellload acceptance-matrix"
+headless="js keymap-gen charts budget aurpush signalarity empty-state sandbox capability-ownership gio-auth gvfs ops modes update protocol portal archive thumbs thumbs-exec network-open-share network-keyless mount-listing lazy-objects connections-style pdf-turn pdf-first preview-decode preview-swap uistate uiwriter media filemanager1 dragwire shellload settings-columns preview-frame jump-ui jump-gap picker-recent picker-stall grid-gap rowcost columnscost columnrow-geom columndividers columnsfolder columnspeekgate headercost headerhandles menu-settle menu-snapshot-retire lockedmenu arm-prompt acceptance-matrix counts listcost listnamebudget ui-fixture-home menu-scroll-width scroll-fill columnclip-empty listhidden gridhidden gridcaption statusbar-hint"
 failed=0
 ran=0
 
 for name in $headless; do
     suite="tests/$name.sh"
-    [ -x "$suite" ] || { printf '  %-14s SKIP   no executable at %s\n' "$name" "$suite"; continue; }
+    [ -x "$suite" ] || { printf '  %-14s FAIL   no executable at %s\n' "$name" "$suite"; failed=$((failed + 1)); continue; }
     out=$("./$suite" 2>&1)
     rc=$?
     ran=$((ran + 1))
@@ -50,7 +50,9 @@ bench|is a separate headless benchmark-contract suite
 package|needs a real makepkg archive in FLEA_PACKAGE_FILE
 picker|needs the display, a session bus, and Flea activatable as the FileChooser backend
 network-live|needs live share credentials and the approved runtime bundle, controller only
+hook-gate|standalone pinned-hk hook proof, verified separately in a marked Git fixture
 ui-tui|is a standalone native TUI proof that needs the display and owns the display lock
+themes|needs the display: it launches the candidate once per stock theme, and tests/js/themes.js is the half that runs here
 "
 
 printf '\nNot run here, and why:\n'

@@ -3,6 +3,8 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import "js/Density.js" as Density
+import "js/Format.js" as Format
 import "js/Keymap.js" as Keymap
 import "js/Settings.js" as Settings
 import "js/TextSize.js" as TextSize
@@ -31,8 +33,8 @@ QtObject {
     // switched off. Every id here is an action ui/js/Menu.js gives a row, or will give one.
     // Mirrors src/uischema.rs DEFAULTS menu.hidden exactly; the two drifted once and a fresh
     // ui.json then hid a row the shipped schema shows.
-    readonly property var defaultMenuHidden: ["delete", "openTerminal", "moveto",
-                                              "copyto", "properties", "permissions", "copypath"]
+    readonly property var defaultMenuHidden: ["delete", "openTerminal", "placeMenu", "runScript",
+                                               "moveto", "copyto", "properties", "permissions", "copypath", "extThumbs"]
 
     // ui.json names what is SHOWN. ui/Header.qml, ui/Row.qml and ui/ContextMenu.qml all ask the
     // opposite question, so the inversion lives here once rather than at each of them.
@@ -62,8 +64,13 @@ QtObject {
     // the section's only state: ui/js/Menu.js applyHidden is the consumer and ui/ContextMenu.qml the
     // one caller that passes it in, and the panel's master row is derived from this set, not stored.
     readonly property var menu: root.state.menu || ({})
-    readonly property var menuHidden: Array.isArray(root.menu.hidden) ? root.menu.hidden
-                                                                      : root.defaultMenuHidden
+    // B1, GM's ruling: "Enable shelf" is one switch, so the Menus row is not a stored menu id at all.
+    // It reads the shelf's own boolean, which is what src/shelfplugin.rs installs the bar plugin on.
+    readonly property bool shelfEnabled: (root.state.shelf || ({})).enabled === true
+    readonly property var menuHidden: (Array.isArray(root.menu.hidden) ? root.menu.hidden
+                                                                       : root.defaultMenuHidden)
+                                      .filter(function (id) { return id !== "shelf" })
+                                      .concat(root.shelfEnabled ? [] : ["shelf"])
 
     // The Menus section's "Show keyboard hints" row, `keyHints` in src/uischema.rs. It draws the key
     // beside every menu row and the tip under an empty directory, and it binds no key of its own:
@@ -72,6 +79,36 @@ QtObject {
     // driveSize and trashCount beside it already read. The other way round drew hints from a state
     // file that never named them.
     readonly property bool keyHints: root.state.keyHints === true
+
+    // Absent reads off, the way keyHints beside it does.
+    readonly property bool highlightToday: root.state.highlightToday === true
+
+    // Rows compare one number and never build a Date.
+    property double todayStart: Format.dayStart(Date.now())
+
+    // One timer steps to the next local midnight while the switch is on, in minute steps so a suspend still lands the day within a minute of resume; rows never tick.
+    property var midnightTimer: Timer {
+        repeat: true
+        running: root.highlightToday
+        interval: Math.min(Format.MINUTE_MS, Format.msUntilMidnight(Date.now()))
+        onTriggered: {
+            root.todayStart = Format.dayStart(Date.now())
+            root.midnightTimer.interval = Math.min(Format.MINUTE_MS, Format.msUntilMidnight(Date.now()))
+            root.midnightTimer.running = root.highlightToday
+        }
+    }
+    onHighlightTodayChanged: {
+        root.todayStart = Format.dayStart(Date.now())
+        root.midnightTimer.interval = Math.min(Format.MINUTE_MS, Format.msUntilMidnight(Date.now()))
+        root.midnightTimer.running = root.highlightToday
+    }
+
+    // The listing's view, "view" in src/uischema.rs, which ui/Pane.qml draws for the first frame so
+    // the view the window was left on is the view the next launch opens on. A word this build cannot
+    // draw reads as the list, which covers both a hand edit made while the window is up and the
+    // stored "dual", a window shape and not a view a pane can be in. PR 97, DouglasdeMoura.
+    readonly property string view: Settings.contains(["list", "columns", "grid"], root.state.view)
+                                   ? root.state.view : "list"
 
     // The Keys section's four-value chooser over the one generated key table, falling back to its
     // first value, Default, which is what SettingsKeys.html says a missing or unknown name means.
@@ -95,6 +132,11 @@ QtObject {
         root.owe(key, UiState.withGroup(root.state, key, leaf), UiState.withGroup(root.unsaved, key, leaf))
     }
 
+    // Changed entries of a map key: the document draws the whole map, the patch owes those entries alone.
+    function changeMapEntries(key, entries, full) {
+        root.owe(key, UiState.withKey(root.state, key, full), UiState.withGroup(root.unsaved, key, entries))
+    }
+
     // Both writers' last move: hold the new document, and when the named key is not the value it
     // already held, owe the state file what changed and ask for a write. A setter that lands the
     // value already on screen owes nothing, so a chord clamped at the end of its range writes nothing.
@@ -108,14 +150,23 @@ QtObject {
         root.save()
     }
 
+    // RailAdditions rule 4: ctrl-b remembers the rail the way the view is remembered, so this is a
+    // state and not a setting; the width rule in ui/Pane.qml hides it without writing anything.
+    readonly property bool railHidden: (root.state.places || ({})).rail === "hidden"
+    // Directive 74: hiding on a narrow window is its own switch and it ships off, so the rail stays
+    // where it is at every width until somebody asks for the other behaviour.
+    readonly property bool railAutoHide: (root.state.places || ({})).autoHide === true
+    function toggleRail() { root.changeLeaf("places", { rail: root.railHidden ? "shown" : "hidden" }) }
+
     readonly property var preview: root.state.preview || ({})
     readonly property bool previewColumn: root.preview.column !== false
     readonly property bool previewAutomatic: root.preview.loadOn !== "manual"
     readonly property string thumbnailMode: root.preview.thumbnails || "media"
     readonly property string thumbnailSize: root.preview.thumbSize || "medium"
-    readonly property int thumbnailPixels: ({ small: 48, medium: 64, large: 96, xlarge: 128 })[root.thumbnailSize] || 64
+    // Huge 192 and Largest 256 decode nothing new: the shared cache already holds 256.
+    readonly property int thumbnailPixels: Density.thumbPixelsFor(root.thumbnailSize)
     readonly property bool ctrlZoom: root.preview.ctrlZoom !== false
-    readonly property string density: root.state.density || "normal"
+    readonly property string density: root.state.density || "compact"
     readonly property string addressBar: root.state.addressBar || "breadcrumb"
     readonly property bool hyprlandIcons: root.display.hyprlandIcons === true
     property string saveStatus: "Saved · applied in this process"
@@ -128,6 +179,9 @@ QtObject {
     readonly property bool trashAutoEmpty: root.state.trashAutoEmpty === true
     readonly property int trashSweptOn: root.state.trashSweptOn || 0
 
+    // Settings > About's "Check automatically", `updates.autoCheck` in src/uischema.rs, on until switched off.
+    readonly property bool updateAutoCheck: (root.state.updates || ({})).autoCheck !== false
+
     // Written by the sweep when it finishes, so the next launch on the same day does not run it
     // again. A sweep that failed records nothing and is retried on the next launch.
     function recordTrashSweep(day) {
@@ -135,7 +189,7 @@ QtObject {
     }
 
     // The chosen folder is set from the folder the panel was opened over, which is the same idiom the
-    // Places section's "Add current folder" uses; choosing one is also what selects that mode.
+    // Places section's "Add this folder" uses; choosing one is also what selects that mode.
     function setStartFolder(path) {
         root.changeKey("startIn", "folder")
         root.changeKey("startFolder", String(path || ""))
@@ -151,6 +205,8 @@ QtObject {
 
     // Setting ids name either one top-level key or one leaf of an existing group.
     function changeSetting(id, value) {
+        // The rail is remembered as a word, so its own Places row writes that word and not a boolean.
+        if (id === "places.rail") { root.changeLeaf("places", { rail: value ? "shown" : "hidden" }); return }
         var parts = id.split(".")
         if (parts.length === 1) {
             root.changeKey(id, value)
@@ -180,18 +236,21 @@ QtObject {
                          ? TextSize.pin(root.textSize, root.omarchyBase) : TextSize.follow())
     }
 
-    // The Menus section's own two writers. Both write the hidden set alone, because the master row
-    // over the six basic actions is Settings.masterState of that set rather than a value of its own.
+    // The Menus section's own two writers. Both write the hidden set alone, because a group's master is Settings.masterState of that set rather than a value of its own.
     function setMenuHidden(hidden) {
-        root.changeLeaf("menu", { hidden: hidden })
+        root.changeLeaf("menu", { hidden: hidden.filter(function (id) { return id !== "shelf" }) })
     }
 
     function toggleMenuAction(id) {
+        if (id === "shelf") { root.changeLeaf("shelf", { enabled: !root.shelfEnabled }); return }
         root.setMenuHidden(Settings.toggleId(root.menuHidden, id))
     }
 
-    function toggleMenuBasic() {
-        root.setMenuHidden(Settings.toggleMaster(root.menuHidden))
+    // A master that turns its whole group on turns the shelf on with it, and the same the other way.
+    function toggleMenuGroup(ids) {
+        if (ids.indexOf("shelf") >= 0)
+            root.changeLeaf("shelf", { enabled: Settings.masterState(root.menuHidden, ids) !== "all" })
+        root.setMenuHidden(Settings.toggleMaster(root.menuHidden, ids))
     }
 
     function toggleKeyHints() {

@@ -2,7 +2,7 @@
 # Diffs the metrics contract against the running app's own seam, key by key, and fails on any drift.
 #   tools/flea-metrics-gate        against a Flea already running from this checkout's ui/
 # Start one first, on a listing of your own making, never a real directory (hard rule 9):
-#   QSG_RHI_BACKEND=vulkan FLEA_PATH=$(mktemp -d) FLEA_BIN=target/release/flea qs -p ui &
+#   QSG_RHI_BACKEND=vulkan FLEA_PATH=$(mktemp -d) FLEA_BIN=target/release/flea qs -p ui/boot &
 # The renderer is named because src/gui.rs owns that choice and a direct qs launch never runs it.
 # FLEA_RENDERER_AUTOMATIC stays unset, so no QML retry can relaunch Flea underneath the gate mid-run.
 # Reads the seam and never the source: a theme's shell.toml can pin body-small or row-padding-x, so
@@ -104,7 +104,6 @@ gridMinCellWidth|146|space(125), GridView.dc.html's five-column reference viewpo
 settingsPanelWidth|630|round(space(480) x 9/8), GM's roomier SettingsView board
 settingsRailWidth|169|630 - 459 - 2 outer hairlines, SettingsView rule 1
 settingsPaneWidth|459|round(space(350) x 9/8), GM's roomier Settings pane
-settingsIndent|52|52 x 13 / 13, the continuation indent five settings boards draw a hint and the ruler at
 settingsRailPaddingY|10|10 x 13 / 13, the inset Settings.dc.html gives the rail column above its first row"
 
 checked=0

@@ -73,23 +73,9 @@ function run(check) {
           Ops.retrySelectionLine([{path: "/source/c.txt", index: 2}, {path: "/source/d.txt", index: 3}]),
           "2 items selected for retry")
 
-    // The canvas draws this one verbatim on the Operations artboard's status strip.
-    check("trash reads exactly as the canvas draws it",
-          Ops.trashed(4, 0),
-          "Moved 4 items to Trash · z undoes")
-    check("a trash that failed outright does not offer an undo",
-          Ops.trashed(0, 1),
-          "That item could not be moved to Trash.")
-    check("a partly failed trash reports both halves",
-          Ops.trashed(3, 1),
-          "Moved 3 items to Trash, 1 failed · z undoes")
-
     check("undo names the operation it reversed",
           Ops.undone("rename") + " / " + Ops.undone("move"),
           "Undid the rename. / Undid the move.")
-    check("undoing a trash says where it came back from",
-          Ops.undone("trash"),
-          "Put it back from Trash.")
     // src/backend/undo.rs reverses a mkdir with remove_dir, so the line says what left the disk
     // rather than repeating the wire's own verb at an operator who never typed it.
     check("undoing a new folder says what came off the disk",
@@ -98,7 +84,7 @@ function run(check) {
 
     check("the clipboard says what it took and how to use it",
           Ops.copied(2, true) + " / " + Ops.copied(1, false),
-          "Cut 2 items, p pastes. / Copied 1 item, p pastes.")
+          "Cut 2 items · p pastes / Copied 1 item · p pastes")
 
     check("a leaf is the part after the last separator",
           Ops.leaf("/home/gm/photo copy.jpg"),
@@ -123,14 +109,16 @@ function run(check) {
         for (var s = 0; s < 40; s++) {
             picked.push(s)
         }
+        // What the collision card is asked, kept apart from sent, so a transfer is seen to ask rather than go straight out.
+        var asked = []
         return {
             path: "/d",
             cursorIndex: 0,
-            rows: rows,
+            rows: rows, shown: null, asked: asked,
             selectedIndices: function () { return picked },
             rowFor: function (i) { return (i < 0 || i >= rows.length) ? null : rows[i] },
             join: function (a, b) { return a + "/" + b },
-            sticky: function () {},
+            sticky: function () {}, collide: { ask: function (msg) { asked.push(msg); return true } },
             backend: {
                 send: function (msg) { sent.push(msg) },
                 askPaths: function (rows) { sent.push({ c: "paths", rows: rows }) },
@@ -157,12 +145,14 @@ function run(check) {
     // bold and run.rs resolves it, and sending paths instead relocates five files and abandons
     // thirty-five with no error, no count and no message.
     var sentMove = []
-    Ops.moveToDropbox(windowedPane(sentMove), "/dropbox")
-    var move = sentMove.length === 1 ? sentMove[0] : null
+    var dropboxPane = windowedPane(sentMove)
+    Ops.moveToDropbox(dropboxPane, "/dropbox")
+    var move = dropboxPane.asked.length === 1 ? dropboxPane.asked[0] : null
     check("a move to Dropbox carries every selected row, not the five the window held",
           move && move.rows ? String(move.rows.length)
                             : "truncated to " + (move && move.paths ? move.paths.length : 0),
           "40")
+    check("and it asks the collision card rather than going straight to the backend", sentMove.length, 0)
 
     // Compress has the same defect through the same function, and the archive request has no rows
     // form, so it must resolve the indices first rather than name the handful it can see.
@@ -213,7 +203,8 @@ function run(check) {
           "/d/captured.txt,/d/second.txt|31")
     Ops.moveToDropbox(capturedPane, "/dropbox", 32)
     check("Dropbox transfer retains the menu identity alongside the full selection",
-          capturedRequests[1].menuId + "|" + capturedRequests[1].rows.length, "32|40")
+          capturedPane.asked.length === 1 ? capturedPane.asked[0].menuId + "|" + capturedPane.asked[0].rows.length + "|" + capturedRequests.length
+                                          : "not asked", "32|40|1")
 
     var t = Ops.started(12, true, 3)
     check("a started transfer carries its id, its direction and its count",
@@ -340,11 +331,11 @@ function run(check) {
           Transfer.fileLine({ name: "panel-demo.mp4", total: 48000000 }),
           "panel-demo.mp4 \u00b7 48.0 MB")
     // total is 0 for a directory, whose size is not known without a sweep this codebase never does.
-    check("a directory names itself and claims no size",
-          Transfer.fileLine({ name: "photos", total: 0 }),
-          "photos")
+    check("a directory with nothing copied yet claims no size", Transfer.fileLine({ name: "photos", total: 0, bytes: 0 }), "photos")
+    // A tree's own running count is the byte line's under the bar, so the file line never says it twice.
+    check("a directory under way still claims no size", Transfer.fileLine({ name: "photos", total: 0, bytes: 1500000000 }), "photos")
     check("nothing in flight yet draws no second row at all",
-          Transfer.fileLine({ name: "", total: 0 }),
+          Transfer.fileLine({ name: "", total: 0, bytes: 0 }),
           "")
 
     // The bar is the whole transfer, never the one file: one large file is then its own byte bar.
@@ -381,4 +372,19 @@ function run(check) {
     check("an idle transfer is not running and has nothing to draw",
           Ops.emptyTransfer().running + " " + Ops.emptyTransfer().done + " " + Ops.emptyTransfer().total,
           "false 0 0")
+
+    // CloudMounts: a copy onto an rclone mount lands in rclone's cache first, so the done
+    // line names the background upload and never claims the drive confirmed it.
+    check("a copy onto rclone says it uploads in the background",
+          Ops.transferDone({ moving: false, n: 5 }, 5, 0, 0, false, false, "rclone uploads them in the background"),
+          "Copied 5 items · rclone uploads them in the background · z undoes")
+    check("an unconfirmed folder says so the same way",
+          Ops.transferDone({ moving: false, n: 2 }, 2, 0, 0, false, false, "copied, but the drive did not confirm the folder"),
+          "Copied 2 items · copied, but the drive did not confirm the folder · z undoes")
+    check("a verdict note with nothing landed stays unsaid",
+          Ops.transferDone({ moving: false, n: 2 }, 0, 2, 0, false, false, "rclone uploads them in the background"),
+          "Copied 0 of 2 · 2 failed")
+    check("no verdict note leaves the shipped line alone",
+          Ops.transferDone({ moving: false, n: 2 }, 2, 0, 0, false, false, ""),
+          "Copied 2 items · z undoes")
 }

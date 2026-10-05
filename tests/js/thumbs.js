@@ -46,6 +46,9 @@ function run(check) {
     check("an answered row reports its file", Thumbs.fileFor(s, 13), "/cache/13.png")
     check("and is never asked for again", Thumbs.plan(s, rows, 10, 13, 13).ask.length, 0)
     check("and is never cancelled, having no job to drop", Thumbs.plan(s, rows, 10, 0, 1).drop.indexOf(13), -1)
+    var c = Thumbs.applied(Thumbs.empty(), { ask: [10, 11], drop: [], cacheOnly: true })
+    check("a cache-only ask the viewport left is cancelled too", Thumbs.plan(c, rows, 10, 12, 13).drop.join(","), "10,11")
+    check("and a cache-only ask counts as pending", Thumbs.pending(c.file[10]), true)
 
     s = Thumbs.remember(s, 11, "", 240)
     check("a row answered with no thumbnail reports nothing", Thumbs.fileFor(s, 11), "")
@@ -83,6 +86,19 @@ function run(check) {
     r = Thumbs.remember(r, 11, "/cache/b.png", 8)
     check("a real answer is not a refusal", Thumbs.refused(r, 11), false)
 
+    // A row asked while its class is cache-only: an empty answer means "not tried",
+    // so it reads as no file without reading as a refusal, and the class switch
+    // forgets it while a real refusal stays answered.
+    var c = Thumbs.applied(Thumbs.empty(), { ask: [7], drop: [], cacheOnly: true })
+    check("a cache-only ask marks the row without naming a file", Thumbs.fileFor(c, 7), "")
+    check("and the marked row is not a refusal", Thumbs.refused(c, 7), false)
+    check("and is not asked twice while marked", Thumbs.plan(c, [{ t: true }], 7, 7, 7, "media").ask.length, 0)
+    c = Thumbs.remember(c, 7, "", 240)
+    check("its empty answer still reads as no file", Thumbs.fileFor(c, 7), "")
+    check("but still not as a refusal", Thumbs.refused(c, 7), false)
+    c = Thumbs.remember(c, 7, "/cache/7.png", 240)
+    check("a real answer overwrites the mark", Thumbs.fileFor(c, 7), "/cache/7.png")
+
     // The viewport is the only range a request may name, so its clamp is the no-sweep rule in arithmetic.
     var v = Thumbs.viewport(0, 37, 36, 2000)
     check("a viewport at the top starts at row zero", v.first + "," + v.last, "0,35")
@@ -97,4 +113,19 @@ function run(check) {
     check("a part-scrolled window reaches the row its bottom edge straddles", v.first + "," + v.last, "0,36")
     v = Thumbs.viewport(21, 37, 36, 30)
     check("and that straddled row is still clamped to the last row of the listing", v.last, 29)
+
+    // GM, 2026-09-24: a small original draws at its own size, centred, and is never enlarged to the frame.
+    function drawn(scale, w, h) { return Math.round(w * scale) + "x" + Math.round(h * scale) }
+    check("a 120x68 original in the 754x471 frame draws at its own size", drawn(Thumbs.fitScale(754, 471, 120, 68, 1), 120, 68), "120x68")
+    check("an original decoded to fit is drawn as decoded", drawn(Thumbs.fitScale(754, 471, 707, 471, 1), 707, 471), "707x471")
+    check("so is one that fits the width", drawn(Thumbs.fitScale(2099, 1156, 2099, 700, 1), 2099, 700), "2099x700")
+    check("a full-size cache file of a photo whose size is not known yet fills the frame",
+          drawn(Thumbs.fitScale(754, 471, 256, 171, Thumbs.thumbLimit(256, 171, 0, 0)), 256, 171), "705x471")
+    check("of a 6000x4000 photo too", drawn(Thumbs.fitScale(754, 471, 256, 171, Thumbs.thumbLimit(256, 171, 6000, 4000)), 256, 171), "705x471")
+    check("of a 300x200 picture only up to its own size",
+          drawn(Thumbs.fitScale(754, 471, 256, 171, Thumbs.thumbLimit(256, 171, 300, 200)), 256, 171), "300x200")
+    check("and an EXIF-turned one by its longest side", drawn(Thumbs.fitScale(754, 471, 171, 256, Thumbs.thumbLimit(171, 256, 300, 200)), 171, 256), "200x300")
+    check("a cache file smaller than the cache size is the original's own size, never enlarged",
+          drawn(Thumbs.fitScale(754, 471, 64, 48, Thumbs.thumbLimit(64, 48, 0, 0)), 64, 48), "64x48")
+    check("a frame smaller than the picture still shrinks it", drawn(Thumbs.fitScale(200, 125, 256, 171, Thumbs.thumbLimit(256, 171, 6000, 4000)), 256, 171), "187x125")
 }

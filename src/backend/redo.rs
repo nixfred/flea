@@ -3,6 +3,7 @@ use super::copyfile::{copy_any, move_any, Progress};
 use super::opsreq::{OpMsg, PROGRESS_EVERY};
 use super::undo::{self, Entry, ItemIdentity, Step};
 use crate::error::{from_io, FleaError};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -72,7 +73,7 @@ impl Replay {
             saved.step = entry.steps.remove(0);
         }
     }
-    fn check(saved: &ReplayStep) -> Result<(), FleaError> {
+    fn check(saved: &ReplayStep, vacated: bool) -> Result<(), FleaError> {
         if let (Some(path), Some(identity)) = (source(&saved.step), &saved.input) {
             if !path.is_absolute() || ItemIdentity::inspect(path)? != *identity {
                 return Err(error(path, "the original item changed or was replaced; redo left it in place"));
@@ -83,7 +84,7 @@ impl Replay {
                 return Err(error(path, "the destination folder was replaced; redo was refused"));
             }
         }
-        if let Some(path) = destination(&saved.step) {
+        if let Some(path) = destination(&saved.step).filter(|_| !vacated) {
             match path.symlink_metadata() {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(from_io("redo", &path.to_string_lossy(), &e)),
@@ -97,10 +98,16 @@ impl Replay {
         let mut entry = Entry { op: self.op.clone(), steps: Vec::new() };
         let mut changes = Vec::new();
         let result = (|| {
-            for saved in &self.steps { Self::check(saved)?; }
+            // A replace trashes the old item before its copy lands, so a name an earlier Trashed step empties is free only once redo reaches it.
+            let mut vacated = HashSet::new();
+            for saved in &self.steps {
+                if cancel.load(Ordering::Relaxed) { return Err(error(Path::new(""), "redo cancelled")); }
+                Self::check(saved, destination(&saved.step).is_some_and(|path| vacated.contains(path)))?;
+                if let Step::Trashed(entry) = &saved.step { vacated.insert(entry.original.as_path()); }
+            }
             for (index, saved) in self.steps.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) { return Err(error(Path::new(""), "redo cancelled")); }
-                Self::check(saved)?;
+                Self::check(saved, false)?;
                 let before = entry.steps.len();
                 apply(saved, id, index, cancel, tx, &mut entry.steps)?;
                 if let Some(step) = entry.steps.get(before) {
@@ -130,15 +137,26 @@ fn apply(saved: &ReplayStep, id: usize, index: usize, cancel: &AtomicBool, tx: &
             let mut sink = |bytes, total| {
                 if last.elapsed() >= PROGRESS_EVERY {
                     last = Instant::now();
-                    let _ = tx.send(OpMsg::Progress { id, index, name: name.clone(), bytes, total });
+                    // corner: a redo runs no sweep of its own, so its card counts bytes without a total, which is
+                    // the same state a batch shows while it is still counting.
+                    let _ = tx.send(OpMsg::Progress { id, index, name: name.clone(), bytes, total, scanned: 0 });
                 }
             };
-            let mut progress = Progress { cancel, on_bytes: &mut sink, partial: None };
+            let mut durability = super::durable::Durability::begin(to.parent().unwrap_or(to));
+            let mut progress = Progress { cancel, on_bytes: &mut sink, partial: None, tree: None, manifest: None, durability: Some(&mut durability) };
             let moving = matches!(saved.step, Step::Moved { .. });
             let result = if moving { move_any(from, to, &mut progress) } else { copy_any(from, to, &mut progress) };
+            let partial = progress.partial.take();
+            drop(progress);
             if result.is_ok() {
-                steps.push(if moving { undo::moved(from, to, identity)? } else { undo::copied(from, to, identity)? });
-            } else if let Some(partial) = progress.partial {
+                // The bytes landed; only the folder confirmation can still fail, so the step stays journalled either way.
+                let step = if moving { undo::moved(from, to, identity) } else { undo::copied(from, to, identity) };
+                let flushed = durability.flush_dirs();
+                steps.push(step?);
+                if flushed.is_err() {
+                    return Err(error(to, super::durable::DIR_UNCONFIRMED));
+                }
+            } else if let Some(partial) = partial {
                 steps.push(undo::copied(from, &partial, identity)?);
             }
             result
@@ -177,9 +195,42 @@ mod tests {
         }
         assert!(sandbox.path().join(".flea-test-sandbox").is_file());
     }
+    // Before Linux 6.13 ctime ticks every few milliseconds, so the rewrite repeats until the filesystem records it.
+    fn rewrite_until_recorded(path: &Path, payload: &str) {
+        const TRIES: u32 = 1000;
+        let before = ItemIdentity::inspect(path).unwrap();
+        for _ in 0..TRIES {
+            std::fs::write(path, payload).unwrap();
+            if ItemIdentity::inspect(path).unwrap() != before {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("{} kept its ctime across {} rewrites", path.display(), TRIES);
+    }
     fn redo(journal: &mut Journal) -> Result<String, FleaError> {
         let (tx, _rx) = channel();
         journal.redo(1, &AtomicBool::new(false), &tx)
+    }
+
+    #[test]
+    fn redo_classifies_the_existing_parent_not_the_missing_name() {
+        let sandbox = TestDir::new("redo-parent");
+        let original = sandbox.file("original", "payload");
+        let (result, steps) = ops::duplicate(&original);
+        let copy = result.unwrap();
+        let mut journal = Journal::new();
+        journal.push(Entry { op: "duplicate".into(), steps });
+        assert_eq!(journal.undo().unwrap(), "duplicate");
+        assert!(!copy.exists());
+        // Only the missing name is marked, so probing it answers durable and probing its parent does not.
+        crate::backend::durable::test_reset();
+        crate::backend::durable::test_mark_durable(&copy);
+        crate::backend::durable::test_set_fail_dirs(true);
+        let redone = redo(&mut journal);
+        crate::backend::durable::test_set_fail_dirs(false);
+        crate::backend::durable::test_reset();
+        assert!(redone.is_ok(), "the parent was classified, so no folder flush ran to fail: {:?}", redone.err().map(|e| e.msg));
     }
 
     #[test]
@@ -240,7 +291,7 @@ mod tests {
         journal.push(Entry { op: "duplicate".into(), steps });
         guard(&sandbox, &[&original, &copy]);
         journal.undo().unwrap();
-        std::fs::write(&original, "changed payload").unwrap();
+        rewrite_until_recorded(&original, "changed payload");
         assert!(redo(&mut journal).unwrap_err().msg.contains("changed"));
         assert!(!copy.exists());
         let (result, steps) = ops::duplicate(&original);
@@ -250,6 +301,22 @@ mod tests {
         journal.undo().unwrap();
         std::fs::write(&copy, "foreign destination").unwrap();
         assert!(redo(&mut journal).unwrap_err().msg.contains("already exists"));
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "foreign destination");
+    }
+
+    #[test]
+    fn a_cancel_before_redo_starts_is_answered_before_any_step_is_checked() {
+        let sandbox = TestDir::new("redo-cancel");
+        let original = sandbox.file("original", "payload");
+        let (result, steps) = ops::duplicate(&original);
+        let copy = result.unwrap();
+        let mut journal = Journal::new();
+        journal.push(Entry { op: "duplicate".into(), steps });
+        guard(&sandbox, &[&original, &copy]);
+        journal.undo().unwrap();
+        std::fs::write(&copy, "foreign destination").unwrap();
+        let (tx, _rx) = channel();
+        assert_eq!(journal.redo(1, &AtomicBool::new(true), &tx).unwrap_err().msg, "redo cancelled", "the check never ran past the cancel");
         assert_eq!(std::fs::read_to_string(&copy).unwrap(), "foreign destination");
     }
 

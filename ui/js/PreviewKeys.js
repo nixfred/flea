@@ -1,6 +1,7 @@
 .pragma library
 
 .import "Filter.js" as Filter
+.import "Marks.js" as Marks
 
 // What the preview overlay does with a key, split out of Focus.js at its 300-line hard cap the
 // same way ui/js/Trash.js was: Focus.js decides which surface owns a key, and this is the surface.
@@ -36,7 +37,7 @@ function pdfAction(action, viewer) {
 function open(root) {
     var row = root.rowFor(root.cursorIndex)
     if (row && !row.d)
-        root.preview.open(root.join(root.path, row.n), row.i, row.s)
+        root.preview.open(root.join(root.path, row.n), row.i, row.s, root.kindNames[row.k] || "")
 }
 
 // Preview open: j/k move the cursor and the preview follows; escape always closes, and so does a
@@ -48,8 +49,8 @@ function open(root) {
 function act(action, root) {
     root.preview.revealStrip()
     switch (action) {
-    case "cursorDown": Filter.moveCursor(root, 1); follow(root); return
-    case "cursorUp": Filter.moveCursor(root, -1); follow(root); return
+    case "cursorDown": Filter.moveCursor(root, 1); Marks.follow(root); follow(root); return
+    case "cursorUp": Filter.moveCursor(root, -1); Marks.follow(root); follow(root); return
     case "preview": root.preview.close(); return
     // Space closes every kind now, so playback has its own key; it self-guards, because p reaches
     // this only in the media context and a still image has nothing to play.
@@ -72,6 +73,8 @@ function act(action, root) {
     case "zoomOut": root.preview.zoomBy(-1); return
     case "zoomIn": root.preview.zoomBy(1); return
     case "expand": root.preview.toggleExpand(); return
+    // MediaMute rule 5: the flag is the preview's to flip, and it silences without pausing.
+    case "mute": root.preview.toggleMute(); return
     }
 }
 
@@ -79,5 +82,5 @@ function act(action, root) {
 function follow(root) {
     var row = root.rowFor(root.cursorIndex)
     if (row && !row.d)
-        root.preview.follow(root.join(root.path, row.n), row.i, row.s)
+        root.preview.follow(root.join(root.path, row.n), row.i, row.s, root.kindNames[row.k] || "")
 }

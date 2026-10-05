@@ -18,6 +18,9 @@ function run(check) {
         key(preset, "PageUp", "", ctrl, "tabPrevious")
         key(preset, "Tab", "", ctrl, "focusPreview")
         key(preset, "Tab", "", none, "focusNext")
+        // #182: Shift+Delete deletes permanently in every preset, not only Mac and Windows; plain Delete still trashes.
+        key(preset, "Delete", "", shift, "deletePermanently")
+        key(preset, "Delete", "", none, "trash")
         key(preset, "W", "", ctrl, "tabClose")
         key(preset, "S", "s", none, "sortNext")
         key(preset, "S", "S", shift, "sortReverse")
@@ -85,7 +88,6 @@ function run(check) {
     key("default", "D", "d", none, "trashArm")
     key("default", "D", "", ctrl, "pageDown")
     key("default", "T", "t", none, "tabNew")
-    key("default", "Delete", "", shift, "")
     key("vim", "L", "l", none, "open")
     key("vim", "H", "h", none, "parent")
     key("vim", "Y", "y", none, "copyArm")
@@ -132,6 +134,10 @@ function run(check) {
     check("Mac menu advertises its actual Return action", Keymap.hintFor("rename"), "enter")
     check("Mac Open hint uses native Right", Keymap.hintFor("open"), "right")
     Keymap.setPreset("vim")
+    // The mac hints above filled the cache, so a setPreset that kept it would answer vim's rename with mac's.
+    check("a preset change drops the cached hints", Keymap.hintFor("rename"), Keymap.hintsFor("vim").rename || "")
+    check("and mac and vim hint rename differently, so that check can go red",
+          Keymap.hintsFor("mac").rename !== Keymap.hintsFor("vim").rename, true)
     check("Vim Copy hints the key it starts with", Keymap.hintFor("copy"), "y")
     check("Vim Cut hints the key it starts with", Keymap.hintFor("cut"), "d")
     Keymap.setPreset("unknown")
@@ -143,7 +149,46 @@ function run(check) {
         return row.action === "trash"
     })[0].keys.split(" / ").indexOf("d"), -1)
     check("menu-only actions invent no shortcut", Keymap.hintFor("emptyTrash"), "")
-    check("sheet is populated from effective current bindings", Keymap.SHEET.length > 30, true)
+    check("a shift chord fills an action no plain key names", Keymap.hintFor("deletePermanently"), "shift-delete")
+    // A preset shift row for an action the table binds plain: the plain key must speak for it, since a shift chord only fills what no text or plain row names.
+    var keepRows = Keymap.bindingRows
+    Keymap.bindingRows = function (name, frontend) {
+        return [{ mods: "none", key: "Delete", keys: "delete", action: "trash", preset: "all" },
+                { mods: "shift", key: "X", keys: "shift-x", action: "trash", preset: name }]
+    }
+    Keymap.setPreset("vim")
+    check("a preset shift row never replaces the plain hint", Keymap.hintFor("trash"), "delete")
+    Keymap.bindingRows = keepRows
+    Keymap.setPreset("vim")
+    check("deletePermanently still gets its shift hint where no plain row exists", Keymap.hintFor("deletePermanently"), "shift-delete")
+    // The status strip asks for this one key while the first window builds; the whole table was about 9,700 calls there.
+    Keymap.setPreset("default")
+    var keepLookup = Keymap.lookupFor, lookups = 0
+    Keymap.lookupFor = function () { lookups++; return keepLookup.apply(null, arguments) }
+    var firstAsk = Keymap.hintFor("deletePermanently")
+    Keymap.lookupFor = keepLookup
+    var ownRows = Keymap.PRESET_KEYS.concat(Keymap.SHARED_KEYS).filter(function (row) {
+        return (row.preset === "all" || row.preset === "default") && Keymap.applies(row, "listing", "gui")
+            && Keymap.actionGroup(row.action) === "deletePermanently"
+    }).length
+    check("the action asked for has rows of its own, so the count below can go red", ownRows > 0, true)
+    check("a first hint ask looks up only the rows of the action it asks for", lookups, ownRows)
+    check("and still answers the shift chord", firstAsk, "shift-delete")
+    // Asked one action at a time, every preset answers exactly what its whole table says.
+    var hintMismatches = []
+    for (var hp = 0; hp < Keymap.PRESETS.length; hp++) {
+        var hintTable = Keymap.hintsFor(Keymap.PRESETS[hp])
+        Keymap.setPreset(Keymap.PRESETS[hp])
+        var hintActions = Object.keys(hintTable).concat(["emptyTrash"])
+        for (var ha = 0; ha < hintActions.length; ha++) {
+            var wanted = Object.prototype.hasOwnProperty.call(hintTable, hintActions[ha]) ? hintTable[hintActions[ha]] : ""
+            if (Keymap.hintFor(hintActions[ha]) !== wanted)
+                hintMismatches.push(Keymap.PRESETS[hp] + ":" + hintActions[ha])
+        }
+    }
+    check("one-action hints match the whole table on every preset", hintMismatches.join(" "), "")
+    Keymap.setPreset("vim")
+    check("sheet is populated from effective current bindings", Keymap.sheetFor(Keymap.preset, "gui").length > 30, true)
     // One cap names one key. Joining every spelling an action answers to produced caps of 40
     // characters on Default and 78 on Mac, wider than the card, and they drew over the next column.
     var widestCap = 0, identifierLabel = ""
@@ -155,6 +200,21 @@ function run(check) {
             if (sheet[r].keys.split(" / ").length > 2) identifierLabel = "too many spellings: " + sheet[r].keys
         }
     }
+    // MediaMute rule 4: the sheet lists the preview's own mute key once per preset, under Look,
+    // while the listing goes on advertising m as its menu key.
+    var muteRows = 0, muteCap = "", menuStillM = true
+    for (var m = 0; m < Keymap.PRESETS.length; m++) {
+        var preset = Keymap.PRESETS[m], listed = Keymap.sheetFor(preset, "gui")
+        for (var q = 0; q < listed.length; q++)
+            if (listed[q].action === "mute") { muteRows++; muteCap = listed[q].keys }
+        if (Keymap.lookupFor(preset, 0, "m", 0, "listing", "gui") !== "menu") menuStillM = false
+        if (Keymap.lookupFor(preset, 0, "m", 0, "media", "gui") !== "mute") menuStillM = false
+    }
+    check("every preset lists mute once", muteRows, Keymap.PRESETS.length)
+    check("and lists it under its own key", muteCap, "m")
+    check("while m still opens the menu in the listing and mutes in a media preview", menuStillM, true)
+    check("the sheet group that claims it is Look", Keymap.SHEET_GROUPS.look.indexOf("mute") >= 0, true)
+
     check("no cap in any preset outgrows its half of the card", widestCap <= 18, true)
     check("no row prints an action id where its wording belongs", identifierLabel, "")
     check("pointer contract remains populated", Keymap.POINTER.length > 10, true)
@@ -163,4 +223,13 @@ function run(check) {
     check("every effective Mac binding resolves to advertised action", effective.every(function (r) {
         return Keymap.lookupFor("mac", r.keycode, r.text, r.mask, "listing", "gui") === r.action
     }), true)
+    // ListColumns040's F4: the key resolves in every preset, and its keys token is lowercase like every other.
+    var f4ok = true
+    for (var f = 0; f < Keymap.PRESETS.length; f++) {
+        if (Keymap.lookupFor(Keymap.PRESETS[f], Qt.Key_F4, "", none, "listing", "gui") !== "autofitColumns")
+            f4ok = false
+    }
+    check("F4 fits columns in every preset", f4ok, true)
+    var f4row = Keymap.PRESET_KEYS.filter(function (r) { return r.action === "autofitColumns" })[0] || {}
+    check("and its keys token is lowercase like every other", f4row.keys, "f4")
 }

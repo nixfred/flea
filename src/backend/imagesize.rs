@@ -1,40 +1,54 @@
 // Pixel dimensions read from a file header, because the preview column names them and the wire does
-// not carry them. Only the header is read: no image is ever decoded to answer this, and a JPEG is
-// walked segment by segment with a seek over each payload, never read through.
+// not carry them. Only the first bytes are read: no image is ever decoded to answer this.
 use crate::backend::regfile::open_regular;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-// The fixed-offset formats answer inside this; a JPEG is walked from the file instead, because its frame
-// header sits behind whatever APP segments the producer wrote, and a phone's EXIF preview alone runs
-// 20 to 60 KiB: an 8 KiB walk answered no dimensions for every such photo and none of the fixture's.
+// Enough for every header but a JPEG's, whose frame can sit behind tens of kilobytes of EXIF.
 const PROBE: usize = 8192;
 
 // PNG's IHDR width and height sit at a fixed offset, so the whole answer is in the first 24 bytes.
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
-const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8];
 const GIF_MAGIC: &[u8] = b"GIF8";
 const BMP_MAGIC: &[u8] = b"BM";
 const RIFF_MAGIC: &[u8] = b"RIFF";
 const WEBP_MAGIC: &[u8] = b"WEBP";
 
-pub fn dimensions(path: &Path) -> Option<(u32, u32)> {
+// Stored pixels plus the EXIF orientation a viewer turns them by (1 unless named; 5 to 8 swap sides), needed before Qt is asked for a size.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct Header {
+    pub width: u32,
+    pub height: u32,
+    pub orientation: u8,
+}
+
+pub fn header(path: &Path) -> Option<Header> {
     let mut buf = vec![0u8; PROBE];
     let mut f = open_regular(path)?;
     let n = f.read(&mut buf).ok()?;
     buf.truncate(n);
-    if buf.starts_with(JPEG_MAGIC) {
-        return jpeg_in(&mut f);
+    // Issue 90, nixfred: a camera writes an EXIF segment of tens of kilobytes carrying its preview,
+    // and the frame header sits behind it, so a JPEG's chain is walked over the file and not the probe.
+    if buf.starts_with(&[0xFF, 0xD8]) {
+        f.seek(SeekFrom::Start(2)).ok()?;
+        // Buffered, because the walk resyncs a byte at a time and a raw File makes that a syscall each.
+        return jpeg_header(&mut std::io::BufReader::new(&mut f));
     }
-    from_header(&buf)
+    from_header(&buf).map(|(width, height)| Header { width, height, orientation: NO_TURN })
+}
+
+#[cfg(test)]
+pub fn dimensions(path: &Path) -> Option<(u32, u32)> {
+    header(path).map(|h| (h.width, h.height))
 }
 
 pub fn from_header(b: &[u8]) -> Option<(u32, u32)> {
     if b.starts_with(PNG_MAGIC) {
         return png(b);
     }
-    if b.starts_with(JPEG_MAGIC) {
-        return jpeg_in(&mut Cursor::new(b));
+    if b.starts_with(&[0xFF, 0xD8]) {
+        // The same walk, so bytes in hand and a file on disk decode a JPEG by one rule and not two.
+        return jpeg(&mut std::io::Cursor::new(&b[2..]));
     }
     if b.starts_with(GIF_MAGIC) {
         return gif(b);
@@ -63,11 +77,6 @@ fn le16(b: &[u8], at: usize) -> Option<u32> {
     Some(u16::from_le_bytes([s[0], s[1]]) as u32)
 }
 
-fn be16(b: &[u8], at: usize) -> Option<u32> {
-    let s = b.get(at..at + 2)?;
-    Some(u16::from_be_bytes([s[0], s[1]]) as u32)
-}
-
 // Sample input: 89 50 4E 47 0D 0A 1A 0A | 00 00 00 0D "IHDR" | width(4) height(4)
 fn png(b: &[u8]) -> Option<(u32, u32)> {
     if b.get(12..16)? != b"IHDR" {
@@ -76,50 +85,124 @@ fn png(b: &[u8]) -> Option<(u32, u32)> {
     Some((be32(b, 16)?, be32(b, 20)?))
 }
 
+// A camera's EXIF preview is tens of kilobytes; corner: a frame header past this megabyte is not found.
+const JPEG_WALK: u64 = 1024 * 1024;
+
+// One byte, and the walk's own bound with it: a file that never names a marker must not be read whole.
+fn step<R: Read>(r: &mut R, walked: &mut u64) -> Option<u8> {
+    if *walked >= JPEG_WALK {
+        return None;
+    }
+    let mut byte = [0u8; 1];
+    r.read_exact(&mut byte).ok()?;
+    *walked += 1;
+    Some(byte[0])
+}
+
+fn jpeg<R: Read + Seek>(r: &mut R) -> Option<(u32, u32)> {
+    jpeg_header(r).map(|h| (h.width, h.height))
+}
+
 // Sample input: FF D8 | FF C0 <len:2> <precision:1> <height:2> <width:2> ..., with any number of
-// other FF xx segments before that frame header. Each segment's payload is seeked over rather than
-// read, so the cost is a few bytes per segment however long the EXIF in front of the frame runs.
-fn jpeg_in<R: Read + Seek>(r: &mut R) -> Option<(u32, u32)> {
-    r.seek(SeekFrom::Start(2)).ok()?;
+// other FF xx segments before that frame header, one of which may be the APP1 carrying EXIF.
+fn jpeg_header<R: Read + Seek>(r: &mut R) -> Option<Header> {
+    let mut walked: u64 = 0;
+    let mut orientation: Option<u8> = None;
     loop {
-        let mut marker = read_byte(r)?;
-        if marker != 0xFF {
+        // Any run of FF is padding before the marker, so only the byte that ends the run is one.
+        while step(r, &mut walked)? != 0xFF {}
+        let marker = loop {
+            let b = step(r, &mut walked)?;
+            if b != 0xFF {
+                break b;
+            }
+        };
+        // TEM, the restart markers and a repeated SOI stand alone: no length follows them.
+        if marker == 0x01 || (0xD0..=0xD8).contains(&marker) {
+            continue;
+        }
+        // A scan or the end of the image: no frame header is coming, and past here is entropy-coded.
+        if marker == 0xDA || marker == 0xD9 {
             return None;
         }
-        // Any number of FF fill bytes may precede a marker, and each is not a marker of its own.
-        while marker == 0xFF {
-            marker = read_byte(r)?;
-        }
-        match marker {
-            // TEM, the restart markers and a repeated SOI carry no length; a scan or the end means no frame came first.
-            0x01 | 0xD0..=0xD7 | 0xD8 => continue,
-            0xD9 | 0xDA => return None,
-            _ => {}
-        }
-        let mut len = [0u8; 2];
-        r.read_exact(&mut len).ok()?;
-        let len = u16::from_be_bytes(len) as usize;
+        let len = u16::from_be_bytes([step(r, &mut walked)?, step(r, &mut walked)?]);
         if len < 2 {
             return None;
         }
-        if is_frame(marker) {
-            let mut sof = [0u8; 5];
-            r.read_exact(&mut sof).ok()?;
-            return Some((be16(&sof, 3)?, be16(&sof, 1)?));
+        // A frame header, except the four that are not: DHT, JPG, DAC and the restart markers.
+        let is_frame = (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
+        if is_frame {
+            // Sample input, a frame header after its length: precision(1) | height(2) | width(2), big endian.
+            let mut head = [0u8; 5];
+            r.read_exact(&mut head).ok()?;
+            let height = u16::from_be_bytes([head[1], head[2]]) as u32;
+            let width = u16::from_be_bytes([head[3], head[4]]) as u32;
+            return Some(Header { width, height, orientation: orientation.unwrap_or(NO_TURN) });
         }
-        r.seek(SeekFrom::Current(len as i64 - 2)).ok()?;
+        let mut body = u64::from(len) - 2;
+        // The first APP1 named Exif carries the orientation near its start, so only its head is read, in this same walk.
+        if marker == APP1 && orientation.is_none() {
+            let take = body.min(EXIF_HEAD);
+            // The head is read rather than stepped over, so the walk bound is checked first: APP1s with no frame still give up at the bound.
+            if walked + take > JPEG_WALK {
+                return None;
+            }
+            let mut head = vec![0u8; take as usize];
+            r.read_exact(&mut head).ok()?;
+            walked += head.len() as u64;
+            body -= head.len() as u64;
+            if let Some(tiff) = head.strip_prefix(EXIF_MAGIC) {
+                orientation = Some(exif_orientation(tiff).unwrap_or(NO_TURN));
+            }
+        }
+        // Seeked rather than read: an EXIF segment is tens of kilobytes and none of it is wanted.
+        walked += body;
+        if walked > JPEG_WALK {
+            return None;
+        }
+        r.seek(SeekFrom::Current(body as i64)).ok()?;
     }
 }
 
-// A frame header, except the four that are not: DHT, JPG, DAC and the restart markers.
-fn is_frame(marker: u8) -> bool {
-    (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
-}
+// EXIF's orientation 1 is "as stored"; it is also the answer for every file that names none.
+const NO_TURN: u8 = 1;
+const APP1: u8 = 0xE1;
+const EXIF_MAGIC: &[u8] = b"Exif\0\0";
+// IFD0 follows the TIFF header, in the first hundreds of bytes of the segment in every camera file seen.
+const EXIF_HEAD: u64 = 4096;
+const ORIENTATION_TAG: u16 = 0x0112;
+const TIFF_MAGIC: u16 = 42;
+const IFD_ENTRY_BYTES: usize = 12;
 
-fn read_byte<R: Read>(r: &mut R) -> Option<u8> {
-    let mut one = [0u8; 1];
-    r.read_exact(&mut one).ok()?;
-    Some(one[0])
+// Sample input, the TIFF block after "Exif\0\0": "II" 2A 00 | IFD0 offset(4) | count(2) | per entry tag(2)
+// type(2) count(4) value(4), in the byte order the first two bytes name; orientation is a SHORT in the value's head.
+fn exif_orientation(tiff: &[u8]) -> Option<u8> {
+    let little = match tiff.get(0..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let u16_at = |at: usize| -> Option<u16> {
+        let s = tiff.get(at..at + 2)?;
+        Some(if little { u16::from_le_bytes([s[0], s[1]]) } else { u16::from_be_bytes([s[0], s[1]]) })
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        let s = tiff.get(at..at + 4)?;
+        Some(if little { u32::from_le_bytes([s[0], s[1], s[2], s[3]]) } else { u32::from_be_bytes([s[0], s[1], s[2], s[3]]) })
+    };
+    if u16_at(2)? != TIFF_MAGIC {
+        return None;
+    }
+    let ifd = u32_at(4)? as usize;
+    let count = u16_at(ifd)? as usize;
+    for i in 0..count {
+        let entry = ifd + 2 + i * IFD_ENTRY_BYTES;
+        if u16_at(entry)? == ORIENTATION_TAG {
+            let value = u16_at(entry + 8)?;
+            return (1..=8).contains(&value).then_some(value as u8);
+        }
+    }
+    None
 }
 
 // Sample input: "GIF89a" | width(2, little endian) | height(2, little endian)
@@ -175,6 +258,50 @@ mod tests {
         v
     }
 
+    // FFD8, an APP1 "Exif\0\0" whose IFD0 holds one entry, then SOF0 carrying 4000 x 3000; tag and value in the named byte order.
+    fn exif_jpeg(order: &[u8; 2], tag: u16, value: u16) -> Vec<u8> {
+        let big = order == b"MM";
+        let u16b = |v: u16| if big { v.to_be_bytes() } else { v.to_le_bytes() };
+        let u32b = |v: u32| if big { v.to_be_bytes() } else { v.to_le_bytes() };
+        let mut tiff = order.to_vec();
+        tiff.extend_from_slice(&u16b(42));
+        tiff.extend_from_slice(&u32b(8));
+        tiff.extend_from_slice(&u16b(1));
+        tiff.extend_from_slice(&u16b(tag));
+        tiff.extend_from_slice(&u16b(3));
+        tiff.extend_from_slice(&u32b(1));
+        tiff.extend_from_slice(&u16b(value));
+        tiff.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        v.extend_from_slice(&((EXIF_MAGIC.len() + tiff.len() + 2) as u16).to_be_bytes());
+        v.extend_from_slice(EXIF_MAGIC);
+        v.extend_from_slice(&tiff);
+        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        v.extend_from_slice(&3000u16.to_be_bytes());
+        v.extend_from_slice(&4000u16.to_be_bytes());
+        v.extend_from_slice(&[0u8; 8]);
+        v
+    }
+
+    fn walk(v: &[u8]) -> Option<Header> {
+        jpeg_header(&mut std::io::Cursor::new(&v[2..]))
+    }
+
+    #[test]
+    fn the_exif_orientation_comes_from_the_same_walk_in_either_byte_order() {
+        assert_eq!(walk(&exif_jpeg(b"II", 0x0112, 6)), Some(Header { width: 4000, height: 3000, orientation: 6 }));
+        assert_eq!(walk(&exif_jpeg(b"MM", 0x0112, 8)), Some(Header { width: 4000, height: 3000, orientation: 8 }));
+        // No orientation tag, a value outside 1 to 8, and a TIFF block that is not one all read as stored.
+        assert_eq!(walk(&exif_jpeg(b"II", 0x010F, 6)).map(|h| h.orientation), Some(1));
+        assert_eq!(walk(&exif_jpeg(b"II", 0x0112, 9)).map(|h| h.orientation), Some(1));
+        assert_eq!(walk(&exif_jpeg(b"XX", 0x0112, 6)), Some(Header { width: 4000, height: 3000, orientation: 1 }));
+        let d = TestDir::new("imagesizeorient");
+        let path = d.join("phone.jpg");
+        std::fs::write(&path, exif_jpeg(b"II", 0x0112, 6)).unwrap();
+        assert_eq!(header(&path), Some(Header { width: 4000, height: 3000, orientation: 6 }), "a file is read by the same walk");
+        assert_eq!(header(&d.file("plain.png", "")), None);
+    }
+
     #[test]
     fn a_png_reports_its_ihdr_dimensions() {
         assert_eq!(from_header(&png_header(2560, 1440)), Some((2560, 1440)));
@@ -193,6 +320,65 @@ mod tests {
         assert_eq!(from_header(&v), Some((1920, 1080)));
     }
 
+    // Issue 90, nixfred: a camera writes its EXIF preview into an APP1 of tens of kilobytes, and the
+    // frame header behind it is past the probe, so the file is walked and the probe answers nothing.
+    #[test]
+    fn a_jpeg_is_measured_behind_an_exif_segment_longer_than_the_probe() {
+        let d = TestDir::new("imagesizeexif");
+        let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        let payload = 20000usize;
+        v.extend_from_slice(&((payload + 2) as u16).to_be_bytes());
+        v.extend_from_slice(&vec![0u8; payload]);
+        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        v.extend_from_slice(&480u16.to_be_bytes());
+        v.extend_from_slice(&640u16.to_be_bytes());
+        v.extend_from_slice(&[0u8; 8]);
+        let path = d.join("camera.jpg");
+        std::fs::write(&path, &v).unwrap();
+        assert_eq!(dimensions(&path), Some((640, 480)), "the frame header is behind the EXIF, not in the probe");
+        assert_eq!(from_header(&v[..PROBE]), None, "and the probe alone cannot reach it, which is why the file is walked");
+    }
+
+    // Unbounded, a file naming no marker was read whole: tens of seconds for 64 MB, milliseconds now.
+    #[test]
+    fn a_file_that_never_names_a_marker_is_not_read_to_its_end() {
+        let mut quiet = std::io::Cursor::new(vec![0u8; JPEG_WALK as usize * 2]);
+        assert_eq!(jpeg(&mut quiet), None, "no marker is ever found, so the walk gives up");
+        assert!(quiet.position() <= JPEG_WALK, "at the bound, not at the end: {}", quiet.position());
+        let mut padding = std::io::Cursor::new(vec![0xFFu8; JPEG_WALK as usize * 2]);
+        assert_eq!(jpeg(&mut padding), None, "and a file that is all padding names no marker either");
+        assert!(padding.position() <= JPEG_WALK, "at the bound, not at the end: {}", padding.position());
+        // Segments are seeked over rather than read, so the bound has to be charged for them too.
+        let mut segments = Vec::new();
+        let filler = 1024u16;
+        while segments.len() < JPEG_WALK as usize * 2 {
+            segments.extend_from_slice(&[0xFF, 0xE1]);
+            segments.extend_from_slice(&(filler + 2).to_be_bytes());
+            segments.extend_from_slice(&vec![0u8; filler as usize]);
+        }
+        let mut skipped = std::io::Cursor::new(segments);
+        assert_eq!(jpeg(&mut skipped), None, "a chain of segments with no frame in it answers nothing");
+        assert!(skipped.position() <= JPEG_WALK, "and the seeks are charged: {}", skipped.position());
+    }
+
+    // The shapes the old byte walker stepped over: fill bytes before a marker, a marker that carries
+    // no length at all, and a scan that means no frame header is coming.
+    #[test]
+    fn a_jpeg_walk_survives_fill_bytes_and_standalone_markers() {
+        let mut fill = vec![0xFF, 0xD8, 0xFF, 0xFF, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+        fill.extend_from_slice(&100u16.to_be_bytes());
+        fill.extend_from_slice(&200u16.to_be_bytes());
+        fill.extend_from_slice(&[0u8; 8]);
+        assert_eq!(from_header(&fill), Some((200, 100)), "the run of FF before a marker is padding");
+        let mut restart = vec![0xFF, 0xD8, 0xFF, 0xD0, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+        restart.extend_from_slice(&100u16.to_be_bytes());
+        restart.extend_from_slice(&200u16.to_be_bytes());
+        restart.extend_from_slice(&[0u8; 8]);
+        assert_eq!(from_header(&restart), Some((200, 100)), "a restart marker carries no length to skip");
+        let scan = vec![0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 0xFF, 0xC0, 0x00, 0x11];
+        assert_eq!(from_header(&scan), None, "a scan before any frame ends the walk rather than reading entropy data");
+    }
+
     #[test]
     fn a_jpeg_does_not_mistake_a_huffman_table_for_a_frame() {
         // FFC4 is DHT, which is inside the 0xC0..0xCF range and is not a frame header.
@@ -202,47 +388,6 @@ mod tests {
         v.extend_from_slice(&800u16.to_be_bytes());
         v.extend_from_slice(&[0u8; 8]);
         assert_eq!(from_header(&v), Some((800, 600)), "the progressive frame FFC2 is the answer");
-    }
-
-    // FFD8, one APP1 of `app1` payload bytes, then SOF0 carrying 640 x 480: a phone photo's shape.
-    fn jpeg_behind_app1(app1: usize) -> Vec<u8> {
-        let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1];
-        v.extend_from_slice(&((app1 + 2) as u16).to_be_bytes());
-        v.extend_from_slice(b"Exif\0\0");
-        v.resize(v.len() + app1 - 6, 0);
-        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
-        v.extend_from_slice(&480u16.to_be_bytes());
-        v.extend_from_slice(&640u16.to_be_bytes());
-        v.extend_from_slice(&[0u8; 10]);
-        v.extend_from_slice(&[0xFF, 0xD9]);
-        v
-    }
-
-    // The probe alone stops at 8 KiB, and a camera's EXIF preview is 20 to 60 KiB, so the frame header
-    // of every such photo sat past what was read and the column showed no dimensions for it.
-    #[test]
-    fn a_jpeg_whose_frame_header_sits_behind_a_long_exif_segment_is_still_measured() {
-        let d = TestDir::new("imagesizeexif");
-        let p = d.join("phone.jpg");
-        std::fs::write(&p, jpeg_behind_app1(20_000)).unwrap();
-        assert_eq!(dimensions(&p), Some((640, 480)));
-        assert_eq!(from_header(&jpeg_behind_app1(20_000)[..PROBE]), None, "which is why the file is walked");
-        assert_eq!(dimensions(&d.file("short.jpg", "")), None);
-    }
-
-    #[test]
-    fn a_jpeg_walks_over_fill_bytes_and_the_markers_that_carry_no_length() {
-        // FFD8, a fill byte before APP0, a restart marker on its own, then SOF1 carrying 12 x 34.
-        let mut v = vec![0xFF, 0xD8, 0xFF, 0xFF, 0xE0, 0x00, 0x04, 0, 0, 0xFF, 0xD1];
-        v.extend_from_slice(&[0xFF, 0xC1, 0x00, 0x11, 0x08]);
-        v.extend_from_slice(&34u16.to_be_bytes());
-        v.extend_from_slice(&12u16.to_be_bytes());
-        v.extend_from_slice(&[0u8; 8]);
-        assert_eq!(from_header(&v), Some((12, 34)));
-        // A scan before any frame header is no answer, and never a walk into the entropy-coded data.
-        assert_eq!(from_header(&[0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x04, 0, 0, 0xFF, 0xC0, 0x00, 0x11, 8, 0, 1, 0, 1]), None);
-        // A byte that is not a marker where one is due ends the walk rather than scanning past it.
-        assert_eq!(from_header(&[0xFF, 0xD8, 0x00, 0xFF, 0xC0, 0x00, 0x11, 8, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]), None);
     }
 
     #[test]

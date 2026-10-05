@@ -1,4 +1,6 @@
+use crate::gui;
 use crate::thp;
+use crate::vulkan;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -28,7 +30,12 @@ pub fn open(path: &str) -> i32 {
     // The setting is inherited across exec, so this is the last point that can hand it back.
     thp::enable();
     // corner: waited for, not detached, and on an archive that wait is a cold handler start; see AGENTS.md "Opening a file".
-    let finished = Command::new("gio")
+    let mut launcher = Command::new("gio");
+    // The display-GPU pin is Qt's alone, and only this launcher's own pin is dropped.
+    vulkan::drop_display_pin(&mut launcher);
+    // The platform theme Flea traded for its own startup is Qt's alone too, and is handed back here.
+    gui::restore_platform_theme(&mut launcher);
+    let finished = launcher
         .arg("open")
         .arg(&target)
         // The handler outlives us, so an inherited pipe would kill it on its first write; see AGENTS.md "Opening a file".

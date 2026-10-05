@@ -5,6 +5,7 @@ import "js/Facts.js" as Facts
 import "js/Format.js" as Format
 import "js/Icons.js" as Icons
 import "js/PreviewKeys.js" as PreviewKeys
+import "js/Thumbs.js" as Thumbs
 
 // The columns view's last pane when a file is picked. One anatomy for all twelve states the canvas
 // draws: a frame, an optional transport, the name, and a caption-type table of facts under it.
@@ -16,8 +17,18 @@ Item {
     property var meta: null
     property string kindName: ""
     property string thumb: ""
+    // ExtThumbs: a class that is off holds the frame on its facts until Ctrl+Space loads it.
+    property bool manualHold: false
+    // ExtThumbs: how much of a text file the frame may read; 256 KiB on network and phone storage.
+    property int textLimit: 1048576
+    // True where the board truncates instead of refusing: an over-limit remote file shows its first bytes.
+    property bool truncateText: false
     // True once no thumbnail is coming: the backend answered with none, or never offered one at all.
     property bool noThumbComing: false
+    // A move cleared the row and its settle is running, so the column is loading, not showing a file with no preview.
+    property bool pending: false
+    // Set by ui/PreviewSwap.qml when a hold ran out, which already spent LoadingState's own hold-off.
+    property bool loadingHeldOff: false
     property int selectionCount: 0
     property var selectedRows: []
     // The row's own absolute path, which the PDF page needs and nothing else here does.
@@ -52,8 +63,9 @@ Item {
         ? Facts.state(root.row, 1, false, "", root.kindName) : ""
 
     // Loading and Error are states the column reaches on its own: loading while the facts are still
-    // in flight, and error when the thing it was going to draw could not be read at all.
-    readonly property bool busy: root.row !== null && root.row.d !== true && root.meta === null
+    // in flight, and error when the thing it was going to draw could not be read at all. A held
+    // frame is neither: its facts are the listing's own and there is nothing in flight.
+    readonly property bool busy: root.pending || (root.row !== null && root.row.d !== true && root.meta === null && !root.manualHold)
     readonly property string failure: lines.readFailed || root.pdfFailed
         ? "This file could not be read."
         : (root.meta && root.meta.archiveFailed ? "This archive could not be read." : "")
@@ -62,16 +74,21 @@ Item {
     // a folder of anything else builds no PdfDocument at all.
     readonly property int pdfPages: pdfLoader.item ? pdfLoader.item.pageCount : 0
     readonly property bool pdfFailed: pdfLoader.item ? pdfLoader.item.failed : false
+    readonly property bool pdfDrawn: pdfLoader.item ? pdfLoader.item.shownPage >= 0 : false
 
     readonly property string previewState: Facts.state(root.row, root.selectionCount, root.busy, root.failure, root.kindName)
     readonly property var factRows: root.previewState === Facts.MULTI
-        ? Facts.multiFacts(root.selectedRows, Date.now(), root.selectionCount)
-        : (root.row ? Facts.facts(root.previewState, root.row, root.meta, root.kindName, Date.now(),
+        ? Facts.multiFacts(root.selectedRows, root.selectionCount)
+        : (root.row ? Facts.facts(root.previewState, root.row, root.meta, root.kindName,
                                   { pages: root.pdfPages > 0 ? String(root.pdfPages) : "",
                                     owner: root.meta && root.meta.owner ? root.meta.owner : "" }) : [])
 
     // The canvas's frame is 16 by 10, which is the one proportion every state shares.
     readonly property real frameRatio: 10 / 16
+    // Stretch renders a vector to the whole box, so the frame's pictures keep Fit for an SVG alone.
+    readonly property bool vectorPath: /\.svgz?$/i.test(root.path)
+    // EXIF orientations 5 to 8 swap the sides, and Qt fits its decode before it turns, so the box it is asked for turns too.
+    readonly property bool turned: root.meta !== null && root.meta.orient >= 5
 
     // The states that draw a picture of the file itself. A PDF draws its own page, loading draws the
     // crawl, and a multi-selection is a summary and never the cursor row's own picture.
@@ -114,19 +131,30 @@ Item {
 
             // The thumbnail subsystem's own surface: a real thumbnail when there is one, the kind's
             // mark when there is not, which is what the canvas means by "the glyph stands in here".
+            // Sized the way ui/PreviewImage.qml sizes its picture, and for its reasons: the exact fit, never enlarged in the decode.
             Image {
                 id: frameThumb
-                anchors.fill: parent
-                anchors.margins: Theme.spacing.hairline
+                readonly property real boxWidth: parent.width - 2 * Theme.spacing.hairline
+                readonly property real boxHeight: parent.height - 2 * Theme.spacing.hairline
+                readonly property bool vector: root.thumb.length === 0 && root.vectorPath
+                // The fallback is the original, so never enlarged; a cache file up to the original's own size.
+                readonly property real fit: Thumbs.fitScale(boxWidth, boxHeight, implicitWidth, implicitHeight, root.thumb.length === 0 ? 1
+                    : Thumbs.thumbLimit(implicitWidth, implicitHeight, root.meta ? root.meta.w : 0, root.meta ? root.meta.h : 0))
+                x: vector ? Theme.spacing.hairline : Math.round((parent.width - width) / 2)
+                y: vector ? Theme.spacing.hairline : Math.round((parent.height - height) / 2)
+                width: vector ? boxWidth : implicitWidth * fit
+                height: vector ? boxHeight : implicitHeight * fit
                 visible: root.thumbShown && !playerLoader.visible
                 source: root.frameSource()
-                fillMode: Image.PreserveAspectFit
+                fillMode: vector ? Image.PreserveAspectFit : Image.Stretch
+                // The fallback is the camera file itself, whose EXIF turn Qt applies only when asked.
+                autoTransform: true
                 asynchronous: true
                 cache: false
                 // Zero is unbounded to Qt, which is what the small cache PNG wants; only the fallback,
                 // which can be the whole camera file, takes the ceiling ui/PreviewImage.qml sets.
-                sourceSize.width: root.thumb.length > 0 ? 0 : Math.max(1, Math.round(width))
-                sourceSize.height: root.thumb.length > 0 ? 0 : Math.max(1, Math.round(height))
+                sourceSize.width: root.thumb.length > 0 ? 0 : Math.max(1, Math.round(root.turned ? boxHeight : boxWidth))
+                sourceSize.height: root.thumb.length > 0 ? 0 : Math.max(1, Math.round(root.turned ? boxWidth : boxHeight))
             }
 
             // The player, in the frame it paints into; built by the first press of play and not before, and by source rather than type, because QtMultimedia costs 20 MB on import alone.
@@ -191,12 +219,13 @@ Item {
                 anchors.fill: parent
                 anchors.margins: Theme.spacing.hairline
                 visible: root.previewState === Facts.TEXT || root.previewState === Facts.CODE
-                active: root.visible && (root.rowState === Facts.TEXT || root.rowState === Facts.CODE)
+                active: root.visible && !root.manualHold && (root.rowState === Facts.TEXT || root.rowState === Facts.CODE)
                 path: root.path
                 size: root.row ? root.row.s : 0
+                maxBytes: root.textLimit
+                truncate: root.truncateText
                 numbered: root.previewState === Facts.CODE
             }
-
             // The PDF's own page, which is the frame's whole content for that state. QtPdf is
             // reached only through this Loader, so a folder with no PDF in it never opens one.
             Flickable {
@@ -209,13 +238,14 @@ Item {
                 contentHeight: height * root.pdfZoom
                 boundsBehavior: Flickable.StopAtBounds
                 Flea.FastScrollHandler { flickable: pdfFlick }
+                Flea.ViewportScrollBars { parent: pdfFlick; flickable: pdfFlick }
                 Loader {
                     id: pdfLoader
                     width: pdfFlick.contentWidth
                     height: pdfFlick.contentHeight
-                    active: root.visible && root.rowState === Facts.PDF
+                    active: root.visible && !root.manualHold && root.rowState === Facts.PDF
                     source: "PreviewPdf.qml"
-                    onLoaded: { item.path = Qt.binding(function () { return root.path }); item.active = true }
+                    onLoaded: { item.path = Qt.binding(function () { return root.path }); item.viewport = pdfFlick; item.active = true }
                 }
             }
 
@@ -231,12 +261,14 @@ Item {
             Flea.LoadingState {
                 anchors.fill: parent
                 visible: root.previewState === Facts.LOADING
+                heldOff: root.loadingHeldOff
             }
 
-            // The one sentence an error is, in the theme's error role; the facts below still show.
+            // The one sentence an error is, in the theme's error role; the facts below still show. An office file's
+            // embedded thumbnail is the frame's own picture, so Unsupported says "no preview" only when there is none.
             Column {
                 anchors.centerIn: parent
-                visible: root.previewState === Facts.ERROR || root.previewState === Facts.UNSUPPORTED
+                visible: root.previewState === Facts.ERROR || (root.previewState === Facts.UNSUPPORTED && !root.thumbShown)
                 spacing: Theme.spacing.gap
 
                 Flea.Glyph {
@@ -281,7 +313,7 @@ Item {
                 id: pageLabel
                 height: pagePrev.height
                 verticalAlignment: Text.AlignVCenter
-                text: (root.pdfPage() + 1) + " / " + root.pdfPages
+                text: (pdfLoader.item ? pdfLoader.item.drawnPage + 1 : 1) + " / " + root.pdfPages
                 color: Theme.color.muted
                 font.family: Theme.font.family
                 font.pixelSize: Theme.font.caption
@@ -414,7 +446,7 @@ Item {
         case Facts.LOADING:
             return false
         case Facts.PDF:
-            return root.pdfPages <= 0
+            return !root.pdfDrawn
         case Facts.TEXT:
         case Facts.CODE:
             return lines.blank
@@ -427,11 +459,12 @@ Item {
     }
 
     // The cache file while there is one, then the image itself once the backend says none is coming.
+    // A held frame never decodes the original: its cache entry still shows, nothing else does.
     function frameSource() {
         if (!root.visible) return ""
         if (root.thumb.length > 0)
             return Format.fileUri(root.thumb)
-        if (root.noThumbComing && root.previewState === Facts.IMAGE && root.path.length > 0)
+        if (!root.manualHold && root.noThumbComing && root.previewState === Facts.IMAGE && root.path.length > 0)
             return Format.fileUri(root.path)
         return ""
     }
@@ -439,6 +472,9 @@ Item {
     // Why the frame is showing a mark instead of the thing it meant to draw. Empty for every state
     // whose mark is simply what it draws, so the line only ever appears when something went wrong.
     function frameNote() {
+        if (root.manualHold) {
+            return "Ctrl+Space loads it"
+        }
         if (root.wantsThumb && root.thumb.length > 0 && !root.thumbDrawn) {
             return "thumbnail unavailable"
         }

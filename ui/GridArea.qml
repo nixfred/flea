@@ -1,8 +1,12 @@
 import QtQuick
 import "." as Flea
+import "js/ClipMarks.js" as ClipMarks
+import "js/Density.js" as Density
 import "js/DirSizes.js" as DirSizes
+import "js/ExtThumbs.js" as ExtThumbs
 import "js/Filter.js" as Filter
 import "js/Focus.js" as Focus
+import "js/GridGeometry.js" as GridGeometry
 import "js/Tap.js" as Tap
 import "js/Thumbs.js" as Thumbs
 
@@ -25,7 +29,7 @@ GridView {
         var steps = root.zoomTravel > 0 ? Math.floor(root.zoomTravel) : Math.ceil(root.zoomTravel)
         if (steps !== 0) {
             root.zoomTravel -= steps
-            var sizes = ["small", "medium", "large", "xlarge"]
+            var sizes = ["small", "medium", "large", "xlarge", "huge", "largest"]
             var next = Math.max(0, Math.min(sizes.length - 1, sizes.indexOf(ViewState.thumbnailSize) + steps))
             ViewState.changeSetting("preview.thumbSize", sizes[next])
         }
@@ -36,18 +40,57 @@ GridView {
     signal dirSizesApplied(var ask)
     signal dirSizesCancelled()
 
-    // How many tiles fit across, which is what a cursor step down has to move by.
-    readonly property int columns: Math.max(1, Math.floor(root.width / Math.max(Theme.grid.minCellWidth, ViewState.thumbnailPixels + 2 * Theme.spacing.rowPaddingX)))
+    // Tile columns leave one gap, both edge insets and the scroll lane.
+    readonly property int columns: GridGeometry.columnsFor(root.width, Theme.grid.minCellWidth,
+        ViewState.thumbnailPixels, Theme.spacing.rowPaddingX, Theme.spacing.gap, Theme.spacing.rowPaddingX)
     readonly property int tileRows: Math.max(1, Math.ceil(root.pane.shownTotal / root.columns))
-    // Mark, one gap, two caption lines, and the padding above and below.
-    readonly property int cellHeightPx: ViewState.thumbnailPixels + Theme.spacing.gap
-                                        + Math.ceil(Theme.grid.captionHeight)
-                                        + 2 * Theme.spacing.rowPaddingX
+    // Mark, one gap, two caption lines, and the density's pad above and below.
+    readonly property int cellHeightPx: GridGeometry.cellHeightFor(ViewState.thumbnailPixels, Theme.spacing.gap,
+                                        Math.ceil(Theme.grid.captionHeight),
+                                        Density.gridPadY(Theme.spacing.rowPaddingX, ViewState.density))
                                         + renameExtraHeight
-    readonly property real renameExtraHeight: {
-        if (!root.pane || root.pane.renamingIndex < 0) return 0
-        var cell = root.itemAtIndex(Filter.viewOf(root.pane.shown, root.pane.renamingIndex))
-        return cell ? cell.renameExtraHeight : 0
+    property Item renameEditor: null
+    property real renameExtraHeight: 0
+    property var renameRetirement: null
+
+    // Grid pooling can leave itemAtIndex pointing at a superseded same-row tile.
+    function currentRenameTile(expectedPane) {
+        var editor = root.renameEditor
+        var host = editor ? editor.editorHost : null
+        return editor && editor.visible && root.visible && !root.hiddenHeld && host && host.visible
+            && editor.pane === expectedPane && editor.viewport === root && editor.ownsEdit()
+            && host === editor.layoutHost() && host.renaming && host.editorField === editor ? host : null
+    }
+
+    onPaneChanged: { root.renameRetirement = null; root.queueRenameLayout() }
+    // Editor replacement and destruction must not reenter Grid layout through its cell height.
+    onRenameEditorChanged: {
+        if (root.renameEditor) root.renameRetirement = null
+        root.queueRenameLayout()
+    }
+    function queueRenameLayout() { Qt.callLater(root.settleRenameEditor) }
+    function retireRenameEditor(editor, retirement) {
+        if (root.renameEditor !== editor) return
+        root.renameRetirement = retirement
+        root.renameEditor = null
+    }
+    function settleRenameEditor() {
+        var retirement = root.renameRetirement
+        var sameEdit = retirement && !root.renameEditor && root.pane && root.pane === retirement.pane
+            && root === retirement.viewport && root.pane.renamingIndex === retirement.index
+        var row = sameEdit ? root.pane.rowFor(retirement.index) : null
+        // A pending write can outlive its Loader. Keep only its values until that exact edit returns.
+        var keep = sameEdit && row && row.n.split("/").pop() === retirement.name
+            && root.pane.renamePending && root.pane.renameRequest === retirement.request
+        if (!keep) root.renameRetirement = null
+        if (sameEdit && !root.pane.renamePending)
+            root.pane.renamingIndex = -1
+        var editor = root.renameEditor
+        if (editor && root.pane && root.pane.renamingIndex >= 0 && editor.extraHeight < 0) return
+        var height = root.pane && root.pane.renamingIndex >= 0 && editor ? editor.extraHeight : 0
+        if (height === root.renameExtraHeight) return
+        if (editor) editor.queueContainment()
+        root.renameExtraHeight = height
     }
     readonly property int visibleTileRows: Math.max(1, Math.ceil(root.height / root.cellHeightPx))
     onColumnsChanged: if (root.visible) settle.restart()
@@ -56,9 +99,14 @@ GridView {
     focus: true
     // Whichever view is up owns the keyboard, and Focus.handleKey is the one route all three take.
     Keys.onPressed: function (event) { event.accepted = Focus.handleKey(event, root.pane, root.pane.sidebar) }
-    model: pane.shownTotal
+    // Hidden holds no delegates; an edit in flight keeps its own per RenameField.qml.
+    model: (root.visible || root.pane.renamingIndex >= 0) ? pane.shownTotal : 0
+    currentIndex: Filter.viewOf(root.pane.shown, root.pane.renamingIndex >= 0 ? root.pane.renamingIndex : root.pane.cursorIndex)
     clip: true
-    cellWidth: Math.floor(root.width / root.columns)
+    // One gap of bare ground along the left and the top; GridTile's hairline inset stays.
+    leftMargin: Theme.spacing.gap
+    topMargin: Theme.spacing.gap
+    cellWidth: GridGeometry.cellWidthFor(root.width, root.columns, Theme.spacing.gap, Theme.spacing.rowPaddingX)
     cellHeight: root.cellHeightPx
     cacheBuffer: root.cellHeightPx * 2
     boundsBehavior: Flickable.StopAtBounds
@@ -66,6 +114,15 @@ GridView {
 
     Flea.FastScrollHandler {
         parent: root
+        flickable: root
+        ctrlWheelAction: function (wheel) { return root.zoomWheel(wheel) }
+    }
+
+    readonly property alias scrollBar: verticalScroll
+    Flea.ViewportScrollBar {
+        id: verticalScroll
+        parent: root
+        anchors { top: parent.top; right: parent.right }
         flickable: root
         ctrlWheelAction: function (wheel) { return root.zoomWheel(wheel) }
     }
@@ -100,6 +157,8 @@ GridView {
         thumb: Thumbs.allowed(row, ViewState.thumbnailMode) ? Thumbs.fileFor(root.pane.thumbState, listingIndex) : ""
         renaming: listingIndex >= 0 && listingIndex === root.pane.renamingIndex
         renamePane: root.pane
+        // The clipboard mark is looked up only for tiles a delegate holds.
+        clipMark: ClipMarks.markForRow(root.pane, cell.row ? cell.row.n : "", root.pane.clipboard)
         onRenameCommitted: function(newName) { root.pane.commitRename(newName) }
         onRenameAbandoned: root.pane.renamingIndex = -1
 
@@ -128,35 +187,27 @@ GridView {
         }
     }
 
+    // One tile row of bare ground at the end, the same inset ui/List.qml keeps and for the same two
+    // reasons: a band has to start somewhere and the background menu has to be raisable at the end.
     footer: Item {
-        width: root.width
-        height: note.text.length > 0 ? Theme.chromeHeight : 0
-        Text {
-            id: note
-            anchors.fill: parent
-            anchors.leftMargin: Theme.spacing.rowPaddingX
-            anchors.rightMargin: Theme.spacing.rowPaddingX
-            verticalAlignment: Text.AlignVCenter
-            text: Filter.note(root.pane.shown, root.pane.rows.length, root.pane.filterQuery)
-            color: Theme.color.muted
-            font.family: Theme.font.family
-            font.pixelSize: Theme.font.caption
-            elide: Text.ElideRight
-            textFormat: Text.PlainText
-        }
+        width: Math.max(0, root.width - Theme.spacing.rowPaddingX)
+        height: Theme.chromeHeight
     }
 
     // The space past the last tile is the directory's own, the same rule ui/List.qml carries: a
-    // tile's right click belongs to its delegate, and indexAt is what tells the two apart.
+    // tile's right click belongs to its delegate, and Tap.onBackground is what tells the two apart.
     TapHandler {
         acceptedButtons: Qt.RightButton
         onTapped: function (eventPoint) {
-            if (root.indexAt(root.contentX + eventPoint.position.x, root.contentY + eventPoint.position.y) < 0)
+            if (Tap.onBackground(root, eventPoint))
                 root.menu.openBackground(eventPoint.scenePosition)
         }
     }
 
     onContentYChanged: {
+        // Hidden geometry and a restore in flight move no shared state.
+        if (!root.visible || root.hiddenHeld)
+            return
         root.menu.close()
         if (DirSizes.hasPending(root.pane.dirSizeState)) {
             root.pane.backend.dirsizecancel()
@@ -187,7 +238,8 @@ GridView {
     function primeSettle() { settle.interval = root.pane.firstSettleMs }
 
     function requestIfDrifted() {
-        if (root.pane.total === 0 || root.pane.shown !== null)
+        // No window while hidden, while a filter narrows rows already held, nor while a listing is out, whose windows are the directory asked for.
+        if (!root.visible || root.pane.total === 0 || root.pane.shown !== null || root.pane.listInFlight)
             return
         var range = root.visibleRange()
         if (root.pane.rows.length === 0) {
@@ -217,8 +269,86 @@ GridView {
         }
     }
 
+    // Returning parks the view on the shared cursor once the reset rows land.
+    property bool hiddenHeld: false
+    // Last parked contentY and loop turns spent; only a value stable across turns ends the hold.
+    property real restoreY: -1
+    property int restoreTicks: 0
+    onVisibleChanged: {
+        if (!root.visible) {
+            coalesce.stop()
+            settle.stop()
+            root.hiddenHeld = true
+            root.restoreY = -1
+            root.restoreTicks = 0
+            return
+        }
+        if (root.hiddenHeld)
+            root.restoreCursorView()
+    }
+    onCountChanged: {
+        if (root.hiddenHeld && root.visible && root.count > 0)
+            root.restoreCursorView()
+    }
+    function restoreCursorView() {
+        // A queued turn arriving after the hold ended is stale.
+        if (!root.hiddenHeld || !root.visible)
+            return
+        if (!root.pane) {
+            root.hiddenHeld = false
+            return
+        }
+        // The model reset may still be landing; a later turn retries.
+        if (root.count === 0 && root.pane.shownTotal > 0) {
+            root.deferRestore()
+            return
+        }
+        // An empty listing and a filtered-away cursor have no view to park, so the hold ends here.
+        var view = Filter.viewOf(root.pane.shown, root.pane.cursorIndex)
+        if (root.count === 0 || view < 0) {
+            root.hiddenHeld = false
+            return
+        }
+        root.forceLayout()
+        root.positionViewAtIndex(view, GridView.Contain)
+        // Only a value stable across turns ends the hold; an optimistic position never releases it.
+        if (root.coversCursor(view) && root.contentY === root.restoreY) {
+            root.hiddenHeld = false
+            root.restoreY = -1
+            root.restoreTicks = 0
+            settle.restart()
+            return
+        }
+        root.restoreY = root.contentY
+        root.deferRestore()
+    }
+    // Restore gives up after this many turns, the bound the hidden return waits on.
+    readonly property int restoreMaxTurns: 60
+    // The parked check the return asserts through: the cursor tile overlaps the viewport.
+    function coversCursor(view) {
+        var row = Math.floor(view / Math.max(1, root.columns))
+        var top = row * root.cellHeightPx
+        return top < root.contentY + root.height && top + root.cellHeightPx > root.contentY
+    }
+    // One more loop turn, with a deadlock guard that ends the hold rather than keeping it.
+    function deferRestore() {
+        if (!root.visible)
+            return
+        if (root.restoreTicks >= root.restoreMaxTurns) {
+            root.hiddenHeld = false
+            root.restoreY = -1
+            root.restoreTicks = 0
+            settle.restart()
+            return
+        }
+        root.restoreTicks += 1
+        Qt.callLater(root.restoreCursorView)
+    }
+
     Connections {
         target: root.pane
+        function onRenamingIndexChanged() { root.renameRetirement = null; root.queueRenameLayout() }
+        function onRenameRequestChanged() { root.queueRenameLayout() }
         function onFilterQueryChanged() {
             if (!root.visible) return
             var work = Filter.cut({ask: [], drop: []}, root.pane.shown, root.pane.thumbState)
@@ -242,19 +372,23 @@ GridView {
     }
 
     function requestThumbs() {
-        if (!root.visible || root.pane.listInFlight)
+        if (!root.visible || root.pane.listInFlight || !root.pane.storageKnown)
             return
         var range = root.visibleRange()
         var span = Filter.span(root.pane.shown, range.first, range.last)
         var work = Filter.cut(Thumbs.plan(root.pane.thumbState, root.pane.rows, root.pane.held, span.first, span.last, ViewState.thumbnailMode), root.pane.shown, root.pane.thumbState)
         work.drop = work.drop.filter(function (index) { return index !== root.pane.previewIndex })
         root.pane.backend.thumbcancel(work.drop)
-        root.pane.backend.thumb(work.ask)
+        work.cacheOnly = ExtThumbs.cacheOnly(root.pane.storageClass, ViewState.preview)
+        root.pane.backend.thumb(work.ask, work.cacheOnly)
         root.thumbsApplied(work)
     }
 
     function requestDirSizes() {
         if (!root.visible || root.pane.shownTotal === 0 || root.pane.listInFlight)
+            return
+        // A tile draws no size, so the grid never asks, whatever rows are visible.
+        if (!DirSizes.wantsSizes("grid", ViewState.hiddenCols, root.pane.storageClass, root.pane.storageKnown))
             return
         var range = root.visibleRange()
         var span = Filter.span(root.pane.shown, range.first, range.last)

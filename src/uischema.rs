@@ -1,17 +1,23 @@
 // The shipped ui.json shape and the rule each key is measured against; src/uistate.rs applies them.
 use crate::jsondoc::{self, Json};
 
-// The shape and every default, copied from docs/flea-0.1.4-build-handoff.md section 1.
+// docs/flea-0.1.4-build-handoff.md section 1's shape and defaults, but density compact (0.3.2), showUnmounted on (0.3.3).
 pub const DEFAULTS: &str = r#"{
   "view": "list",
-  "density": "normal",
+  "density": "compact",
   "columns": ["name", "size", "date"],
+  "columnsLimit": 3,
+  "columnWidths": {},
   "addressBar": "breadcrumb",
   "sort": { "key": "name", "reverse": false },
+  "rememberSort": true,
+  "folderSorts": {},
   "dual": { "paths": [], "focus": 0 },
   "foldersFirst": true,
   "groupByKind": false,
   "hidden": false,
+  "hiddenLast": false,
+  "highlightToday": false,
   "wrapAtEnds": false,
   "keyHints": false,
   "startIn": "home",
@@ -24,17 +30,24 @@ pub const DEFAULTS: &str = r#"{
     "favourites": [],
     "showHome": true, "showNetwork": true,
     "showDevices": true, "showTrash": true,
-    "driveSize": false, "trashCount": false, "sidebarWidth": 192
+    "driveSize": false, "trashCount": false, "showUnmounted": true, "rail": "shown", "autoHide": false, "sidebarWidth": 192
+  },
+  "shelf": {
+    "enabled": false, "bar": true, "rail": "off",
+    "screenshots": true, "recordings": true, "recent": 3
   },
   "preview": {
     "column": true, "loadOn": "automatic",
     "thumbnails": "media", "thumbSize": "medium",
+    "thumbNetwork": false, "thumbPhone": false, "thumbUsb": true,
     "ctrlZoom": true
   },
   "keys": "default",
   "display": { "textSize": { "mode": "system" }, "hyprlandIcons": false },
-  "menu": { "hidden": ["delete", "openTerminal",
-            "moveto", "copyto", "properties", "permissions", "copypath"] }
+  "menu": { "hidden": ["delete", "openTerminal", "placeMenu", "runScript",
+            "moveto", "copyto", "properties", "permissions", "copypath", "extThumbs"] },
+  "updates": { "autoCheck": true },
+  "stateVersion": 1
 }"#;
 
 // The list row's optional columns in the order ui/js/Columns.js lays them out; name is never optional.
@@ -61,12 +74,30 @@ pub enum Rule {
     Ids,
     Count(f64, f64),
     TextSize,
+    // ListColumns040: a dragged edge per column, clamped to the rails ui/js/Columns.js draws.
+    ColumnWidths,
+    // Any whole number, so a newer Flea's higher stamp survives this one's write; no patch may set it.
+    Version,
+    // A folder path to its own sort order, at most MAX_FOLDER_SORTS entries; see folderSorts above.
+    FolderSorts,
     Group(&'static [(&'static str, Rule)]),
 }
 
+// The top-level key that records which of src/uimigrate.rs's one-time changes a file has had.
+pub const STATE_VERSION: &str = "stateVersion";
+
 pub const COLUMN_KEYS: &[&str] = &["name", "mode", "size", "date", "kind"];
 
-pub const SORT: &[(&str, Rule)] = &[("key", Rule::Word(&["name", "size", "date", "kind"])), ("reverse", Rule::Bool)];
+// ListColumns040: the four resizable list columns and the rails a drag clamps to, the same pair ui/js/Columns.js MIN_LIST_WIDTH and MAX_LIST_WIDTH name.
+pub const COLUMN_WIDTH_KEYS: [&str; 4] = ["mode", "size", "date", "kind"];
+pub const COLUMN_WIDTH_MIN: f64 = 48.0;
+pub const COLUMN_WIDTH_MAX: f64 = 480.0;
+
+pub const SORT: &[(&str, Rule)] = &[("key", Rule::Word(&SORT_KEYS)), ("reverse", Rule::Bool)];
+
+// A folder's own sort in sort's own shape; the map holds the 500 most recent folders, oldest first.
+pub const SORT_KEYS: [&str; 4] = ["name", "size", "date", "kind"];
+pub const MAX_FOLDER_SORTS: usize = 500;
 
 pub const DUAL: &[(&str, Rule)] = &[("paths", Rule::Pair), ("focus", Rule::Count(0.0, 1.0))];
 
@@ -78,14 +109,32 @@ pub const PLACES: &[(&str, Rule)] = &[
     ("showTrash", Rule::Bool),
     ("driveSize", Rule::Bool),
     ("trashCount", Rule::Bool),
+    ("showUnmounted", Rule::Bool),
+    ("rail", Rule::Word(&["shown", "hidden"])),
+    ("autoHide", Rule::Bool),
     ("sidebarWidth", Rule::SidebarWidth),
+];
+
+// The shelf's own six. SettingsRest rule 3: the panel offers 1, 2, 3 or 5 and both kinds off is what
+// removes the group, so the range here is only what a hand-edited file may leave behind.
+pub const SHELF: &[(&str, Rule)] = &[
+    ("enabled", Rule::Bool),
+    ("bar", Rule::Bool),
+    ("rail", Rule::Word(&["off", "left", "right", "bottom"])),
+    ("screenshots", Rule::Bool),
+    ("recordings", Rule::Bool),
+    ("recent", Rule::Count(0.0, 6.0)),
 ];
 
 pub const PREVIEW: &[(&str, Rule)] = &[
     ("column", Rule::Bool),
     ("loadOn", Rule::Word(&["automatic", "manual"])),
     ("thumbnails", Rule::Word(&["off", "images", "media"])),
-    ("thumbSize", Rule::Word(&["small", "medium", "large", "xlarge"])),
+    ("thumbSize", Rule::Word(&["small", "medium", "large", "xlarge", "huge", "largest"])),
+    // ExtThumbs: one switch per storage class beside the segment they depend on.
+    ("thumbNetwork", Rule::Bool),
+    ("thumbPhone", Rule::Bool),
+    ("thumbUsb", Rule::Bool),
     ("ctrlZoom", Rule::Bool),
 ];
 
@@ -100,22 +149,32 @@ pub const DISPLAY: &[(&str, Rule)] = &[("textSize", Rule::Group(TEXT_SIZE)), ("h
 // basic actions derives from it by masterState in ui/js/Settings.js, and cannot disagree with it.
 pub const MENU: &[(&str, Rule)] = &[("hidden", Rule::Ids)];
 
+// Settings > About's "Check automatically": on, it governs About opening and the 6 hour poll, never a press.
+pub const UPDATES: &[(&str, Rule)] = &[("autoCheck", Rule::Bool)];
+
 pub const SCHEMA: &[(&str, Rule)] = &[
     ("view", Rule::Word(&["list", "columns", "grid", "dual"])),
-    ("density", Rule::Word(&["compact", "normal", "comfortable"])),
+    ("density", Rule::Word(&["tight", "compact", "normal", "comfortable"])),
     ("columns", Rule::Columns),
+    // ColumnsWidth board: 2 to 5 columns from the window width, capped here, shipping at 3.
+    ("columnsLimit", Rule::Count(2.0, 5.0)),
+    ("columnWidths", Rule::ColumnWidths),
     ("addressBar", Rule::Word(&["path", "breadcrumb"])),
     ("sort", Rule::Group(SORT)),
+    ("rememberSort", Rule::Bool),
+    ("folderSorts", Rule::FolderSorts),
     ("dual", Rule::Group(DUAL)),
     ("foldersFirst", Rule::Bool),
     ("groupByKind", Rule::Bool),
     ("hidden", Rule::Bool),
+    ("hiddenLast", Rule::Bool),
+    ("highlightToday", Rule::Bool),
     ("wrapAtEnds", Rule::Bool),
     // The Menus section's "Show keyboard hints" row: every menu's key column and the empty
     // directory's own tip, off until it is switched on.
     ("keyHints", Rule::Bool),
     // Where a window opens, and where a new tab opens. "folder" reads startFolder, "last" reads
-    // lastPath, which ui/shell.qml writes as the pane moves and no panel control ever touches.
+    // lastPath, which ui/WindowBody.qml writes as the pane moves and no panel control ever touches.
     ("startIn", Rule::Word(&["home", "last", "folder"])),
     ("startFolder", Rule::Place),
     ("lastPath", Rule::Place),
@@ -125,12 +184,18 @@ pub const SCHEMA: &[(&str, Rule)] = &[
     ("trashAutoEmpty", Rule::Bool),
     ("trashSweptOn", Rule::Count(0.0, 4000000.0)),
     ("places", Rule::Group(PLACES)),
+    // Settings > Shelf, which the bar plugin reads from this file and never writes; SettingsRest
+    // rules 1 to 4 and ledger directive 59.
+    ("shelf", Rule::Group(SHELF)),
     ("preview", Rule::Group(PREVIEW)),
     // SettingsKeys.html's four-value chooser over ui/js/Keymap.js's shared tables. A stored name
     // this build cannot honour falls back to default, which is also what a fresh ui.json holds.
     ("keys", Rule::Word(&["default", "vim", "mac", "windows"])),
     ("display", Rule::Group(DISPLAY)),
     ("menu", Rule::Group(MENU)),
+    ("updates", Rule::Group(UPDATES)),
+    // Not a setting: the stamp that makes each migration once, for the window, the TUI and the CLI alike.
+    (STATE_VERSION, Rule::Version),
 ];
 
 pub fn defaults() -> Json {
@@ -181,19 +246,23 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "view", "density", "columns", "addressBar", "sort", "dual", "foldersFirst",
-                "groupByKind", "hidden", "wrapAtEnds", "keyHints", "startIn", "startFolder",
-                "lastPath", "newTab", "trashAutoEmpty", "trashSweptOn", "places", "preview", "keys",
-                "display", "menu"
+                "view", "density", "columns", "columnsLimit", "columnWidths", "addressBar", "sort", "rememberSort", "folderSorts",
+                "dual", "foldersFirst", "groupByKind", "hidden", "hiddenLast", "highlightToday", "wrapAtEnds", "keyHints", "startIn", "startFolder",
+                "lastPath", "newTab", "trashAutoEmpty", "trashSweptOn", "places", "shelf",
+                "preview", "keys",
+                "display", "menu", "updates", "stateVersion"
             ]
         );
+        assert_eq!(d.get(STATE_VERSION).and_then(Json::as_f64), Some(1.0), "a fresh document is already stamped");
         assert_eq!(d.get("view").and_then(Json::as_str), Some("list"));
-        assert_eq!(d.get("density").and_then(Json::as_str), Some("normal"));
+        assert_eq!(d.get("density").and_then(Json::as_str), Some("compact"));
         assert_eq!(d.get("addressBar").and_then(Json::as_str), Some("breadcrumb"));
         assert_eq!(d.get("keys").and_then(Json::as_str), Some("default"));
         assert_eq!(d.get("foldersFirst").and_then(Json::as_bool), Some(true));
         assert_eq!(d.get("groupByKind").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("hidden").and_then(Json::as_bool), Some(false));
+        assert_eq!(d.get("hiddenLast").and_then(Json::as_bool), Some(false));
+        assert_eq!(d.get("highlightToday").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("wrapAtEnds").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("keyHints").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("startIn").and_then(Json::as_str), Some("home"));
@@ -204,26 +273,50 @@ mod tests {
         assert_eq!(d.get("trashSweptOn").and_then(Json::as_f64), Some(0.0));
         let cols: Vec<&str> = d.get("columns").and_then(Json::as_array).expect("columns").iter().filter_map(Json::as_str).collect();
         assert_eq!(cols, ["name", "size", "date"]);
+        // ColumnsWidth ships at 3, so a default install holds 3 columns from 900 px up.
+        assert_eq!(d.get("columnsLimit").and_then(Json::as_f64), Some(3.0));
+        assert_eq!(d.get("columnWidths").and_then(Json::as_object).map(<[(String, Json)]>::len), Some(0));
         assert_eq!(d.get("sort").and_then(|s| s.get("key")).and_then(Json::as_str), Some("name"));
         assert_eq!(d.get("sort").and_then(|s| s.get("reverse")).and_then(Json::as_bool), Some(false));
+        // Sorting release: hidden files keep today's order, and each folder remembers its sort.
+        assert_eq!(d.get("hiddenLast").and_then(Json::as_bool), Some(false));
+        assert_eq!(d.get("rememberSort").and_then(Json::as_bool), Some(true));
+        assert_eq!(d.get("folderSorts").and_then(Json::as_object).map(<[(String, Json)]>::len), Some(0));
         assert_eq!(d.get("dual").and_then(|s| s.get("paths")).and_then(Json::as_array).map(<[Json]>::len), Some(0));
         assert_eq!(d.get("dual").and_then(|s| s.get("focus")).and_then(Json::as_f64), Some(0.0));
+        // Directive 38 and GM's B1 ruling: the shelf ships off, and its switch is what installs the plugin.
+        assert_eq!(d.get("shelf").and_then(|s| s.get("enabled")).and_then(Json::as_bool), Some(false));
+        assert_eq!(d.get("shelf").and_then(|s| s.get("bar")).and_then(Json::as_bool), Some(true));
+        assert_eq!(d.get("shelf").and_then(|s| s.get("rail")).and_then(Json::as_str), Some("off"));
+        assert_eq!(d.get("shelf").and_then(|s| s.get("recent")).and_then(Json::as_f64), Some(3.0));
+        assert_eq!(d.get("shelf").and_then(|s| s.get("screenshots")).and_then(Json::as_bool), Some(true));
+        assert_eq!(d.get("shelf").and_then(|s| s.get("recordings")).and_then(Json::as_bool), Some(true));
         assert_eq!(d.get("places").and_then(|p| p.get("sidebarWidth")).and_then(Json::as_f64), Some(192.0));
+        // RailAdditions rule 4: the rail is a remembered state, and a fresh home remembers it shown.
+        assert_eq!(d.get("places").and_then(|p| p.get("rail")).and_then(Json::as_str), Some("shown"));
+        assert_eq!(d.get("places").and_then(|p| p.get("autoHide")).and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("places").and_then(|p| p.get("driveSize")).and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("places").and_then(|p| p.get("trashCount")).and_then(Json::as_bool), Some(false));
+        // GM's 0.3.3 ruling: unmounted drives are on the rail unless the operator switches them off.
+        assert_eq!(d.get("places").and_then(|p| p.get("showUnmounted")).and_then(Json::as_bool), Some(true));
         assert_eq!(d.get("preview").and_then(|p| p.get("loadOn")).and_then(Json::as_str), Some("automatic"));
         assert_eq!(d.get("preview").and_then(|p| p.get("thumbnails")).and_then(Json::as_str), Some("media"));
         assert_eq!(d.get("preview").and_then(|p| p.get("thumbSize")).and_then(Json::as_str), Some("medium"));
+        // ExtThumbs, GM's ruling of 2026-09-23: network shares and phones are off, USB drives are on.
+        assert_eq!(d.get("preview").and_then(|p| p.get("thumbNetwork")).and_then(Json::as_bool), Some(false));
+        assert_eq!(d.get("preview").and_then(|p| p.get("thumbPhone")).and_then(Json::as_bool), Some(false));
+        assert_eq!(d.get("preview").and_then(|p| p.get("thumbUsb")).and_then(Json::as_bool), Some(true));
         assert_eq!(d.get("display").and_then(|p| p.get("textSize")).and_then(|t| t.get("mode")).and_then(Json::as_str), Some("system"));
         let display: Vec<&str> = d.get("display").and_then(Json::as_object).expect("display").iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(display, ["textSize", "hyprlandIcons"], "the compositor owns opacity, icons and shadows");
         let menu: Vec<&str> = d.get("menu").and_then(Json::as_object).expect("menu").iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(menu, ["hidden"], "the master row is derived from menu.hidden, not stored beside it");
+        assert_eq!(d.get("updates").and_then(|u| u.get("autoCheck")).and_then(Json::as_bool), Some(true));
     }
 
     // menu.hidden stores what is hidden, so an action added later is visible without a migration.
     #[test]
-    fn menu_hidden_holds_the_eight_shipped_ids_and_nothing_else() {
+    fn menu_hidden_holds_the_shipped_ids_and_nothing_else() {
         let d = defaults();
         let hidden: Vec<&str> = d
             .get("menu")
@@ -235,21 +328,68 @@ mod tests {
             .collect();
         assert_eq!(
             hidden,
-            ["delete", "openTerminal", "moveto", "copyto", "properties", "permissions", "copypath"]
+            // Directive 38: every feature this release adds ships with its own id hidden, so a fresh
+            // ui.json behaves as 0.2.1 did. placeMenu is the Places rows' own menu.
+            ["delete", "openTerminal", "placeMenu", "runScript", "moveto", "copyto", "properties", "permissions", "copypath", "extThumbs"]
         );
+    }
+
+    // Each key a place, each value a sort order; past the cap the oldest entries go.
+    #[test]
+    fn folder_sorts_hold_places_to_orders_and_heal_past_the_cap() {
+        let current = crate::uistate::from_file("{}");
+        let takes = |patch: &str| crate::uistate::patched(&current, &jsondoc::parse(patch).expect("patch parses"));
+        for good in [r#"{"folderSorts":{}}"#,
+                     r#"{"folderSorts":{"/home/gm/Work":{"key":"size","reverse":true}}}"#,
+                     r#"{"folderSorts":{"smb://nas/isos":{"key":"date","reverse":false}}}"#,
+                     r#"{"rememberSort":false}"#, r#"{"hiddenLast":true}"#, r#"{"highlightToday":true}"#] {
+            assert!(takes(good).is_ok(), "{} is a value its key takes", good);
+        }
+        for (bad, named) in [(r#"{"folderSorts":[]}"#, "folderSorts"),
+                             (r#"{"folderSorts":{"Work":{"key":"size","reverse":true}}}"#, "folderSorts"),
+                             (r#"{"folderSorts":{"/a":{"key":"mode","reverse":false}}}"#, "folderSorts"),
+                             (r#"{"folderSorts":{"/a":{"key":"size"}}}"#, "folderSorts"),
+                             (r#"{"folderSorts":{"/a":{"key":"size","reverse":1}}}"#, "folderSorts"),
+                             (r#"{"folderSorts":{"/a":{"key":"size","reverse":false,"by":"x"}}}"#, "folderSorts"),
+                             (r#"{"hiddenLast":"yes"}"#, "hiddenLast"),
+                             (r#"{"highlightToday":"yes"}"#, "highlightToday"),
+                             (r#"{"rememberSort":1}"#, "rememberSort")] {
+            let message = takes(bad).expect_err("the patch must be refused");
+            assert!(message.contains(named), "{} should name {}, got {}", bad, named, message);
+        }
+        // A file carrying a bad map costs that key its default and nothing else.
+        let read = crate::uistate::from_file(r#"{"folderSorts":{"Work":{"key":"size","reverse":true}},"hiddenLast":true}"#);
+        assert_eq!(read.get("folderSorts").and_then(Json::as_object).map(<[(String, Json)]>::len), Some(0));
+        assert_eq!(read.get("hiddenLast").and_then(Json::as_bool), Some(true));
+        // Past the cap the oldest entries go and the newest stay.
+        let mut big = String::from(r#"{"folderSorts":{"#);
+        for i in 0..MAX_FOLDER_SORTS + 2 {
+            if i > 0 {
+                big.push(',');
+            }
+            big.push_str(&format!(r#""/d{:03}":{{"key":"size","reverse":false}}"#, i));
+        }
+        big.push_str("}}");
+        let kept = takes(&big).expect("a long map still patches");
+        let map = kept.get("folderSorts").and_then(Json::as_object).expect("folderSorts");
+        assert_eq!(map.len(), MAX_FOLDER_SORTS);
+        assert!(map.iter().all(|(k, _)| k != "/d000" && k != "/d001"), "the two oldest go");
+        assert!(map.iter().any(|(k, _)| k == "/d501"), "the newest stays");
     }
 
     // The rules nothing else reached: an exact stop, a non-empty path, and the four shipped presets.
     #[test]
-    fn the_stop_the_preset_and_the_favourites_rules_each_bite_at_their_own_edge() {
-        let current = crate::uistate::from_file("{}");
+    fn the_stop_the_preset_and_the_favourites_rules_each_bite_at_their_own_edge() {        let current = crate::uistate::from_file("{}");
         let takes = |patch: &str| crate::uistate::patched(&current, &jsondoc::parse(patch).expect("patch parses"));
         for good in [r#"{"display":{"textSize":{"mode":"system"}}}"#, r#"{"display":{"textSize":{"mode":9}}}"#,
                      r#"{"keys":"default"}"#, r#"{"keys":"vim"}"#,
                      r#"{"keys":"mac"}"#, r#"{"keys":"windows"}"#,
                      r#"{"places":{"favourites":[]}}"#,
                      r#"{"places":{"driveSize":true,"trashCount":true}}"#,
-                     r#"{"places":{"driveSize":false,"trashCount":false}}"#] {
+                     r#"{"places":{"driveSize":false,"trashCount":false}}"#,
+                     r#"{"places":{"rail":"hidden"}}"#, r#"{"places":{"rail":"shown"}}"#,
+                     r#"{"places":{"showUnmounted":false}}"#,
+                     r#"{"updates":{"autoCheck":false}}"#] {
             assert!(takes(good).is_ok(), "{} is a value its key takes", good);
         }
         for (bad, named) in [(r#"{"display":{"textSize":{"mode":13}}}"#, "display.textSize.mode"),
@@ -263,7 +403,12 @@ mod tests {
                              (r#"{"language":"en"}"#, "language"),
                              (r#"{"places":{"favourites":"/a"}}"#, "places.favourites"),
                              (r#"{"places":{"driveSize":1}}"#, "places.driveSize"),
-                             (r#"{"places":{"trashCount":"true"}}"#, "places.trashCount")] {
+                             (r#"{"places":{"trashCount":"true"}}"#, "places.trashCount"),
+                             (r#"{"places":{"rail":"off"}}"#, "places.rail"),
+                             (r#"{"places":{"rail":true}}"#, "places.rail"),
+                             (r#"{"updates":{"autoCheck":"yes"}}"#, "updates.autoCheck"),
+                             (r#"{"stateVersion":0}"#, "stateVersion"),
+                             (r#"{"stateVersion":2}"#, "stateVersion")] {
             let message = takes(bad).expect_err("the patch must be refused");
             assert!(message.contains(named), "{} should name {}, got {}", bad, named, message);
         }

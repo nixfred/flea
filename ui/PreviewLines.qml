@@ -15,16 +15,21 @@ Item {
     property bool numbered: false
 
     // The same gate ui/PreviewText.qml uses: FileView reads the whole file, so a row over it is
-    // refused rather than truncated.
-    readonly property int maxBytes: 1048576
+    // refused on every class; truncating would still read all of it first, a 2 GB log over SMB.
+    property int maxBytes: 1048576
+    // Retained for its callers; over-limit rows are refused, never truncated, so it reads nothing.
+    property bool truncate: false
     readonly property bool tooLarge: root.size > root.maxBytes
     // More than a small frame can show is wasted work, so only this many are ever built into rows.
     readonly property int maxLines: 14
 
+    readonly property string shownText: file.text()
     readonly property var lines: {
-        if (!root.active || root.tooLarge || !file.loaded)
+        if (!root.active || (!file.loaded))
             return []
-        return file.text().split("\n").slice(0, root.maxLines)
+        if (root.tooLarge)
+            return []
+        return root.shownText.split("\n").slice(0, root.maxLines)
     }
 
     // Surfaced so the column can show the canvas's Error tile instead of an empty frame.
@@ -32,8 +37,8 @@ Item {
     // True when the reader has settled with nothing to put in the frame, so the column stands the
     // kind's mark in rather than draw a bordered empty box: refused for size, or a file with no bytes.
     readonly property bool blank: root.tooLarge
-        || (root.active && !root.readFailed && file.loaded && file.text().length === 0)
-    readonly property bool loading: root.active && !root.tooLarge && !root.readFailed && !file.loaded
+        || (root.active && !root.readFailed && file.loaded && root.shownText.length === 0)
+    readonly property bool loading: root.active && !root.readFailed && !file.loaded && !root.tooLarge
 
     FileView {
         id: file

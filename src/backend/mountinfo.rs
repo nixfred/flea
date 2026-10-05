@@ -5,26 +5,73 @@ use std::path::{Path, PathBuf};
 
 // Sample: `2 1 0:9 / /home/pi/My\040Drive rw - fuse.rclone remote: rw`; longest enclosing mount wins after octal unescaping.
 pub(crate) fn mount_type_in(path: &Path, body: &str) -> Option<String> {
-    let mut best: Option<(usize, String)> = None;
-    for line in body.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        let split = match fields.iter().position(|field| *field == "-") {
-            Some(value) => value,
-            None => continue,
-        };
-        if fields.len() <= split + 1 || fields.len() < 5 {
-            continue;
-        }
-        let mount = PathBuf::from(OsString::from_vec(unescape(fields[4])));
+    mount_entry_in(path, body).map(|entry| entry.fstype)
+}
+
+// Sample dev: makedev(8,17) is 0x811 and answers "8:17"; the glibc major/minor packing, see sys/sysmacros.h.
+fn dev_majmin(dev: u64) -> String {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xffff_f000);
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xffff_ff00);
+    format!("{major}:{minor}")
+}
+
+// Sample input: dev 0x811 against a line carrying "8:17 ... - vfat ..." answers Some("vfat").
+pub(crate) fn fstype_for_dev(dev: u64, body: &str) -> Option<String> {
+    let want = dev_majmin(dev);
+    body.lines().filter_map(parse_line).find(|(_, _, majmin, _)| *majmin == want).map(|(_, fstype, _, _)| fstype)
+}
+
+// The mount that owns a path: its mount point, its filesystem type, its device numbers and its source.
+pub(crate) struct MountEntry {
+    pub mount: PathBuf,
+    pub fstype: String,
+    pub majmin: String,
+    pub source: String,
+}
+
+// Sample: the line above answers mount "/home/pi/My Drive", fstype "fuse.rclone" and majmin "0:9".
+pub(crate) fn mount_entry_in(path: &Path, body: &str) -> Option<MountEntry> {
+    let mut best: Option<(usize, MountEntry)> = None;
+    for (mount, fstype, majmin, source) in body.lines().filter_map(parse_line) {
         if !path.starts_with(&mount) {
             continue;
         }
         let depth = mount.components().count();
         if best.as_ref().map(|(old, _)| depth >= *old).unwrap_or(true) {
-            best = Some((depth, fields[split + 1].to_string()));
+            best = Some((depth, MountEntry { mount, fstype, majmin, source }));
         }
     }
-    best.map(|(_, kind)| kind)
+    best.map(|(_, entry)| entry)
+}
+
+// Every mount point and its filesystem type, in file order, read once for a caller that asks about many paths.
+pub(crate) fn mounts_in(body: &str) -> Vec<(PathBuf, String)> {
+    body.lines().filter_map(parse_line).map(|(mount, fstype, _, _)| (mount, fstype)).collect()
+}
+
+// The deepest mount holding path, the later line winning a tie as the kernel's own stacking order does.
+pub(crate) fn enclosing<'a>(path: &Path, mounts: &'a [(PathBuf, String)]) -> Option<&'a (PathBuf, String)> {
+    let mut best: Option<(usize, &(PathBuf, String))> = None;
+    for mount in mounts {
+        if !path.starts_with(&mount.0) {
+            continue;
+        }
+        let depth = mount.0.components().count();
+        if best.map(|(old, _)| depth >= old).unwrap_or(true) {
+            best = Some((depth, mount));
+        }
+    }
+    best.map(|(_, mount)| mount)
+}
+
+// Sample line as above: mount point, fstype, major:minor and source, or None for a line with no "-" or too few fields.
+fn parse_line(line: &str) -> Option<(PathBuf, String, String, String)> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let split = fields.iter().position(|field| *field == "-")?;
+    if fields.len() <= split + 2 || fields.len() < 5 {
+        return None;
+    }
+    Some((PathBuf::from(OsString::from_vec(unescape(fields[4]))), fields[split + 1].to_string(), fields[2].to_string(), fields[split + 2].to_string()))
 }
 
 fn unescape(field: &str) -> Vec<u8> {
@@ -82,8 +129,34 @@ mod tests {
     }
 
     #[test]
+    fn a_device_lookup_names_the_fstype_for_the_slow_pass_gate() {
+        let info = "1 0 8:1 / / rw - ext4 /dev/a rw\n\
+                    30 1 8:17 / /media/stick rw - vfat /dev/sdb1 rw\n\
+                    31 1 0:45 / /media/nas rw - nfs nas:/share rw\n\
+                    32 1 0:46 / /media/cloud rw - fuse.rclone remote: rw\n";
+        // Sample dev numbers: makedev(8,17) is 0x811, makedev(0,45) is 45.
+        assert_eq!(fstype_for_dev(0x811, info).as_deref(), Some("vfat"));
+        assert_eq!(fstype_for_dev(45, info).as_deref(), Some("nfs"));
+        assert_eq!(fstype_for_dev(46, info).as_deref(), Some("fuse.rclone"));
+        assert_eq!(fstype_for_dev(0x812, info), None);
+    }
+
+    #[test]
     fn malformed_mountinfo_is_ignored() {
         assert_eq!(mount_type_in(Path::new("/home/pi"), "junk\n"), None);
+    }
+
+    #[test]
+    fn the_entry_names_the_fstype_the_device_and_the_source() {
+        let info = "1 0 8:1 / / rw - ext4 /dev/a rw\n\
+                    30 1 8:17 / /media/stick rw - vfat /dev/sdb1 rw\n";
+        let entry = mount_entry_in(Path::new("/media/stick/photo.jpg"), info).expect("the stick owns its files");
+        assert_eq!(entry.fstype, "vfat");
+        assert_eq!(entry.majmin, "8:17");
+        assert_eq!(entry.source, "/dev/sdb1", "the source rides the entry for the batch gate");
+        let root = mount_entry_in(Path::new("/elsewhere"), info).expect("the root owns the rest");
+        assert_eq!((root.fstype.as_str(), root.majmin.as_str()), ("ext4", "8:1"));
+        assert!(mount_entry_in(Path::new("/home/pi"), "junk\n").is_none());
     }
 
     // The kernel escapes only \040, \011, \012 and \134, but this is a parser at a trust boundary.

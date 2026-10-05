@@ -288,6 +288,66 @@ case_trashrestore() { case_trash restore; }
 case_trashstale() { case_trash stale; }
 case_trashfailure() { case_trash failure; }
 
+# A live smoke of the Trash view's dd wiring; the prompt's timing and staleness are pinned headless in tests/arm-prompt.sh.
+case_trasharm() {
+    local trash_box payload root trash_checks=0 trash_case_label=trasharm seen tries
+    local trash_parent_bus_id="" trash_private_bus_id="" trash_bus_address="" trash_bus_pid="" trash_provider_pid=""
+    local prompt="Press d again to review permanent deletion, or Delete on its own."
+    # Key codes through uinput, so a pair of presses lands inside the 1.5 s arm without the key helper's refocus.
+    local key_d=32 key_j=36 key_k=37
+    # Longer than ui/js/Trash.js's 1.5 s ARM_MS, so a d after a missed read arms afresh rather than completing a pair.
+    local arm_lapse_s=2
+    [[ "$(realpath -e "$(command -v gio)")" == /usr/bin/gio ]] || fail "trasharm: product gio resolves to a stub"
+    sandbox_require "$fixture_root"
+    trash_box=$(mktemp -d "$fixture_root/trash.XXXXXXXX") || fail "trasharm: fixture creation failed"
+    printf 'native private Trash\n' > "$trash_box/.flea-test-sandbox"
+    export XDG_DATA_HOME="$trash_box/data" XDG_CONFIG_HOME="$trash_box/config"
+    export XDG_STATE_HOME="$trash_box/state" XDG_CACHE_HOME="$trash_box/cache"
+    for root in "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"; do
+        trash_guard "$root"
+        mkdir -p "$root" || fail "trasharm: writable root creation failed"
+    done
+    "$flea_bin" --ui-state '{"view":"list","keys":"default","preview":{"column":false},"menu":{"hidden":[]}}' >/dev/null \
+        || fail "trasharm: preferences could not be stored inside the fixture"
+    payload="$trash_box/payload"
+    trash_guard "$payload"
+    mkdir "$payload" || fail "trasharm: fixture creation failed"
+    trash_start_bus
+    printf 'alpha\n' > "$payload/alpha.txt"
+    printf 'beta\n' > "$payload/beta.txt"
+    launch "$payload"
+    wait_listing 2
+    trash_move alpha.txt 0 1
+    trash_move beta.txt 1 0
+    trash_rail
+    trash_wait '.opened and .total == 2 and (.busy == false)'
+    trash_click trashRowCentre 0 left
+    trash_wait '.opened and .selectedCount == 1 and (.busy == false)'
+    # The arm draws its prompt; a read slower than the arm only retries, so latency alone cannot fail this.
+    for tries in 1 2 3; do
+        YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool key "$key_d:1" "$key_d:0" >/dev/null 2>&1
+        seen=$(ipc lastMessage)
+        [[ "$seen" == "$prompt" ]] && break
+        sleep "$arm_lapse_s"
+    done
+    [[ "$seen" == "$prompt" ]] || fail "trasharm: d in the Trash view drew $(printf '%q' "$seen"), not its prompt, in $tries tries"
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool key "$key_j:1" "$key_j:0" >/dev/null 2>&1
+    for _attempt in $(seq 1 100); do seen=$(ipc lastMessage); [[ "$seen" != "$prompt" ]] && break; sleep 0.05; done
+    printf 'TRASHARM arm tries=%s after_other_key=%q\n' "$tries" "$seen"
+    [[ "$seen" != "$prompt" ]] || fail "trasharm: the prompt never left after another key"
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool key "$key_k:1" "$key_k:0" >/dev/null 2>&1
+    trash_wait '.opened and (.busy == false) and (.confirmation.opened == false)'
+    trash_click trashRowCentre 0 left
+    trash_wait '.opened and .selectedCount == 1 and (.busy == false)'
+    # The pair back to back, with no read between them to spend the arm.
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool key "$key_d:1" "$key_d:0" "$key_d:1" "$key_d:0" >/dev/null 2>&1
+    trash_wait '.confirmation.opened and .confirmation.count == 1' 'the second d opened the review'
+    key -k Return >/dev/null
+    trash_wait '(.confirmation.opened == false) and .total == 2 and (.busy == false)' 'Cancel kept both items'
+    trash_guard_store 2
+    trash_cleanup 0
+}
+
 trash_key_alternatives() {
     local preset="$1" binding bindings
     key m >/dev/null
@@ -445,7 +505,7 @@ trash_restore_failures() {
     row=$(menu_row_index Restore) || fail "trash: missing selected Restore row"
     trash_guard_store 1
     trash_click contextMenuRowCentre "$row"
-    trash_failure_status 'Restored 0 of 1 · 1 failed' 'without overwriting'
+    trash_failure_status 'Restored 0 of 1 item · 1 failed' 'without overwriting'
     trash_wait '.opened and .total == 1 and .selectedCount == 1 and (.busy == false)'
     [[ "$(cat "$payload/beta.txt")" == 'existing destination' ]] || fail "trash: Restore overwrote an existing file"
     uri=$(/usr/bin/gio trash --list | cut -f1)
@@ -482,7 +542,7 @@ trash_restore_failures() {
     menu_seek Restore
     trash_guard_store 1
     key -k Return >/dev/null
-    trash_failure_status 'Restored 0 of 1 · 1 failed' 'Could not open original location'
+    trash_failure_status 'Restored 0 of 1 item · 1 failed' 'Could not open original location'
     trash_wait '.opened and .total == 1 and .selectedCount == 1 and (.busy == false)'
     [[ ! -e "$original" ]] || fail "trash: restore fabricated an unavailable parent"
     trash_shot trash-restore-missing-parent
@@ -727,16 +787,24 @@ case_trash() {
     else trash_stale_confirmations; fi
     if [[ "$trash_case_label" == stale ]]; then trash_cleanup 0; fi
 
+    local locked_backing
     key -k Backspace >/dev/null
     trash_guard "$payload/good.txt"
     trash_guard "$payload/locked"
     printf 'delete this\n' > "$payload/good.txt"
     mkdir "$payload/locked"
     printf 'survive failed delete\n' > "$payload/locked/child.txt"
-    chmod 0555 "$payload/locked"
     wait_listing 3
     trash_move good.txt 0 2
     trash_move locked 1 1
+    # The lock goes on where the permanent delete will meet it, which is the trash's own backing copy.
+    # gio refuses to trash a directory it cannot write at all: measured on the box, "Unable to trash
+    # file ...: Permission denied", so locking it before the move left the row in the listing and this
+    # block never reached the failure it exists to prove.
+    locked_backing=$(trash_backing "$(/usr/bin/gio trash --list | grep -F "/locked" | cut -f1)") \
+        || fail "trash: missing locked backing"
+    trash_guard "$locked_backing"
+    chmod 0555 "$locked_backing"
     trash_rail
     trash_wait '.total == 2 and (.busy == false)'
     key -M ctrl -k a -m ctrl >/dev/null || fail "trash: Ctrl+A delivery failed"
@@ -749,7 +817,7 @@ case_trash() {
     trash_guard_store 2
     key -k Return >/dev/null
     trash_wait '.total == 1 and .selectedCount == 1 and (.busy == false)'
-    [[ "$(ipc statusPrimary)" == 'Deleted 1 of 2 · 1 failed' && "$(ipc statusError)" == true ]] \
+    [[ "$(ipc statusPrimary)" == 'Deleted 1 of 2 items · 1 failed' && "$(ipc statusError)" == true ]] \
         || fail "trash: partial deletion did not retain the named primary failure"
     [[ "$(ipc statusDetail)" == *locked* && "$(ipc statusDetail)" == *'Permission denied'* ]] \
         || fail "trash: partial deletion has no file-specific failure detail"

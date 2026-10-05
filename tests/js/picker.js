@@ -1,4 +1,5 @@
 .import "../../ui/js/Picker.js" as Picker
+.import "../../ui/js/Sort.js" as Sort
 
 function run(check) {
     // The shape tools/flea-portal writes for an OpenFile with two filters, taken from its request_for().
@@ -31,6 +32,7 @@ function run(check) {
     check("an app id is named", Picker.subtitle(Picker.request('{"app":"org.gnome.gedit"}')), "Requested by org.gnome.gedit")
 
     check("the accept label carries the count", Picker.acceptLabel(req, 3), "Send 3")
+    check("and groups a four-figure one", Picker.acceptLabel(req, 1204), "Send 1,204")
     check("one file does not carry a count", Picker.acceptLabel(req, 1), "Send")
     check("no accept label falls back to Open", Picker.acceptLabel(Picker.request("{}"), 0), "Open")
     check("a folder request falls back to Choose folder", Picker.acceptLabel(Picker.request('{"directory":true}'), 0), "Choose folder")
@@ -48,6 +50,7 @@ function run(check) {
 
     check("nothing checked says so", Picker.statusLine(0, 0), "0 selected")
     check("what is checked and what it weighs", Picker.statusLine(3, 2100000), "3 selected · 2.1 MB")
+    check("and a four-figure check groups", Picker.statusLine(1204, 2100000), "1,204 selected · 2.1 MB")
     check("the open hints name Space and Enter", Picker.hints(req), "Space select · Enter open/send · Esc cancel")
     check("the save hints name neither", Picker.hints(Picker.request('{"mode":"save"}')), "Enter save · Esc cancel")
 
@@ -103,4 +106,52 @@ function run(check) {
     check("a pick answers with its URIs", Picker.reply(0, ["/home/gm/a.txt"]),
           '{"response":0,"uris":["file:///home/gm/a.txt"]}')
     check("a refusal answers with no URI at all", Picker.reply(1, ["/home/gm/a.txt"]), '{"response":1}')
+
+    // The chooser sorts by the columns it draws and inherits kind silently, so kind is pinned by order, not by mark.
+    function order(o) { return o ? o.key + (o.desc ? " desc" : " asc") : "none" }
+    check("the chooser offers the three columns it draws", Picker.SORT_ORDERS.join(","), "name,size,mtime")
+    check("a click on another column starts it ascending",
+          order(Sort.columnOrder(Picker.SORT_ORDERS, "name", true, "size")), "size asc")
+    check("a click on the sorted column reverses it",
+          order(Sort.columnOrder(Picker.SORT_ORDERS, "size", false, "size")), "size desc")
+    check("and a second click puts it back",
+          order(Sort.columnOrder(Picker.SORT_ORDERS, "size", true, "size")), "size asc")
+    check("a column the chooser does not offer asks for nothing",
+          order(Sort.columnOrder(Picker.SORT_ORDERS, "name", false, "kind")), "none")
+    check("s steps from name to size", order(Sort.nextOrder(Picker.SORT_ORDERS, "name")), "size asc")
+    check("s steps from size to modified", order(Sort.nextOrder(Picker.SORT_ORDERS, "size")), "mtime asc")
+    check("s wraps from modified to name, never onto kind",
+          order(Sort.nextOrder(Picker.SORT_ORDERS, "mtime")), "name asc")
+    check("s from an inherited kind order starts over at name",
+          order(Sort.nextOrder(Picker.SORT_ORDERS, "kind")), "name asc")
+    check("S reverses the order the listing is in", order(Sort.reverseOrder("mtime", false)), "mtime desc")
+    check("S reverses an inherited kind order rather than refusing it",
+          order(Sort.reverseOrder("kind", true)), "kind asc")
+
+    // A file double click marks the row when unmarked, then accepts; a multiple accept sends every mark.
+    var single = Picker.request('{"mode":"open","multiple":false}')
+    var multi = Picker.request('{"mode":"open","multiple":true}')
+    var file = {d: false, p: 0, s: 1, m: 1, i: "text"}
+    var folder = {d: true, p: 0, s: 0, m: 1, i: "folder"}
+    check("a double click on an unmarked file marks then sends it", Picker.doubleAction(single, file, "/a/b.txt", "/a/b.txt", []), "markAccept")
+    check("a double click on a marked file sends it", Picker.doubleAction(single, file, "/a/b.txt", "/a/b.txt", [{path: "/a/b.txt", bytes: 3}]), "accept")
+    check("a multiple double click on an unmarked file marks then sends", Picker.doubleAction(multi, file, "/a/c.txt", "/a/c.txt", [{path: "/a/b.txt", bytes: 3}]), "markAccept")
+    check("a multiple double click on a marked file sends the marks", Picker.doubleAction(multi, file, "/a/b.txt", "/a/b.txt", [{path: "/a/b.txt", bytes: 3}]), "accept")
+    check("a double click on a folder still opens it", Picker.doubleAction(single, folder, "/a/sub", "/a/sub", []), "open")
+    check("a folder request never sends on double click", Picker.doubleAction(Picker.request('{"directory":true}'), file, "/a/b.txt", "/a/b.txt", []), "none")
+    check("save mode never sends on double click", Picker.doubleAction(Picker.request('{"mode":"save"}'), file, "/a/b.txt", "/a/b.txt", []), "none")
+    check("a second tap on another row sends nothing", Picker.doubleAction(single, file, "/a/b.txt", "/a/c.txt", []), "none")
+    check("a double click with no first tap sends nothing", Picker.doubleAction(single, file, "/a/b.txt", "", []), "none")
+    check("a double click on no row sends nothing", Picker.doubleAction(single, null, "/a/b.txt", "/a/b.txt", []), "none")
+
+    // Issue #221: a second tap on another path is a single tap.
+    check("a second tap on the same path counts as a double", Picker.sameTap("/a/b.txt", "/a/b.txt"), true)
+    check("a second tap on another path is a single tap", Picker.sameTap("/a/b.txt", "/a/c.txt"), false)
+    check("a second tap with no first tap is a single tap", Picker.sameTap("", "/a/b.txt"), false)
+    check("a second tap with no path is a single tap", Picker.sameTap("/a/b.txt", ""), false)
+    // Issue #224: the chips take room first and the path gives way, keeping its minimum.
+    check("a strip that fits takes it all", Picker.chipStripWidth(300, 100, 96), 100)
+    check("chips take room first and the path keeps its minimum", Picker.chipStripWidth(300, 400, 96), 204)
+    check("a strip wider than the free width still scrolls", Picker.chipStripWidth(200, 400, 96), 104)
+    check("no free width leaves the path whole", Picker.chipStripWidth(50, 400, 96), 0)
 }

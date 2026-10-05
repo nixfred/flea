@@ -22,6 +22,23 @@ function startPath(state, home, argvPath) {
     return home
 }
 
+// A named folder goes to the focused side while the other keeps its own; launchSide says which took it.
+// Sample dual state, as ui/ViewState.qml holds it: {paths: ["/home/gm", "/home/gm/Work"], focus: 1}.
+function dualPaths(dual, start, argvPath) {
+    var saved = (dual || {}).paths || []
+    var named = argvPath && String(argvPath).length > 0 ? String(argvPath) : ""
+    // With no pair both sides open where one pane would, and a named folder outranks start here too.
+    if (saved.length !== 2) {
+        var only = named.length > 0 ? named : start
+        return { paths: [only, only], launchSide: named.length > 0 ? 0 : -1 }
+    }
+    if (named.length === 0)
+        return { paths: [String(saved[0]), String(saved[1])], launchSide: -1 }
+    if ((dual || {}).focus === 1)
+        return { paths: [String(saved[0]), named], launchSide: 1 }
+    return { paths: [named, String(saved[1])], launchSide: 0 }
+}
+
 // here is the folder the pane is resting on, which is what a new tab used to clone unconditionally.
 function newTabPath(state, here, home) {
     var mode = (state || {}).newTab || "current"

@@ -50,7 +50,7 @@ out=$(flea_ui 2>&1); rc=$?
 check "a read exits 0" "0" "$rc"
 check "a read answers the shipped view" "1" "$(echo "$out" | grep -c '"view": "list"')"
 check "a read answers the shipped menu.hidden" "1" "$(echo "$out" | grep -c '"copypath"')"
-check "a read answers every top-level key" "22" "$(echo "$out" | grep -c '^  "')"
+check "a read answers every top-level key" "31" "$(echo "$out" | grep -c '^  "')"
 check "a read leaves no state file behind" "0" "$([ -e "$UI" ] && echo 1 || echo 0)"
 
 # The window paints a first launch before any file exists, so the two fallbacks it holds have to be
@@ -98,7 +98,7 @@ check "a patch writes the file" "1" "$([ -f "$UI" ] && echo 1 || echo 0)"
 # 240 is not a stop, so src/uistate.rs Rule::SidebarWidth snaps it down to 224: this asserted the
 # raw number and had been failing since the snap was written, which is why it pins the snap now.
 check "the stored file carries the patched width, snapped to a stop" "1" "$(grep -c '"sidebarWidth": 224' "$UI")"
-check "the stored file keeps every other key" "22" "$(grep -c '^  "' "$UI")"
+check "the stored file keeps every other key" "31" "$(grep -c '^  "' "$UI")"
 check "the state file is owner only" "600" "$(stat -c '%a' "$UI")"
 check "the state directory is owner only" "700" "$(stat -c '%a' "$STATE/flea")"
 # ls -A: ui.json and its lock, and no temp file left behind by the rename.
@@ -129,10 +129,10 @@ check "a malformed file reads as the defaults" "1" "$(echo "$out" | grep -c '"vi
 # An unknown value costs one key and every other key in the file stands.
 fresh
 mkdir -p "$STATE/flea"
-printf '{"view":"miller","density":"compact","hidden":true}\n' > "$UI"
+printf '{"view":"miller","density":"comfortable","hidden":true}\n' > "$UI"
 out=$(flea_ui 2>&1)
 check "an unknown value falls back to its default" "1" "$(echo "$out" | grep -c '"view": "list"')"
-check "the key beside it is untouched" "1" "$(echo "$out" | grep -c '"density": "compact"')"
+check "the key beside it is untouched" "1" "$(echo "$out" | grep -c '"density": "comfortable"')"
 check "the second key beside it is untouched" "1" "$(echo "$out" | grep -c '"hidden": true')"
 
 # A caller that sends junk is told which key, and nothing is half applied.
@@ -183,10 +183,56 @@ done
 # A hand edit is not a patch: it costs that one key its own default and the key beside it stands.
 fresh
 mkdir -p "$STATE/flea"
-printf '{"columns":["name","size","size"],"density":"compact"}\n' > "$UI"
+printf '{"columns":["name","size","size"],"density":"comfortable"}\n' > "$UI"
 out=$(flea_ui 2>&1)
 check "a duplicated column in the file falls back to the shipped set" "1" "$(echo "$out" | tr -d ' \n' | grep -c '"columns":\["name","size","date"\]')"
-check "the key beside the refused columns array stands" "1" "$(echo "$out" | grep -c '"density": "compact"')"
+check "the key beside the refused columns array stands" "1" "$(echo "$out" | grep -c '"density": "comfortable"')"
+
+# ColumnsWidth caps the count at 2..5 and ListColumns040 remembers a dragged edge per column at 48..480.
+fresh
+out=$(flea_ui '{"columnsLimit":3,"columnWidths":{"size":120}}' 2>&1); rc=$?
+check "a column limit and width patch exits 0" "0" "$rc"
+check "the limit landed" "1" "$(grep -c '"columnsLimit": 3' "$UI")"
+check "the width landed" "1" "$(tr -d ' \n' < "$UI" | grep -c '"columnWidths":{"size":120}')"
+for good_column_key in '{"columnsLimit":2}' '{"columnsLimit":5}' '{"columnWidths":{"size":48}}' '{"columnWidths":{"size":480}}'; do
+  out=$(flea_ui "$good_column_key" 2>&1); rc=$?
+  check "a column value on its rails exits 0: $good_column_key" "0" "$rc"
+done
+for bad_column_key in '{"columnsLimit":1}' '{"columnsLimit":6}' '{"columnWidths":{"size":47}}' '{"columnWidths":{"size":481}}' '{"columnWidths":{"name":100}}'; do
+  before_bad=$(cat "$UI")
+  out=$(flea_ui "$bad_column_key" 2>&1); rc=$?
+  check "a column value outside its rails exits 2: $bad_column_key" "2" "$rc"
+  case "$bad_column_key" in
+    *columnsLimit*) want_key="columnsLimit" ;;
+    *) want_key="columnWidths" ;;
+  esac
+  check "and names the key it refused: $bad_column_key" "1" "$(echo "$out" | grep -c "$want_key")"
+  check "and leaves ui.json untouched: $bad_column_key" "$before_bad" "$(cat "$UI")"
+done
+out=$(flea_ui '{"density":"tight"}' 2>&1); rc=$?
+check "a tight density patch exits 0" "0" "$rc"
+check "the tight density landed" "1" "$(grep -c '"density": "tight"' "$UI")"
+out=$(flea_ui '{"preview":{"thumbSize":"huge"}}' 2>&1); rc=$?
+check "a huge thumbnail patch exits 0" "0" "$rc"
+out=$(flea_ui '{"preview":{"thumbSize":"largest"}}' 2>&1); rc=$?
+check "a largest thumbnail patch exits 0" "0" "$rc"
+
+# G1: two folder patches both survive, a null forgets one, and two widths behave per key.
+fresh
+out=$(flea_ui '{"folderSorts":{"/a":{"key":"size","reverse":true}}}' 2>&1); rc=$?
+check "the first folder patch exits 0" "0" "$rc"
+out=$(flea_ui '{"folderSorts":{"/b":{"key":"name","reverse":false}}}' 2>&1); rc=$?
+check "the second folder patch exits 0" "0" "$rc"
+flat=$(tr -d ' \n' < "$UI")
+check "two folder patches both survive" "1|1" "$(echo "$flat" | grep -c '"/a":{"key":"size","reverse":true}')|$(echo "$flat" | grep -c '"/b":{"key":"name","reverse":false}')"
+out=$(flea_ui '{"folderSorts":{"/a":null}}' 2>&1); rc=$?
+check "a null forget exits 0" "0" "$rc"
+flat=$(tr -d ' \n' < "$UI")
+check "a null forgets only its folder" "0|1" "$(echo "$flat" | grep -c '"/a":')|$(echo "$flat" | grep -c '"/b":{"key":"name","reverse":false}')"
+flea_ui '{"columnWidths":{"size":120}}' >/dev/null 2>&1
+flea_ui '{"columnWidths":{"date":140}}' >/dev/null 2>&1
+flat=$(tr -d ' \n' < "$UI")
+check "two width patches both survive" "1|1" "$(echo "$flat" | grep -c '"size":120')|$(echo "$flat" | grep -c '"date":140')"
 
 # The path is predictable, so a link planted at it is refused and what it points at is untouched.
 fresh
@@ -236,6 +282,25 @@ printf '{"hiddenCols":["size","date","kind","mode"]}\n' > "$CONFIG/flea/view.jso
 out=$(flea_ui 2>&1)
 check "view.json is never read again once ui.json exists" "1" "$(echo "$out" | tr -d ' \n' | grep -c '"columns":\["name","size","date"\]')"
 
+# 0.3.3 turns Show unmounted drives on once for a file written before it, and the stamp makes it once.
+fresh
+mkdir -p "$STATE/flea"
+printf '{"view":"grid","places":{"showUnmounted":false,"driveSize":true}}\n' > "$UI"
+old_sha=$(sha256sum "$UI" | cut -d' ' -f1)
+out=$(flea_ui 2>&1)
+check "a 0.3.2 file that stored the switch off reads it on" "1" "$(echo "$out" | grep -c '"showUnmounted": true')"
+check "and keeps the file's own choices beside it" "1|1" "$(echo "$out" | grep -c '"view": "grid"')|$(echo "$out" | grep -c '"driveSize": true')"
+check "and the read carries the 0.3.3 stamp" "1" "$(echo "$out" | grep -c '"stateVersion": 1')"
+check "and a read alone writes nothing" "$old_sha" "$(sha256sum "$UI" | cut -d' ' -f1)"
+flea_ui '{"places":{"showUnmounted":false}}' >/dev/null 2>&1
+check "switched off after the migration, the file stores it off" "1" "$(grep -c '"showUnmounted": false' "$UI")"
+check "beside the stamp that keeps the migration from running again" "1" "$(grep -c '"stateVersion": 1' "$UI")"
+check "and the write kept the file's own choices too" "1|1" "$(grep -c '"view": "grid"' "$UI")|$(grep -c '"driveSize": true' "$UI")"
+check "so the next process still reads it off" "1" "$(flea_ui 2>&1 | grep -c '"showUnmounted": false')"
+out=$(flea_ui '{"stateVersion":0}' 2>&1); rc=$?
+check "a patch that names the stamp exits 2" "2" "$rc"
+check "and names the stamp it refused" "1" "$(echo "$out" | grep -c 'stateVersion')"
+
 # The migration runs before the window, so an upgraded install's first paint reads it. The launch is
 # driven to the point where qs is missing from PATH, which is after the migration and before any window.
 fresh
@@ -260,12 +325,12 @@ check "and does not rewrite the file to say so" "$before_migrate_ino" "$(stat -c
 # must answer the same question the same way.
 fresh
 mkdir -p "$STATE/flea"
-printf '{"columns":["name","size","owner"],"density":"compact","fromANewerFlea":{"a":1}}\n' > "$UI"
+printf '{"columns":["name","size","owner"],"density":"comfortable","fromANewerFlea":{"a":1}}\n' > "$UI"
 env WAYLAND_DISPLAY=flea-uistate-test-display PATH=/nonexistent-flea-test-path \
     XDG_STATE_HOME="$STATE" XDG_CONFIG_HOME="$CONFIG" $BIN --gui </dev/null >/dev/null 2>&1
 check "the launch settles a refused value out of the file" "0" "$(grep -c 'owner' "$UI")"
 check "the settled file carries the shipped columns instead" "1" "$(tr -d ' \n' < "$UI" | grep -c '"columns":\["name","size","date"\]')"
-check "the settle leaves a good key beside it alone" "1" "$(grep -c '"density": "compact"' "$UI")"
+check "the settle leaves a good key beside it alone" "1" "$(grep -c '"density": "comfortable"' "$UI")"
 check "the settle keeps a newer Flea's own key" "1" "$(grep -c 'fromANewerFlea' "$UI")"
 settled=$(cat "$UI")
 settled_ino=$(stat -c '%i' "$UI")
@@ -282,7 +347,7 @@ check "and does not rewrite a file that is already settled" "$settled_ino" "$(st
 # in. That is the settle alone, and the block below pins what the next patch does to the same file.
 fresh
 mkdir -p "$STATE/flea"
-printf '{\n  "columns": ["name", "size"],\n  "density": "compact",\n}\n' > "$UI"
+printf '{\n  "columns": ["name", "size"],\n  "density": "comfortable",\n}\n' > "$UI"
 broken_sha=$(sha256sum "$UI" | cut -d' ' -f1)
 broken_ino=$(stat -c '%i' "$UI")
 out=$(env WAYLAND_DISPLAY=flea-uistate-test-display PATH=/nonexistent-flea-test-path \
@@ -298,8 +363,8 @@ check "and the read still answers the full default shape" "1" "$(flea_ui 2>&1 | 
 out=$(flea_ui '{"hidden":true}' 2>&1); rc=$?
 check "a patch onto that same file exits 0" "0" "$rc"
 check "and does not leave the operator's bytes" "1" "$([ "$(sha256sum "$UI" | cut -d' ' -f1)" != "$broken_sha" ] && echo 1 || echo 0)"
-check "it writes the full default document instead" "22" "$(grep -c '^  "' "$UI")"
-check "so the hand-written key is gone" "1" "$(grep -c '"density": "normal"' "$UI")"
+check "it writes the full default document instead" "31" "$(grep -c '^  "' "$UI")"
+check "so the hand-written key is gone" "1" "$(grep -c '"density": "compact"' "$UI")"
 check "and the patch itself landed" "1" "$(grep -c '"hidden": true' "$UI")"
 
 # A hand-edited number Rust's f64 parse takes and JSON does not is the same case: parse_number
@@ -307,12 +372,12 @@ check "and the patch itself landed" "1" "$(grep -c '"hidden": true' "$UI")"
 # it into bytes the window's own JSON.parse would then refuse.
 fresh
 mkdir -p "$STATE/flea"
-printf '{"places":{"sidebarWidth":0192},"density":"compact"}\n' > "$UI"
+printf '{"places":{"sidebarWidth":0192},"density":"comfortable"}\n' > "$UI"
 rust_only_sha=$(sha256sum "$UI" | cut -d' ' -f1)
 env WAYLAND_DISPLAY=flea-uistate-test-display PATH=/nonexistent-flea-test-path \
     XDG_STATE_HOME="$STATE" XDG_CONFIG_HOME="$CONFIG" $BIN --gui </dev/null >/dev/null 2>&1
 check "a leading-zero literal is not written back into ui.json" "$rust_only_sha" "$(sha256sum "$UI" | cut -d' ' -f1)"
-check "and that file reads as the full default shape" "1" "$(flea_ui 2>&1 | tr -d ' \n' | grep -c '"density":"normal"')"
+check "and that file reads as the full default shape" "1" "$(flea_ui 2>&1 | tr -d ' \n' | grep -c '"density":"compact"')"
 
 # The same for a document that is valid JSON but not the object the merge reads.
 fresh
@@ -348,7 +413,7 @@ check "and leaves that file byte for byte" "$notext_sha" "$(sha256sum "$UI" | cu
 # and not the file, so this guard is the only thing between one settings write and every key in it.
 fresh
 mkdir -p "$STATE/flea"
-printf '{\n  "columns": ["name", "size"],\n  "density": "compact",\n  "fromANewerFlea": {"a": 1}\n}\n' > "$UI"
+printf '{\n  "columns": ["name", "size"],\n  "density": "comfortable",\n  "fromANewerFlea": {"a": 1}\n}\n' > "$UI"
 denied_sha=$(sha256sum "$UI" | cut -d' ' -f1)
 denied_ino=$(stat -c '%i' "$UI")
 chmod 000 "$UI"
@@ -438,12 +503,24 @@ check "and never more temps than there were kills" "1" "$([ "$temps" -le "$kills
 kill_floor=24
 echo "     the sweep killed $kills of 120 rounds, floor $kill_floor"
 check "the kill sweep killed a fifth of its rounds at least" "1" "$([ "$kills" -ge "$kill_floor" ] && echo 1 || echo 0)"
-# The positive control for the line below, which passes vacuously on a sweep that never reached the
-# write: a kill during process startup satisfies kills>0 and enters nothing, while a temp survives
-# only when the kill landed between write_new's exclusive create and the rename, so the count
-# printed above IS the count of rounds killed inside the write window and 0 of them proves nothing.
-check "and a kill landed inside the write window at all" "1" "$([ "$temps" -ge 1 ] && echo 1 || echo 0)"
+# A 0-temp timed sweep proves nothing about the write window, so its temp count stays diagnostic.
+echo "     the sweep left $temps write-window temp(s), diagnostic only"
 check "no kill ever left a partial state file" "0" "$partial"
+
+# The barrier holds the owned tmp inside its first write, so SIGKILL lands in the window by design.
+DET="$FIXTURE_ROOT/flea-uistate-det-$$"
+sandbox_make "$DET" || exit 1
+# Sample input: `deterministic receipt 12345 7 /…/flea/ui.json.12345.tmp` plus the sha256 line.
+if python3 tests/uistate-deterministic.py "$DET" "$BIN" >"$DET/det.log" 2>&1; then
+  check "deterministic interrupted publication kept the seeded bytes" "1" "$(grep -c 'interrupted publication kept' "$DET/det.log")"
+  check "released barrier published the exact expected state" "1" "$(grep -c 'released barrier published' "$DET/det.log")"
+  echo "     deterministic hit 1 of 1 killed inside the write window, timed kills $kills of 120 separate"
+else
+  echo "FAIL deterministic interrupted publication proof"
+  cat "$DET/det.log"
+  fail=1
+fi
+sandbox_remove "$DET" || exit 1
 
 sandbox_remove "$SANDBOX" || exit 1
 

@@ -1,4 +1,5 @@
 import Quickshell
+import Quickshell.Io
 import QtQuick
 import QtQml.XmlListModel
 import "js/Format.js" as Format
@@ -20,20 +21,34 @@ QtObject {
     // Asked for when the Recent location is opened, so the file is re-read rather than remembered:
     // every other application on the box appends to it while this window is up.
     function refresh() {
-        var url = Format.fileUri(root.file)
-        if (history.source.toString() === url) {
-            history.reload()
-            return
+        if (historyFile.path === root.file) historyFile.reload()
+        else historyFile.path = root.file
+    }
+
+    // Read first so only an absent file is quiet: XmlListModel warns on one, and a fresh account has none.
+    property FileView historyFile: FileView {
+        printErrors: false
+        onLoaded: root.parse()
+        onLoadFailed: function (error) {
+            if (error !== FileViewError.FileNotFound)
+                console.warn("PickerRecent: could not read " + root.file + ": " + error)
+            root.paths = []
+            root.refreshed()
         }
-        history.source = url
+    }
+
+    // The model re-reads what the check just read, so a present history is a second read from the page cache.
+    function parse() {
+        var url = Format.fileUri(root.file)
+        if (history.source.toString() === url) history.reload()
+        else history.source = url
     }
 
     property XmlListModel historyModel: XmlListModel {
         id: history
         query: "/xbel/bookmark"
-        // An absent, empty or unreadable history answers Ready with no rows, and a truncated one
-        // answers with the bookmarks it did read: either way the rail draws what is really there.
-        onStatusChanged: if (status !== XmlListModel.Loading) root.rebuild()
+        // Never on the construction-time Null: that answered refreshed with no rows, and the path jump takes the first answer.
+        onStatusChanged: if (status === XmlListModel.Ready || status === XmlListModel.Error) root.rebuild()
         XmlListModelRole { name: "href"; attributeName: "href" }
         XmlListModelRole { name: "visited"; attributeName: "visited" }
         XmlListModelRole { name: "modified"; attributeName: "modified" }

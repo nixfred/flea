@@ -1,4 +1,6 @@
 .import "../../ui/js/PreviewKeys.js" as PreviewKeys
+.import "../../ui/js/Keymap.js" as Keymap
+.import "sourcefixture.js" as Source
 
 function run(check) {
     var activated = []
@@ -58,4 +60,8 @@ function run(check) {
     var still = previewPane("image")
     PreviewKeys.act("playPause", still)
     check("p does nothing to a still preview", still.played + still.closed, 0)
+    check("space maps to preview in the pdf context", Keymap.lookupFor("default", Qt.Key_Space, " ", Qt.NoModifier, "pdf", "gui"), "preview")
+    var viewerSrc = Source.source("ui/PdfViewer.qml")
+    var keysBody = Source.slice(viewerSrc, "Keys.onPressed", "readonly property int page")
+    check("the pdf viewer closes on the preview action", keysBody.indexOf('|| action === "preview") root.closed()') >= 0, true)
 }

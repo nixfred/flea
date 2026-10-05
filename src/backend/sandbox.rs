@@ -5,9 +5,9 @@ const BWRAP: &str = "bwrap";
 // bwrap has no rlimit option, so stock prlimit carries them; see AGENTS.md "Thumbnail sandbox".
 const PRLIMIT: &str = "prlimit";
 // A 1080p decode is well under a second of CPU here, so 30 s is a runaway, not a slow file.
-const CPU_SECONDS: u32 = 30;
+pub(crate) const CPU_SECONDS: u32 = 30;
 // Issue #17 reports glycin exhausting 1 GiB of address space on a large ICC-tagged JPEG and aborting, which this box does not reproduce, so the cap is 2 GiB: the smallest value the ticket records as working, still finite, and virtual rather than resident. What actually consumed it is the arena reservation capped above, not the image.
-const ADDRESS_SPACE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(crate) const ADDRESS_SPACE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 // /bin, /sbin, /lib and /lib64 are all symlinks into usr on this box, so binding /usr covers them.
 const BWRAP_FLAGS: &[&str] = &[
@@ -15,11 +15,11 @@ const BWRAP_FLAGS: &[&str] = &[
     "--die-with-parent",
     "--new-session",
     "--clearenv",
-    // Issue #17, CoreyH's second report: glibc gives each thread that mallocs its own arena and
-    // reserves 64 MiB of address space for it whatever it uses, up to eight per core. The tools in
-    // here thread on the core count, so a 32-core box reserves the whole 2 GiB cap in arenas alone
-    // and the next thread stack cannot map: glycin aborts, and ImageMagick dies with nothing on
-    // stderr. Capping the arenas is what removes those reservations; the tools keep their threads.
+    // #156: C.UTF-8, so bsdtar passes UTF-8 member names through; after --clearenv or it is wiped.
+    "--setenv",
+    "LC_ALL",
+    "C.UTF-8",
+    // Threaded tools reserve whole arenas per thread, so MALLOC_ARENA_MAX=2 keeps them mappable under the 2 GiB cap (issue #17).
     "--setenv",
     "MALLOC_ARENA_MAX",
     "2",
@@ -49,12 +49,14 @@ const BWRAP_FLAGS: &[&str] = &[
     "/tmp",
 ];
 
+// bwrap's status fd, kept by bwrap and closed in the sandboxed child, so only bwrap writes it.
+pub(crate) const STATUS_FD: i32 = 7;
+
 pub fn available() -> bool {
     available_on(&std::env::var("PATH").unwrap_or_default())
 }
 
-// Split from available() so a test can ask the rule without setting PATH for every thread beside it.
-// Sample input: "/usr/local/bin:/usr/bin:/bin"
+// Split from available() so a test can probe the rule; sample input: "/usr/local/bin:/usr/bin:/bin".
 fn available_on(path: &str) -> bool {
     let has = |prog: &str| {
         path.split(':')
@@ -64,12 +66,25 @@ fn available_on(path: &str) -> bool {
     has(BWRAP) && has(PRLIMIT)
 }
 
-// The input is read-only, the one path the caller names is the only writable one, and nothing else is shared.
+// The decoder's wrapper; the CPU cap is its runaway bound (see AGENTS.md "Thumbnail sandbox").
 pub fn wrap(inner: &[String], input: &Path, out: &Path) -> Vec<String> {
+    wrap_with(inner, input, out, Some(CPU_SECONDS))
+}
+
+// Issue #211: the archive jail for extract and compress, same boundary and address-space cap but no CPU cap.
+pub fn wrap_archive(inner: &[String], input: &Path, out: &Path) -> Vec<String> {
+    wrap_with(inner, input, out, None)
+}
+
+// The one shared argv; the cap is the only argument a caller omits.
+pub(crate) fn wrap_with(inner: &[String], input: &Path, out: &Path, cpu_seconds: Option<u32>) -> Vec<String> {
     let head_and_binds = 10;
     let mut a: Vec<String> = Vec::with_capacity(inner.len() + BWRAP_FLAGS.len() + head_and_binds);
+    // prlimit stays outermost so the address-space cap still arrives.
     a.push(PRLIMIT.to_string());
-    a.push(format!("--cpu={}", CPU_SECONDS));
+    if let Some(seconds) = cpu_seconds {
+        a.push(format!("--cpu={}", seconds));
+    }
     a.push(format!("--as={}", ADDRESS_SPACE_BYTES));
     a.push(BWRAP.to_string());
     for flag in BWRAP_FLAGS {
@@ -86,8 +101,22 @@ pub fn wrap(inner: &[String], input: &Path, out: &Path) -> Vec<String> {
     a
 }
 
-// The same boundary with nothing writable at all, for a probe that answers on stdout rather than
-// into a file. ffprobe parses the same untrusted media a thumbnailer does and gets the same jail.
+// The pool's namespace flags around the long-lived thumbnail worker, which gets each job's files as descriptors and binds only its own executable; no prlimit, because the limits are per job and a CPU cap would also accumulate the worker's own time across the session.
+pub fn wrap_worker(inner: &[String], exe: &Path) -> Vec<String> {
+    let head_and_binds = 4;
+    let mut a: Vec<String> = Vec::with_capacity(inner.len() + BWRAP_FLAGS.len() + head_and_binds);
+    a.push(BWRAP.to_string());
+    for flag in BWRAP_FLAGS {
+        a.push(flag.to_string());
+    }
+    a.push("--ro-bind".to_string());
+    a.push(exe.to_string_lossy().to_string());
+    a.push(exe.to_string_lossy().to_string());
+    a.extend_from_slice(inner);
+    a
+}
+
+// The same boundary with nothing writable, for a probe answering on stdout: ffprobe parses untrusted media too.
 pub fn wrap_readonly(inner: &[String], input: &Path) -> Vec<String> {
     let head_and_binds = 8;
     let mut a: Vec<String> = Vec::with_capacity(inner.len() + BWRAP_FLAGS.len() + head_and_binds);
@@ -105,6 +134,13 @@ pub fn wrap_readonly(inner: &[String], input: &Path) -> Vec<String> {
     a
 }
 
+// Sample input: full ending in ["/usr/bin/sleep","30"], inner_len 2 inserts before those two.
+pub fn add_status(argv: &mut Vec<String>, inner_len: usize) {
+    let at = argv.len().saturating_sub(inner_len.min(argv.len()));
+    argv.insert(at, "--json-status-fd".to_string());
+    argv.insert(at + 1, STATUS_FD.to_string());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +148,8 @@ mod tests {
 
     // Written out rather than derived from the constant: a test that recomputes the value it checks cannot fail when that value is wrong.
     const TWO_GIB: &str = "--as=2147483648";
+    // The kernel's own spelling of 2 GiB, written out so neither spelling can drift unseen.
+    const TWO_GIB_TEXT: &str = "2147483648";
     // /proc reports VmPeak and VmRSS in kibibytes, and the reservations below are sized in mebibytes.
     const KIB_PER_GIB: u64 = 1024 * 1024;
     const BYTES_PER_KIB: u64 = 1024;
@@ -119,6 +157,14 @@ mod tests {
     const RESIDENT_CEILING_KIB: u64 = 262_144;
     // The one interpreter on this box that can ask the kernel for a mapping of a chosen protection.
     const PYTHON: &str = "/usr/bin/python3";
+
+    // Sample row: "Max cpu time              30                   30                   seconds"; a limit never given reads "unlimited".
+    const LIMITS_PROBE: &str = r#"
+def field(path, prefix, column):
+    return next(l.split()[column] for l in open(path) if l.startswith(prefix))
+print("cpu=" + field("/proc/self/limits", "Max cpu time", 3))
+print("as=" + field("/proc/self/limits", "Max address space", 3))
+"#;
 
     // PROT_NONE with MAP_NORESERVE is address space and not one resident page, which is what a cap on address space bounds and what issue #17 says 1 GiB of was not enough of.
     const RESERVE_PROBE: &str = r#"
@@ -208,6 +254,25 @@ print("over=" + reserve(OVER_MIB))
         assert!(prlimit_at < bwrap_at);
     }
 
+    // Issue #211: one jail carries the decoder CPU cap and the other must not; this is the argv itself.
+    #[test]
+    fn the_archive_jail_drops_the_decoder_cpu_cap_and_keeps_the_memory_cap() {
+        let inner = inner();
+        let archive = wrap_archive(&inner, Path::new("/in/a.mp4"), Path::new("/out"));
+        assert!(!archive.iter().any(|a| a.starts_with("--cpu=")),
+                "the archive jail must not carry the decoder's CPU cap: {:?}", archive);
+        assert_eq!(archive[0], "prlimit", "the address-space cap still needs prlimit outermost");
+        assert!(archive.iter().any(|a| a == TWO_GIB), "and that cap is still 2 GiB: {:?}", archive);
+        let joined = archive.join(" ");
+        assert!(joined.contains("--ro-bind /in/a.mp4 /in/a.mp4"), "the input is still read-only: {}", joined);
+        assert!(joined.contains("--bind /out /out"), "and the named path is still the only writable one");
+        assert!(archive.iter().any(|a| a == "--unshare-all"), "the namespace flags are unchanged: {:?}", archive);
+        let tail = &archive[archive.len() - inner.len()..];
+        assert_eq!(tail, inner.as_slice(), "the inner argv is still last and unchanged");
+        // The decoder's own wrapper is untouched by this, because it is the one that needs a runaway bound.
+        assert!(wrap(&inner, Path::new("/in/a.mp4"), Path::new("/out")).iter().any(|a| a == "--cpu=30"));
+    }
+
     #[test]
     fn the_system_paths_a_decoder_needs_are_read_only() {
         let got = wrap(&inner(), Path::new("/in/a.mp4"), Path::new("/out"));
@@ -217,14 +282,37 @@ print("over=" + reserve(OVER_MIB))
         assert!(joined.contains("--dev /dev"));
     }
 
-    // Runs the production argv for real, so the number below is the one the kernel enforced and not the one the argv asked for; bwrap and prlimit are hard runtime dependencies here.
-    fn sandboxed_output(inner: &[&str], input: &Path) -> String {
-        let inner: Vec<String> = inner.iter().map(|s| s.to_string()).collect();
-        let full = wrap_readonly(&inner, input);
-        let out = std::process::Command::new(&full[0]).args(&full[1..]).output()
-            .unwrap_or_else(|e| panic!("the sandbox wrapper {} could not run: {}", full[0], e));
+    // #156: the pin is present and survives --clearenv, in both wrappers.
+    #[test]
+    fn the_jail_pins_a_utf8_locale_after_clearing_the_environment() {
+        let got = wrap(&inner(), Path::new("/in/a.mp4"), Path::new("/out"));
+        let cleared = got.iter().position(|a| a == "--clearenv").expect("--clearenv");
+        let locale = got.iter().position(|a| a == "LC_ALL").expect("LC_ALL");
+        assert_eq!(got[locale + 1], "C.UTF-8");
+        assert!(cleared < locale, "--clearenv must precede the locale or it clears it too");
+        let readonly = wrap_readonly(&inner(), Path::new("/in/a.mp4"));
+        assert!(readonly.windows(2).any(|w| w[0] == "LC_ALL" && w[1] == "C.UTF-8"));
+    }
+
+    // Runs the production argv for real; bwrap and prlimit are hard runtime dependencies here.
+    fn wrapped_output(argv: &[String]) -> String {
+        let out = std::process::Command::new(&argv[0]).args(&argv[1..]).output()
+            .unwrap_or_else(|e| panic!("the sandbox wrapper {} could not run: {}", argv[0], e));
         assert!(out.status.success(), "the sandboxed prober exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    fn sandboxed_output(inner: &[&str], input: &Path) -> String {
+        let inner: Vec<String> = inner.iter().map(|s| s.to_string()).collect();
+        wrapped_output(&wrap_readonly(&inner, input))
+    }
+
+    // Sample line: "cpu=unlimited"
+    fn limits(text: &str, key: &str) -> String {
+        let prefix = format!("{}=", key);
+        let line = text.lines().find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("the prober printed no {} in: {}", prefix, text));
+        line[prefix.len()..].trim().to_string()
     }
 
     // Sample line: "VmPeakKb=2116600"
@@ -247,6 +335,24 @@ print("over=" + reserve(OVER_MIB))
         assert!(peak < ADDRESS_SPACE_BYTES / BYTES_PER_KIB, "VmPeak {} kB passed the cap", peak);
         // A cap on address space is not a memory limit, and this is the measurement that says so.
         assert!(rss < RESIDENT_CEILING_KIB, "the sparse reservation became resident, VmRSS {} kB", rss);
+    }
+
+    // Issue #211 at the enforced level: the decoder jail holds 30 CPU seconds and the archive jail none.
+    #[test]
+    fn the_archive_jail_has_no_cpu_limit_where_the_decoder_one_has_thirty_seconds() {
+        if crate::backend::sandboxprobe::skipped() { return; }
+        let d = crate::backend::testdir::TestDir::new("sandboxlimits");
+        let input = Path::new("/etc/hostname");
+        let inner: Vec<String> = [PYTHON, "-c", LIMITS_PROBE].iter().map(|s| s.to_string()).collect();
+        let decoder = wrapped_output(&wrap(&inner, input, d.path()));
+        let archive = wrapped_output(&wrap_archive(&inner, input, d.path()));
+        assert_eq!(limits(&decoder, "cpu"), "30", "the decoder jail lost its runaway bound: {}", decoder);
+        // "unlimited" is the kernel's word for no RLIMIT_CPU, so an extract outlives the 30 s that killed it.
+        assert_eq!(limits(&archive, "cpu"), "unlimited", "the archive jail still carries a CPU cap: {}", archive);
+        for (who, text) in [("decoder", &decoder), ("archive", &archive)] {
+            assert_eq!(limits(text, "as"), TWO_GIB_TEXT,
+                       "the {} jail must keep the address-space cap: {}", who, text);
+        }
     }
 
     #[test]

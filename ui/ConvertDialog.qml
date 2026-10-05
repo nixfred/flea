@@ -3,8 +3,7 @@ import qs.Commons
 import "." as Flea
 import "js/Convert.js" as Convert
 
-// The one popup in the whole design. Every other operation answers in the status bar; this one asks
-// two questions first, so it is the exception the operations design names rather than a pattern.
+// The one popup in the whole design. Every other operation answers in the status bar; this one asks two questions first, so it is the exception the operations design names rather than a pattern.
 Item {
     id: root
 
@@ -220,19 +219,20 @@ Item {
             width: parent.width
             spacing: Theme.spacing.gap / 2
 
-            Text {
+            Item {
                 id: title
                 width: parent.width
-                leftPadding: Theme.spacing.rowPaddingX
-                rightPadding: Theme.spacing.rowPaddingX
-                bottomPadding: Theme.spacing.gap
-                text: "Convert " + root.name
-                color: Theme.color.foreground
-                font.family: Theme.font.family
-                font.pixelSize: Theme.font.body
-                font.bold: true
-                textFormat: Text.PlainText
-                elide: Text.ElideMiddle
+                height: header.implicitHeight + Theme.spacing.gap
+
+                Flea.DialogTitle {
+                    id: header
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.margins: Theme.spacing.rowPaddingX
+                    text: "Convert " + root.name
+                    elide: Text.ElideMiddle
+                }
+
                 Rectangle {
                     anchors.bottom: parent.bottom
                     width: parent.width
@@ -290,20 +290,14 @@ Item {
                     anchors.left: parent.left
                     anchors.leftMargin: Theme.spacing.rowPaddingX
                     anchors.verticalCenter: parent.verticalCenter
-                    // Operations resolves this frame to 18px when bodySmall is 13px.
-                    width: Math.round(18 * Theme.font.bodySmall / 13)
-                    height: width
-                    color: "transparent"
-                    border.width: Theme.spacing.hairline * 2
-                    border.color: root.strip || root.focusPart === 1 ? Theme.color.accent : Theme.color.muted
+                    width: ruleBox.implicitWidth
+                    height: ruleBox.implicitHeight
 
-                    Flea.Glyph {
-                        anchors.centerIn: parent
-                        width: parent.width / 2
-                        height: width
-                        visible: root.strip
-                        name: "check"
-                        color: Theme.color.accent
+                    Flea.CheckBox {
+                        id: ruleBox
+                        value: root.strip ? "on" : "off"
+                        focused: root.focusPart === 1
+                        available: root.editable
                     }
                 }
 
@@ -379,7 +373,7 @@ Item {
                     Flea.DialogButton {
                         id: cancelButton
                         label: "Cancel"
-                        primary: root.focusPart === 2
+                        focused: root.focusPart === 2
                         available: !root.busy
                         enabled: available
                         Keys.forwardTo: [keys]
@@ -389,12 +383,11 @@ Item {
                     Flea.DialogButton {
                         id: convertButton
                         label: root.busy ? "Converting..." : "Convert"
-                        primary: root.canConvert
-                        fillColor: root.canConvert ? "transparent" : Theme.color.background
+                        primary: true
+                        focused: root.focusPart === 3
                         available: root.canConvert
                         enabled: available
                         Keys.forwardTo: [keys]
-                        opacity: available ? 1 : 0.55
                         onActivated: root.commit()
                     }
                 }

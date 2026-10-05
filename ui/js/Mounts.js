@@ -1,6 +1,7 @@
 .pragma library
 
 .import "Protocols.js" as Protocols
+.import "Menu.js" as Menu
 
 // Sample input, captured live on the box with one network share mounted (2026-08-31):
 // Drive(0): KBG40ZNS256G NVMe KIOXIA 256GB
@@ -19,6 +20,11 @@ function parseMounts(output) {
         // corner: a local device mount (file://) is Favorites territory, not Network; Places.js skips the inverse.
         if (uri.indexOf("file://") === 0)
             continue
+        // A phone is DEVICES territory the same way: its row is ui/js/Phones.js's, built from the
+        // volume block, and this line is gio's shadow GDaemonMount printed beside it. afc is the
+        // iPhone's own, whose root mount prints here rather than inside its volume block.
+        if (/^(mtp|gphoto2|afc):\/\//i.test(uri))
+            continue
         out.push({ label: Protocols.shareName(m[1], uri), uri: uri })
     }
     return out
@@ -36,6 +42,12 @@ function localPath(body) {
             return lines[i].substring("local path: ".length).trim()
     }
     return ""
+}
+
+// Issue 133 (mfilm77): no GVFS backend implements trash, so gio trash refuses every path under its FUSE folder.
+// Sample input: /run/user/1000/gvfs/smb-share:server=192.168.21.25,share=data/photos, where "smb-share:" names the mount.
+function trashable(path) {
+    return !/\/gvfs\/[a-z0-9-]+:/i.test(String(path || ""))
 }
 
 // Sample input: the operator's real bookmarks file, ui/js/Places.js "bookmarks" reads the same lines.
@@ -86,6 +98,24 @@ function normalize(uri) {
     return bareRoot ? stripped + "/" : stripped
 }
 
+// NETWORK shows on its discoveries, DEVICES on those plus its own; the deadline shows whatever each has.
+function railGroupsReady(networkDone, devicesDone, elapsedMs, deadlineMs) {
+    if (elapsedMs >= deadlineMs)
+        return { showNetwork: true, showDevices: true }
+    var showNetwork = networkDone === true
+    return { showNetwork: showNetwork, showDevices: showNetwork && devicesDone === true }
+}
+
+// A password may be given to any scheme here whose authority names a user.
+function credentialed(uri) {
+    return /^(smb|sftp|ftp|ftps|dav|davs):\/\/[^\/]*@/i.test(String(uri || ""))
+}
+
+// Try sftp keys before asking for a password.
+function keyless(uri) {
+    return /^sftp:\/\//i.test(String(uri || ""))
+}
+
 // PR #21: a live mount wins the rail row, and the operator's own bookmark label wins its name, or a
 // rename typed on a mounted share is written to the file and never drawn. Matched the way rebuild dedups.
 function railLabel(mount, marks) {
@@ -115,37 +145,29 @@ function sameEntry(x, y) {
     return x.path === y.path && x.label === y.label && x.group === y.group && x.kind === y.kind
         && x.uri === y.uri && x.device === y.device && x.mounted === y.mounted && x.glyph === y.glyph
         && x.size === y.size && x.editable === y.editable && x.removable === y.removable
+        && x.volumeMenu === y.volumeMenu
 }
 
 // Sample input: one rail entry as ui/DeviceMounts.qml and ui/NetworkMounts.qml build them,
 // {label:"128GB", group:"device", kind:"volume", device:"/dev/sda1", mounted:true, removable:true}.
-// A removable volume ejects and a mounted network share unmounts; every other rail row offers
-// neither and opens no menu. The kind is read here, never re-derived: the internal disk reads as
-// mounted too, the Dropbox row is a local folder the stock service owns, and a favourite is not a
-// mount. gio's -f is offered nowhere: forcing an unmount over an open write is how data is lost.
-// An internal drive is a volume row as well now, and it is the removable flag that keeps Eject off
-// it: a fixed disk is somewhere to browse, not something to pull out.
+// Rows come from ui/js/Menu.js kind R; gio's -f is offered nowhere, since forcing an unmount over an open write loses data.
 function railMenu(entry) {
-    if (!entry || !entry.mounted)
+    if (!entry)
         return []
-    if (entry.group === "device" && entry.kind === "volume" && entry.removable === true)
-        return [{ label: "Eject", action: "eject", glyph: "eject" }]
-    if (entry.group === "network" && entry.kind === "share")
-        return [{ label: "Unmount", action: "unmount", glyph: "eject" }]
-    return []
+    return Menu.railEntries(entry)
 }
 
-// What the rail's own right click opens: the release row above, then the two rows a saved place owns
-// whether or not anything mounted it, marked as a removal because forgetting a place trashes
-// nothing. ui/js/Eject.js reads railMenu and never this, so Ctrl+E still refuses an unmounted row.
+// A root-only remote mount covers its saved addressable paths; SMB shares remain path-specific.
+function addressMountCovers(liveUri, savedUri) {
+    var live = normalize(liveUri)
+    var saved = normalize(savedUri)
+    return /^(sftp|ftp|ftps|dav|davs):\/\/[^\/]+\/$/i.test(live)
+        && saved.length > live.length && saved.indexOf(live) === 0
+}
+
+// The rail's right click opens railMenu's rows; ui/js/Eject.js reads railMenu too, so Ctrl+E refuses an unmounted row.
 function rowMenu(entry) {
-    if (entry && entry.kind === "favourite") return [{ label: "Remove", action: "removeFavourite", glyph: "minus" }]
-    var rows = railMenu(entry)
-    if (entry && entry.group === "network" && entry.kind === "share" && entry.editable !== false) {
-        rows.push({ label: "Rename", action: "rename", glyph: "rename" })
-        rows.push({ label: "Remove", action: "remove", glyph: "minus" })
-    }
-    return rows
+    return railMenu(entry)
 }
 
 // The handle a chosen menu row carries back: a volume's device node, a share's uri, "" for a row
@@ -156,6 +178,8 @@ function railKey(entry) {
         return ""
     if (entry.group === "device" && entry.kind === "volume")
         return String(entry.device || "")
+    if (entry.group === "device" && entry.kind === "phone")
+        return String(entry.uri || "")
     if (entry.group === "network" && entry.kind === "share")
         return String(entry.uri || "")
     return ""
@@ -202,27 +226,11 @@ function raiseMenu(pane, sidebar) {
         pane.message(entry.label + " has nothing to eject or unmount.", false)
 }
 
-// The rail menu's chosen row, handed the row's key rather than its position: the rail rebuilds on
-// a five second poll, so the index the menu opened over can name a different row by now. A key
-// that no longer names a row does nothing, because the row it named has left the rail already.
-// Both Services re-check the kind themselves; this only resolves which row was meant, and the rail
-// itself owns the two rows that need no mount at all.
-function release(action, key, devices, mounts, sidebar) {
-    if (action === "eject") {
-        var volume = rowByKey(sidebar.deviceEntries, key)
-        if (volume >= 0)
-            devices.eject(volume)
-        return
-    }
-    var share = rowByKey(sidebar.networkEntries, key)
-    if (share < 0)
-        return
-    if (action === "unmount")
-        mounts.unmount(share)
-    else if (action === "rename")
-        sidebar.startRename(sidebar.placesEntries.length + share)
-    else if (action === "remove")
-        mounts.forget(sidebar.networkEntries[share].uri)
+// Sample input: (true, "a", "a", "b", "b") answers "skip", while (true, "a", "x", "b", "b") answers "rebuild".
+function pollDecision(listedOnce, polledListing, lastListing, mountinfoText, lastMountinfo) {
+    if (!listedOnce) return "none"
+    if (polledListing === lastListing && mountinfoText === lastMountinfo) return "skip"
+    return "rebuild"
 }
 
 // Sample input: the operator's own bookmarks file, favourites and network places in one list.

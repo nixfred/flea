@@ -1,17 +1,21 @@
 .import "../../ui/js/Search.js" as Search
 
 function run(check) {
-    check("a walk with matches names its count", Search.note(9, true, false), "9 found")
+    // Rule 6: a count that is still growing says so, beside the count.
+    check("a running walk with matches pairs the count with the state", Search.note(9, true, false), "9 found · still scanning")
+    check("and a finished one is the count alone", Search.note(9, false, false), "9 found")
+    check("and a four-figure find groups", Search.note(1204, true, false), "1,204 found · still scanning")
     check("a running walk with nothing yet says it is working", Search.note(0, true, false), "searching")
     check("a finished walk with nothing says done", Search.note(0, false, false), "done")
     check("a cancelled walk with nothing says stopped", Search.note(0, false, true), "stopped")
 
-    check("a running walk counts what it scanned", Search.statusLine(true, 12, 4120, 300), "Searching, 4,120 scanned")
-    check("a finished walk reports the whole scan", Search.statusLine(false, 0, 18204, 412), "18,204 scanned in 0.4 s")
+    // V7: the SearchFilter board's own status cell, the count beside the state that changes it.
+    check("a running walk pairs what it found with what it scanned",
+          Search.statusLine(true, 12, 4120, 300), "12 found · Searching, 4,120 scanned")
+    check("a finished walk reports what it found and how long it took",
+          Search.statusLine(false, 1, 18204, 412), "1 found in 0.4 s")
+    check("and nothing found still says so", Search.statusLine(false, 0, 18204, 412), "0 found in 0.4 s")
 
-    check("a short count is not grouped", Search.grouped(653), "653")
-    check("a thousand takes one separator", Search.grouped(4120), "4,120")
-    check("a million takes two", Search.grouped(1234567), "1,234,567")
 
     check("the home prefix reads as a tilde", Search.scope("/home/gm/Work/claude/flea", "/home/gm"), "~/Work/claude/flea")
     check("home itself is the bare tilde", Search.scope("/home/gm", "/home/gm"), "~")
@@ -29,8 +33,10 @@ function run(check) {
     check("with no home in the environment the pane searches where it stands",
           Search.scopeRoot("/d", ""), "/d")
 
-    check("a running walk offers cancel, open and reveal", Search.statusKeys(true), "esc cancels, enter opens, o reveals")
-    check("a finished walk offers only the way back", Search.statusKeys(false), "esc returns to the listing")
+    // The strip's own right edge, which the board draws as the pair esc really is from here.
+    check("the strip says esc stops the walk and then leaves", Search.wayOut(true), "esc cancels, then returns")
+    check("and once the walk is done esc only leaves", Search.wayOut(false), "esc returns")
+
 
     // The pointer's own contract: a double click on a result reveals it, and opens a row anywhere
     // else. ui/js/Tap.js asks this rather than deciding it, so the rule lives beside the reveal.
@@ -58,7 +64,8 @@ function run(check) {
             clearSelection: function () {},
             open: function (path) { this.opened += 1 },
             openWithoutHistory: function (path) { this.relisted = path },
-            backend: { search: function (path, query, hidden) { sent.push(path + "?" + query) } }
+            backend: { search: function (path, query, hidden) { sent.push(path + "?" + query) },
+                       askFsInfo: function () { sent.push("fsinfo") } }
         }
     }
     function press(code, text) { return { key: code, text: text, modifiers: Qt.NoModifier } }
@@ -70,7 +77,7 @@ function run(check) {
     check("a key that means nothing on the line is still consumed by it",
           Search.typeKey(press(Qt.Key_Left, ""), line) + "|" + line.searchQuery, "true|scr")
     Search.typeKey(press(Qt.Key_Return, ""), line)
-    check("enter commits the walk", line.searchMode + "|" + line.sent.join(","), "results|/d?scr")
+    check("enter commits the walk", line.searchMode + "|" + line.sent.join(","), "results|/d?scr,fsinfo")
     var abandoned = typing("scr")
     Search.typeKey(press(Qt.Key_Escape, ""), abandoned)
     check("escape abandons the line without re-listing, since no walk ran",
@@ -80,7 +87,7 @@ function run(check) {
     underHome.path = "/home/u/Downloads"
     Search.typeKey(press(Qt.Key_Return, ""), underHome)
     check("the walk is sent the home scope, and the pane takes it as its listing base",
-          underHome.sent.join(",") + "|" + underHome.path, "/home/u?scr|/home/u")
+          underHome.sent.join(",") + "|" + underHome.path, "/home/u?scr,fsinfo|/home/u")
     check("where the search was started from is remembered", underHome.searchFrom, "/home/u/Downloads")
     Search.close(underHome)
     check("leaving the results returns there, and never as a history entry",
@@ -118,7 +125,7 @@ function run(check) {
     Search.typeKey(press(Qt.Key_Tab, "\t"), here)
     Search.typeKey(press(Qt.Key_Return, ""), here)
     check("and the walk goes there instead of to home",
-          here.sent.join(",") + "|" + here.path, "/home/u/Downloads?scr|/home/u/Downloads")
+          here.sent.join(",") + "|" + here.path, "/home/u/Downloads?scr,fsinfo|/home/u/Downloads")
 
     var blank = typing("")
     Search.typeKey(press(Qt.Key_Return, ""), blank)

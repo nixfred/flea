@@ -1,10 +1,79 @@
 import QtQuick
+import Quickshell
+import Quickshell.Io
+import "." as Flea
+import "js/LocalSend.js" as LocalSendJs
 import "js/Menu.js" as Menu
 import "js/Ops.js" as Ops
 
 Loader {
     id: root
     required property var pane
+
+    // Directive 71: the only thing that knows about LocalSend, the way ui/Taildrop.qml is for the
+    // other one. The work is the backend's, which drives localsend-cli on a pty of its own.
+    readonly property alias localSend: localSend
+
+    Flea.LocalSend {
+        id: localSend
+        backend: root.pane.backend
+    }
+
+    Connections {
+        target: root.pane.backend
+        function onLocalSendPeers(peers, reason) {
+            localSend.answered(peers, reason)
+            root.pane.contextMenu().refreshProviderRows()
+        }
+        function onLocalSendSent(ok, reason) { root.pane.message(LocalSendJs.verdict(ok, reason), !ok) }
+    }
+
+    // A menu opened without a selection carries no paths, so a row action means the row under the
+    // cursor, which is what Copy path has always read and what the send rows read now.
+    function targets(paths) {
+        if (paths && paths.length) return paths
+        return root.pane.cursorRow ? [root.pane.join(root.pane.path, root.pane.cursorRow.n)] : []
+    }
+
+    // Actions rule 1: every shelf action is a `flea shelf` call, so the menu row makes the same one
+    // a drop onto the card makes and nothing here knows the pile's shape.
+    function shelve(paths) {
+        if (paths.length === 0) { root.pane.message("There is nothing to put on the shelf.", true); return }
+        shelver.count = paths.length
+        shelver.command = [Quickshell.env("FLEA_BIN") || "flea", "shelf", "add"].concat(paths)
+        shelver.running = true
+    }
+
+    Process {
+        id: shelver
+        property int count: 0
+        stderr: StdioCollector { waitForEnd: true }
+        onExited: function (code, status) {
+            if (code === 0) {
+                root.pane.message(shelver.count === 1 ? "Added it to the shelf."
+                                                      : "Added " + shelver.count + " items to the shelf.", false)
+                return
+            }
+            var said = shelver.stderr.text.trim().split("\n").pop().replace(/^flea: /, "")
+            root.pane.message(said.length > 0 ? said : "The shelf did not take that.", true)
+        }
+    }
+
+    function perform(action, menuId, paths) {
+        if (action.indexOf("runScript:") === 0) { Flea.Scripts.run(action.substring("runScript:".length), paths || []); return }
+        if (action.indexOf("localsend:") === 0) { LocalSendJs.send(root.pane, localSend, root.pane.backend.providers.localsend, action.substring("localsend:".length), root.targets(paths)); return }
+        if (action.indexOf("taildrop:") === 0) { root.pane.sendTaildrop(action.substring("taildrop:".length), root.targets(paths).length === 1 ? root.targets(paths)[0] : ""); return }
+        if (action === "addToShelf") { root.shelve(root.targets(paths)); return }
+        if (action === "sharelink") { root.pane.copyShareLink(paths && paths.length === 1 ? paths[0] : ""); return }
+        if (action === "copypath") { root.pane.opener.copyText(paths && paths.length ? paths[0] : root.pane.join(root.pane.path, root.pane.cursorRow.n)); return }
+        if (action.indexOf("col:") === 0) { ViewState.toggleColumn(action.substring("col:".length)); return }
+        root.pane.act(action, menuId, paths)
+    }
+    // A script's own non-zero exit is its last stderr line, said once in the status centre.
+    Connections {
+        target: Flea.Scripts
+        function onSaid(text, isError) { root.pane.message(text, isError) }
+    }
     anchors.fill: parent
     z: 2
     active: false
@@ -72,7 +141,7 @@ Loader {
     }
     function providersFinished() {
         providersRefreshing = false
-        pane.contextMenu().refreshProviderRows()
+        pane.contextMenu().providersSettled()
         if (pendingActivation && providerAction(pendingAction)) {
             providerValidated = true
             validateActivation()
@@ -210,6 +279,7 @@ Loader {
             root.dropboxRefreshWaiting = root.refreshingDropbox && root.pane.dropboxService
                 ? !root.pane.dropboxService.refreshDropbox(root.providerFacts) : false
             root.providerQueriesStarted = true
+            root.localSend.refresh((root.providerFacts.localsend || {}).installed === true)
             root.finishProviders()
         }
         function onChanged(path) { if (path === root.folder && root.item) root.item.sourceChanged() }
@@ -252,16 +322,21 @@ Loader {
             if (message.op === "snapshot") {
                 root.ready = message.ok === true && root.identity === root.pane.menuSelectionIdentity
                 if (!root.ready) {
+                    // A late snapshot answers no dismissed menu with nothing awaiting it; an open one keeps its refusal.
+                    var retired = message.ok === true && !root.pane.contextMenu().opened && !root.opened
+                            && !root.pendingAction && !root.pendingActivation
                     root.pendingAction = ""
                     root.pendingActivation = false
                     root.providersRefreshing = false
                     root.identity = ""
-                    root.pane.message(message.error || "Selected items changed; reopen the menu.", true)
+                    if (!retired)
+                        root.pane.message(message.error || "Selected items changed; reopen the menu.", true)
                 } else if (root.pendingAction) {
                     if (root.pendingActivation) root.validateActivation()
                     else root.show(root.pendingAction)
                 }
-                if (root.ready && root.pane.contextMenu().opened && root.pane.contextMenu().hasRow)
+                // Multi-selection has no registry: the backend refuses it, so discovery stays single-item.
+                if (root.ready && message.count === 1 && root.pane.contextMenu().opened && root.pane.contextMenu().hasRow)
                     // No installed flag: the flyout draws the registry alone, and asking for the
                     // whole catalogue here walked every applications directory on every right-click.
                     root.pane.backend.send({c: "menuaction", op: "applications", id: root.requestId})
@@ -308,14 +383,12 @@ Loader {
             root.pane.backend.send(message)
         }
         function onApproved(message) {
-            root.pane.backend.send({c: "transfer", op: message.action === "moveTo" ? "move" : "copy",
+            root.pane.collide.ask({c: "transfer", op: message.action === "moveTo" ? "move" : "copy",
                 menuId: message.id, dest: message.dest})
         }
         function onCreated(path) { root.pane.refresh(path); root.pane.message("File created.", false) }
         function onDeleted(message) {
-            var text = "Deleted " + message.deleted + " of " + message.count
-            if (message.failed) text += " · " + message.failed + " failed"
-            if (message.cancelled) text += " · cancelled"
+            var text = Ops.deletedLine(message)
             root.pane.operationResult(text, message.error || "", message.failed > 0)
             if (root.pane.path !== root.folder) return
             root.survivors = message.remaining || []

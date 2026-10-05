@@ -1,7 +1,10 @@
 import QtQuick
 import "." as Flea
+import "js/ClipMarks.js" as ClipMarks
 import "js/DirSizes.js" as DirSizes
+import "js/ExtThumbs.js" as ExtThumbs
 import "js/Filter.js" as Filter
+import "js/Scroll.js" as Scroll
 import "js/Tap.js" as Tap
 import "js/Thumbs.js" as Thumbs
 
@@ -12,6 +15,32 @@ ListView {
     property var pane: null
     property var menu: null
 
+    // Shared once, read plainly per row, so no delegate builds its own width or array.
+    property real rowWidth: Scroll.contentWidth(root.width, Theme.spacing.rowPaddingX)
+    // Dual mode hides mode and kind on top of the stored set; one array, never one per row.
+    property var rowHiddenCols: root.pane && root.pane.dualMode ? ["mode", "kind"].concat(ViewState.hiddenCols) : ViewState.hiddenCols
+    // Shared name budgets remove the per-row floor; Row keeps its local default for PickerList and drop targets.
+    readonly property bool listDual: root.pane && root.pane.dualMode ? true : false
+    readonly property real listMarkSlot: root.listDual ? Theme.markSize : Theme.iconSize
+    readonly property real listSizeWidth: root.listDual ? Theme.dualColumn.size : Theme.column.size
+    readonly property real listDateWidth: root.listDual ? Theme.dualColumn.date : Theme.column.date
+    // The same set Row.cols resolves, from the same width and hidden array, so the two cannot drift.
+    readonly property var listCols: root.listDual ? Theme.dualColumns(root.rowWidth, root.rowHiddenCols) : Theme.columns(root.rowWidth, root.rowHiddenCols, root.listDateWidth)
+    readonly property bool listModeShown: root.listCols ? !!root.listCols.mode : false
+    readonly property bool listSizeShown: root.listCols ? !!root.listCols.size : false
+    readonly property bool listDateShown: root.listCols ? !!root.listCols.date : false
+    readonly property bool listKindShown: root.listCols ? !!root.listCols.kind : false
+    // Matches Row.clipPx; the reserve keeps the glyph readable.
+    readonly property int listClipPx: 12
+    // Exact drawn geometry: the row less padding, mark, gap, columns, gaps and name-to-mode gap, in pixels then floored.
+    readonly property real nameSlotPlainPx: Math.max(0, root.rowWidth - 2 * Theme.spacing.rowPaddingX - root.listMarkSlot - Theme.spacing.gap - (root.listModeShown ? Theme.column.mode : 0) - (root.listSizeShown ? root.listSizeWidth : 0) - (root.listDateShown ? root.listDateWidth : 0) - (root.listKindShown ? Theme.column.kind : 0) - (root.listKindShown ? Theme.spacing.gap : 0) - ((root.listDateShown && !root.listDual) ? Theme.spacing.gap : 0) - ((root.listSizeShown && !root.listDual) ? Theme.spacing.gap : 0) - (root.listModeShown ? Theme.spacing.gap : 0))
+    readonly property real nameSlotClipPx: Math.max(0, root.nameSlotPlainPx - Theme.spacing.gap - root.listClipPx)
+    readonly property int nameBudgetPlain: Theme.bodyAdvance > 0 && root.nameSlotPlainPx > 0 ? Math.floor(root.nameSlotPlainPx / Theme.bodyAdvance) : -1
+    readonly property int nameBudgetClip: Theme.bodyAdvance > 0 && root.nameSlotClipPx > 0 ? Math.floor(root.nameSlotClipPx / Theme.bodyAdvance) : -1
+    property bool clipEmpty: ClipMarks.isEmpty(root.pane ? root.pane.clipboard : null)
+    // The short-circuit below is the only release while empty, so a cut of a large directory frees its lookup here.
+    onClipEmptyChanged: { if (root.clipEmpty) ClipMarks.release() }
+
     // Pane owns cursorIndex, thumbState and dirSizeState; List only computes what changed and hands it back.
     // Both ends of cursorClamped are view positions, not listing rows: under a filter they differ.
     signal cursorClamped(int first, int last)
@@ -20,7 +49,8 @@ ListView {
     signal dirSizesCancelled()
 
     focus: true
-    model: pane.shownTotal
+    // Hidden holds no delegates; an edit in flight keeps its own per RenameField.qml.
+    model: (root.visible || root.pane.renamingIndex >= 0) ? pane.shownTotal : 0
     clip: true
     cacheBuffer: Theme.fileRowHeight * pane.cacheRows
     boundsBehavior: Flickable.StopAtBounds
@@ -30,6 +60,14 @@ ListView {
 
     Flea.FastScrollHandler {
         parent: root
+        flickable: root
+    }
+
+    readonly property alias scrollBar: verticalScroll
+    Flea.ViewportScrollBar {
+        id: verticalScroll
+        parent: root
+        anchors { top: parent.top; right: parent.right }
         flickable: root
     }
 
@@ -50,17 +88,23 @@ ListView {
         // index is where the row is drawn; listingIndex is the row the backend numbers, and under a
         // filter the two are different. Everything that leaves this delegate takes the listing one.
         readonly property int listingIndex: Filter.at(root.pane.shown, index)
-        width: root.width
-        // FleaWindow.html and Search.html are the two surfaces that end a directory name with a slash.
-        dirSuffix: true
+        // The scroll lane stays clear so rows never reflow under the bar.
+        width: root.rowWidth
+        paintWidth: root.width
         row: root.pane.rowFor(listingIndex)
         cursor: listingIndex === root.pane.cursorIndex
         paneFocused: root.pane.paneFocused
         dualMode: root.pane.dualMode
-        hiddenCols: root.pane.dualMode ? ["mode", "kind"].concat(ViewState.hiddenCols) : ViewState.hiddenCols
+        hiddenCols: root.rowHiddenCols
+        // One Columns.set per List state, shared by every delegate; Row keeps its local default for PickerList and drop targets.
+        assignedCols: root.listCols
         hovered: hover.hovered
         thumb: root.thumbFor(listingIndex)
         selected: root.pane.isSelected(listingIndex)
+        // Empty short-circuits before the library, so no row calls it while the clipboard is empty.
+        clipMark: root.clipEmpty ? "" : ClipMarks.markForRow(root.pane, cell.row ? cell.row.n : "", root.pane.clipboard)
+        // Shared budgets: one floor per List state, not per row; drop rows keep local measured geometry in Row.
+        assignedNameBudget: cell.clipMark.length > 0 ? root.nameBudgetClip : root.nameBudgetPlain
         kindNames: root.pane.kindNames
         dirSize: root.dirSizeFor(listingIndex)
         // A filter paints its run the same way a search does; filtering below is what keeps the
@@ -100,41 +144,33 @@ ListView {
         }
     }
 
-    // States.dc.html "Filter active" draws this under the rows: caption type, muted, and gone the
-    // moment there is nothing to account for. A footer scrolls with the rows, which is where it sits.
-    footer: Item {
-        width: root.width
-        height: note.text.length > 0 ? Theme.chromeHeight : 0
 
-        Text {
-            id: note
-            anchors.fill: parent
-            anchors.leftMargin: Theme.spacing.rowPaddingX
-            anchors.rightMargin: Theme.spacing.rowPaddingX
-            verticalAlignment: Text.AlignVCenter
-            text: Filter.note(root.pane.shown, root.pane.rows.length, root.pane.filterQuery)
-            color: Theme.color.muted
-            font.family: Theme.font.family
-            font.pixelSize: Theme.font.caption
-            elide: Text.ElideRight
-            textFormat: Text.PlainText
-        }
+    // The listing keeps one row of bare ground at its end. SearchFilter rule 1 took the filter's
+    // sentence off this slot, and the ground under it is not the sentence: it is where a band starts
+    // and where the background menu is raised, and a listing whose last row sits flush on the bottom
+    // edge offers neither once it is scrolled to the end.
+    footer: Item {
+        width: root.rowWidth
+        height: Theme.chromeHeight
     }
 
     // Empty space under the last row belongs to the directory, not to a row, so it raises the
-    // background menu. indexAt says the point missed every delegate, which is what leaves a right
-    // click on a row to that row's own handler above.
+    // background menu. Tap.onBackground says the point missed every delegate, which is what leaves a
+    // right click on a row to that row's own handler above.
     TapHandler {
         acceptedButtons: Qt.RightButton
         onTapped: function (eventPoint) {
-            if (root.indexAt(root.contentX + eventPoint.position.x, root.contentY + eventPoint.position.y) < 0)
+            if (Tap.onBackground(root, eventPoint))
                 root.menu.openBackground(eventPoint.scenePosition)
         }
     }
 
     onContentYChanged: {
-        // The wheel moves the view and not the cursor, so the cursor follows the viewport here.
-        var first = Math.floor(root.contentY / Theme.fileRowHeight)
+        // Hidden geometry and a restore in flight move no shared state.
+        if (!root.visible || root.hiddenHeld)
+            return
+        // Qt shifts originY when expanded delegates collapse; row offsets start at that origin.
+        var first = Math.floor((root.contentY - root.originY) / Theme.fileRowHeight)
         var last = Math.min(root.pane.shownTotal - 1, first + root.pane.visibleRows - 1)
         if (root.pane.renamingIndex >= 0) {
             var range = root.visibleRange()
@@ -155,7 +191,7 @@ ListView {
     }
 
     function visibleRange() {
-        var fallback = Thumbs.viewport(root.contentY, Theme.fileRowHeight, root.pane.visibleRows, root.pane.shownTotal)
+        var fallback = Thumbs.viewport(root.contentY - root.originY, Theme.fileRowHeight, root.pane.visibleRows, root.pane.shownTotal)
         // The retained error caption expands one row; query actual delegates while it is present.
         if (root.pane.renamingIndex >= 0) {
             var first = root.indexAt(0, root.contentY)
@@ -164,6 +200,79 @@ ListView {
             return {first: first, last: last < 0 ? Math.min(root.count - 1, first + root.pane.visibleRows) : last}
         }
         return fallback
+    }
+
+    // Returning parks the view on the shared cursor once the reset rows land.
+    property bool hiddenHeld: false
+    // Last parked contentY and loop turns spent; only a value stable across turns ends the hold.
+    property real restoreY: -1
+    property int restoreTicks: 0
+    onVisibleChanged: {
+        if (!root.visible) {
+            coalesce.stop()
+            settle.stop()
+            root.hiddenHeld = true
+            root.restoreY = -1
+            root.restoreTicks = 0
+            return
+        }
+        if (root.hiddenHeld)
+            root.restoreCursorView()
+    }
+    onCountChanged: {
+        if (root.hiddenHeld && root.visible && root.count > 0)
+            root.restoreCursorView()
+    }
+    function restoreCursorView() {
+        // A queued turn arriving after the hold ended is stale.
+        if (!root.hiddenHeld || !root.visible)
+            return
+        if (!root.pane) {
+            root.hiddenHeld = false
+            return
+        }
+        // The model reset may still be landing; a later turn retries.
+        if (root.count === 0 && root.pane.shownTotal > 0) {
+            root.deferRestore()
+            return
+        }
+        // An empty listing and a filtered-away cursor have no view to park, so the hold ends here.
+        var view = Filter.viewOf(root.pane.shown, root.pane.cursorIndex)
+        if (root.count === 0 || view < 0) {
+            root.hiddenHeld = false
+            return
+        }
+        root.forceLayout()
+        root.positionViewAtIndex(view, ListView.Contain)
+        // Only a value stable across turns ends the hold; an optimistic position never releases it.
+        if (root.coversCursor(view) && root.contentY === root.restoreY) {
+            root.hiddenHeld = false
+            root.restoreY = -1
+            root.restoreTicks = 0
+            settle.restart()
+            return
+        }
+        root.restoreY = root.contentY
+        root.deferRestore()
+    }
+    // The parked check the return asserts through: the cursor row is inside the viewport.
+    function coversCursor(view) {
+        var top = root.originY + view * Theme.fileRowHeight
+        return root.contentY <= top + Theme.fileRowHeight && root.contentY + root.height >= top
+    }
+    // One more loop turn, with a deadlock guard that ends the hold rather than keeping it.
+    function deferRestore() {
+        if (!root.visible)
+            return
+        if (root.restoreTicks >= 60) {
+            root.hiddenHeld = false
+            root.restoreY = -1
+            root.restoreTicks = 0
+            settle.restart()
+            return
+        }
+        root.restoreTicks += 1
+        Qt.callLater(root.restoreCursorView)
     }
 
     // Pane's own open() and its Connections.onRows reach these two through the wrapper functions below.
@@ -177,7 +286,7 @@ ListView {
     // Resize and filter changes can change the visible work without moving contentY.
     Connections {
         target: root.pane
-        function onVisibleRowsChanged() { settle.restart() }
+        function onVisibleRowsChanged() { if (root.visible) settle.restart() }
         function onFilterQueryChanged() {
             if (!root.visible) return
             var work = Filter.cut({ask: [], drop: []}, root.pane.shown, root.pane.thumbState)
@@ -197,6 +306,8 @@ ListView {
     Connections {
         target: ViewState
         function onThumbnailModeChanged() { if (root.visible) settle.restart() }
+        // A hidden-then-shown Size column asks for the visible rows at that moment.
+        function onHiddenColsChanged() { if (root.visible) settle.restart() }
     }
 
     Timer {
@@ -212,8 +323,9 @@ ListView {
     function restartSettle() { settle.restart() }
 
     // Only the visible rows, only once each, and only after the list has stopped moving.
+    // Unknown storage holds until fsinfo names it, so the first screen never decodes as local.
     function requestThumbs() {
-        if (!root.visible || root.pane.listInFlight)
+        if (!root.visible || root.pane.listInFlight || !root.pane.storageKnown)
             return
         var view = root.visibleRange()
         // A filtered viewport covers a set and not a run, so the run it spans is what the planner
@@ -222,7 +334,9 @@ ListView {
         var work = Filter.cut(Thumbs.plan(root.pane.thumbState, root.pane.rows, root.pane.held, span.first, span.last, ViewState.thumbnailMode), root.pane.shown, root.pane.thumbState)
         work.drop = work.drop.filter(function (index) { return index !== root.pane.previewIndex })
         root.pane.backend.thumbcancel(work.drop)
-        root.pane.backend.thumb(work.ask)
+        // An off class still asks; the backend answers from the cache alone, see ui/js/ExtThumbs.js.
+        work.cacheOnly = ExtThumbs.cacheOnly(root.pane.storageClass, ViewState.preview)
+        root.pane.backend.thumb(work.ask, work.cacheOnly)
         // The short first settle latches to the fling debounce only once a request has actually gone out.
         if (work.ask.length > 0)
             settle.interval = root.pane.settleMs
@@ -241,6 +355,9 @@ ListView {
     function requestDirSizes() {
         if (!root.visible || root.pane.shownTotal === 0 || root.pane.listInFlight)
             return
+        // A hidden Size column or a network or phone folder draws no size, so it asks for no walk.
+        if (!DirSizes.wantsSizes("list", ViewState.hiddenCols, root.pane.storageClass, root.pane.storageKnown))
+            return
         // Thumbs.viewport() is reused: it takes no thumb-specific state, only geometry.
         var view = root.visibleRange()
         var span = Filter.span(root.pane.shown, view.first, view.last)
@@ -254,11 +371,10 @@ ListView {
 
     // Handle an empty held window explicitly before applying held-edge arithmetic.
     function requestIfDrifted() {
-        // A filter narrows rows the pane is already holding, so it can never scroll past them: no
-        // window request goes out while one stands, which is what "no round trip" means here.
-        if (root.pane.total === 0 || root.pane.shown !== null)
+        // No window while hidden, while a filter narrows rows already held, nor while a listing is out, whose windows are the directory asked for.
+        if (!root.visible || root.pane.total === 0 || root.pane.shown !== null || root.pane.listInFlight)
             return
-        var firstVisible = Math.floor(root.contentY / Theme.fileRowHeight)
+        var firstVisible = Math.floor((root.contentY - root.originY) / Theme.fileRowHeight)
         var lastVisible = firstVisible + root.pane.visibleRows
         if (root.pane.renamingIndex >= 0) {
             var range = root.visibleRange()

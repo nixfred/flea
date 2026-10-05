@@ -7,24 +7,99 @@
 
 // The byte sample for the item in flight. done is the count already finished, so it stays where it
 // was: a sample fills the item in, it does not complete it.
-function sampled(t, index, name, bytes, total) {
-    return Object.assign({}, t, {index: index, name: name, done: index, bytes: bytes, total: total})
+function sampled(t, index, name, bytes, total, scanned) {
+    // A sample carrying none must not unset the total an earlier one already brought.
+    var settled = scanned > 0 ? scanned : (t.scanned || 0)
+    return Object.assign({}, t, {index: index, name: name, done: index, bytes: bytes, total: total, scanned: settled})
 }
 
-// That item's own terminal line: it counts whole from here, and its byte sample is spent.
+// That item's own terminal line: it counts whole from here, and its byte sample is spent. What it
+// moved joins the running sum first, as the size the wire last named for it, or as the bytes it
+// reported when it never had a total, which is what a directory's own running count is. An item
+// that emitted no sample at all adds nothing, which undercounts a small file and never overcounts.
 function itemDone(t, index, name) {
-    return Object.assign({}, t, {index: index, name: name, done: index + 1, bytes: 0, total: 0})
+    var sampled = t.index === index ? (t.total > 0 ? t.total : t.bytes) : 0
+    return Object.assign({}, t, {index: index, name: name, done: index + 1, bytes: 0, total: 0,
+                                 moved: (t.moved || 0) + sampled})
+}
+
+// TransferCard rule 2: what the whole transfer has moved, the finished items plus the one in flight.
+function movedBytes(t) {
+    return (t.moved || 0) + (t.bytes || 0)
+}
+
+// Durability: the backend's last directory flush. Sample input:
+// {"t":"transferprogress","id":12,"index":0,"name":"","bytes":0,"total":0,"scanned":0,"phase":"writing","drive":"128GB"}
+// Every file is already complete, so the counted bytes stay and the sample is spent.
+function markWriting(t, drive) {
+    return Object.assign({}, t, {writing: true, drive: drive || "", name: "", bytes: 0, total: 0})
+}
+
+// Cancel is dimmed while the drive is being flushed, because every file is already complete.
+function cancelEnabled(t) {
+    return t.running === true && t.writing !== true
+}
+
+// TransferCard rule 1's line under the bar, as the pieces it is drawn from: a figure the card inks
+// in the foreground, or the muted words between them.
+function byteParts(t, rate) {
+    // The flush has no percentage because the kernel reports none: the confirmed bytes and the wait.
+    if (t.writing === true) {
+        var confirmed = movedBytes(t)
+        if (confirmed <= 0) {
+            return []
+        }
+        return [figure(Format.size(confirmed)), word((t.moving ? " moved" : " copied") + " · waiting for the drive")]
+    }
+    var moved = movedBytes(t)
+    if (moved <= 0) {
+        return []
+    }
+    var total = transferTotal(t)
+    var parts = [figure(Format.size(moved))]
+    if (total > 0) {
+        parts.push(word(" of "), figure(Format.size(total)))
+    } else {
+        parts.push(word(t.moving ? " moved" : " copied"))
+    }
+    parts.push(word(" · "), figure(Format.size(rate) + "/s"))
+    // Rule 3b: an estimate needs both a total and a rate, and a stall has neither to divide by.
+    if (total > 0 && rate > 0) {
+        // Clamped: the sweep and the copy count separately, so a file appended mid-copy can pass it.
+        parts.push(word(" · "), figure(Format.duration(Math.max(0, total - moved) / rate * 1000)), word(" left"))
+    }
+    return parts
+}
+
+function figure(text) {
+    return { text: text, figure: true }
+}
+
+function word(text) {
+    return { text: text, figure: false }
 }
 
 // The card's headline, the count with no name in it: the card gives the name a row of its own, and
 // ui/js/Ops.js builds the status bar's one-line form from this same string.
 function head(t) {
-    return (t.redo ? "Redoing " + t.redo + " " : t.moving ? "Moving " : "Copying ") + (t.index + 1) + " of " + t.n
+    // The flush names the drive instead of a count: it has no percentage to state.
+    if (t.writing === true)
+        return "Writing to " + (t.drive && t.drive.length > 0 ? t.drive : "the drive")
+    // An extract has no items to count, so it names its verb alone.
+    if (t.extract)
+        return "Extracting"
+    return (t.redo ? "Redoing " + t.redo + " " : t.moving ? "Moving " : "Copying ") + Format.count(t.index + 1) + " of " + Format.count(t.n)
 }
 
 // The card's second row: the item in flight and how big it is. total is 0 for a directory, whose
-// size is not known in advance without a sweep, so that one names itself and claims nothing more.
+// size is not known in advance without a sweep, so that one names itself and claims nothing more:
+// the running count it does have is the byte line's under the bar, and saying it twice is the thing
+// this canvas exists to stop.
 function fileLine(t) {
+    // The flush carries no file line: every file is already complete.
+    if (t.writing === true) {
+        return ""
+    }
     if (t.name.length === 0) {
         return ""
     }
@@ -34,11 +109,19 @@ function fileLine(t) {
 // The bar is the whole transfer, never the one file: done carries the items already finished and
 // the byte sample only fills in the one in flight. One large file is then its own byte bar, and
 // thirty thousand small ones step it once each instead of restarting it thirty thousand times.
+// t.total is the item in flight's, so it is the transfer's only when the transfer is that one
+// item. One directory is n === 1 with no total of its own, and the sweep is what answers for it.
+function transferTotal(t) {
+    return t.n === 1 && t.total > 0 ? t.total : (t.scanned || 0)
+}
+
+// The bar fills against the same total the line under it names, so the two always agree; with no
+// total yet it counts finished items plus the one in flight's share, as it always did.
 function fraction(t) {
     if (t.n <= 0) {
         return 0
     }
-    var part = t.total > 0 ? t.bytes / t.total : 0
-    var at = (t.done + part) / t.n
+    var total = transferTotal(t)
+    var at = total > 0 ? movedBytes(t) / total : (t.done + (t.total > 0 ? t.bytes / t.total : 0)) / t.n
     return at < 0 ? 0 : (at > 1 ? 1 : at)
 }

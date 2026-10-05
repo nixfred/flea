@@ -34,14 +34,33 @@ impl Cancellation {
     }
 }
 
+// PR 135, reverb256: the kernel does not sequence a flock release after close(2) completes, so a
+// thread could still see the record locked once the descriptor had closed, which is the intermittent
+// recovery failure they measured. The release lives inside the Arc, so it runs exactly once, at the
+// last holder, on whichever thread gets there, and always before the descriptor closes.
+#[derive(Debug)]
+pub struct LockedFile(File);
+impl Drop for LockedFile {
+    fn drop(&mut self) {
+        let _ = crate::uistore::unlock(&self.0);
+    }
+}
+impl std::ops::Deref for LockedFile {
+    type Target = File;
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
 #[derive(Debug)]
 pub struct Manifest {
-    file: Arc<File>,
+    file: Arc<LockedFile>,
     end: u64,
 }
+
 #[derive(Clone, Debug)]
 pub struct Records {
-    file: Arc<File>,
+    file: Arc<LockedFile>,
     start: u64,
     end: u64,
 }
@@ -50,8 +69,8 @@ impl Manifest {
         let file = OpenOptions::new().read(true).write(true).create_new(true).mode(0o600)
             .custom_flags(crate::oflags::O_NOFOLLOW).open(path)
             .map_err(|e| format!("Could not create recovery record {}: {}", path.display(), e))?;
-        file.lock().map_err(|e| format!("Could not lock recovery record: {}", e))?;
-        Ok(Self { file: Arc::new(file), end: 0 })
+        crate::uistore::lock_exclusive(&file).map_err(|e| format!("Could not lock recovery record: {}", e))?;
+        Ok(Self { file: Arc::new(LockedFile(file)), end: 0 })
     }
     pub fn open_inactive(path: &Path) -> Result<Option<Self>, String> {
         let file = crate::backend::regfile::open_if_regular(path, crate::oflags::O_NOFOLLOW)
@@ -59,14 +78,14 @@ impl Manifest {
         // Reopen the verified inode, so replay can append its durable completion marker without a path race.
         let file = OpenOptions::new().read(true).write(true).open(format!("/proc/self/fd/{}", file.as_raw_fd()))
             .map_err(|e| format!("Could not reopen recovery record for completion: {}", e))?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => return Err(format!("Could not lock recovery record: {}", error)),
+        match crate::uistore::try_lock_exclusive(&file) {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(error) => return Err(format!("Could not lock recovery record: {}", error)),
         }
         let metadata = file.metadata().map_err(|e| e.to_string())?;
         if !metadata.is_file() { return Err("Recovery record is not a regular file.".into()); }
-        Ok(Some(Self { file: Arc::new(file), end: metadata.len() }))
+        Ok(Some(Self { file: Arc::new(LockedFile(file)), end: metadata.len() }))
     }
     pub fn file(&self) -> &File { &self.file }
     pub fn sync(&self) -> Result<(), String> {
@@ -80,17 +99,39 @@ impl Manifest {
             .custom_flags(O_TMPFILE)
             .open(root)
             .map_err(|e| format!("Could not create anonymous Trash review in {}: {}", root.display(), e))?;
-        Ok(Self { file: Arc::new(file), end: 0 })
+        Ok(Self { file: Arc::new(LockedFile(file)), end: 0 })
     }
     pub fn len(&self) -> u64 { self.end }
     pub fn append(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.append_labelled("Trash review", bytes)
+    }
+    // The batched form of append_labelled: one framing per record but a single write for the batch, so a 100,000-file tree copy pays a hundred writes and not three hundred thousand.
+    pub fn append_all_labelled(&mut self, label: &str, records: &[&[u8]]) -> Result<(), String> {
+        let mut total = 0u64;
+        for bytes in records {
+            total = total.checked_add(bytes.len() as u64).and_then(|sum| sum.checked_add(2 * LENGTH_BYTES)).ok_or_else(|| format!("{label} is too large for its backing file."))?;
+        }
+        let end = self.end.checked_add(total).ok_or_else(|| format!("{label} is too large for its backing file."))?;
+        let mut batch = Vec::with_capacity(total as usize);
+        for bytes in records {
+            let length = bytes.len() as u64;
+            batch.extend_from_slice(&length.to_le_bytes());
+            batch.extend_from_slice(bytes);
+            batch.extend_from_slice(&length.to_le_bytes());
+        }
+        self.file.write_all_at(&batch, self.end).map_err(|e| format!("Could not write {label}: {}", e))?;
+        self.end = end;
+        Ok(())
+    }
+    // One framing for every manifest on this file: the copy manifest names its own component through this rather than hand-building lengths.
+    pub fn append_labelled(&mut self, label: &str, bytes: &[u8]) -> Result<(), String> {
         let length = bytes.len() as u64;
         let end = self.end.checked_add(length).and_then(|end| end.checked_add(2 * LENGTH_BYTES))
-            .ok_or("Trash review is too large for its backing file.")?;
+            .ok_or_else(|| format!("{label} is too large for its backing file."))?;
         self.file.write_all_at(&length.to_le_bytes(), self.end)
             .and_then(|_| self.file.write_all_at(bytes, self.end + LENGTH_BYTES))
             .and_then(|_| self.file.write_all_at(&length.to_le_bytes(), end - LENGTH_BYTES))
-            .map_err(|e| format!("Could not write Trash review: {}", e))?;
+            .map_err(|e| format!("Could not write {label}: {}", e))?;
         self.end = end;
         Ok(())
     }
@@ -105,6 +146,8 @@ impl Manifest {
 impl Records {
     pub fn start(&self) -> u64 { self.start }
     pub fn end(&self) -> u64 { self.end }
+    #[cfg(test)]
+    pub(crate) fn file_raw(&self) -> i32 { self.file.as_raw_fd() }
     fn length(&self, offset: u64) -> Result<u64, String> {
         let mut bytes = [0; LENGTH_BYTES as usize];
         self.file.read_exact_at(&mut bytes, offset)

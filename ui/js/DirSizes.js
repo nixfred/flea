@@ -68,7 +68,26 @@ function remember(state, row, bytes, partial, cap) {
     return { file: state.file, order: state.order }
 }
 
-// null covers both "never asked" and "asked and still waiting": the Size cell renders both as "-".
+// Sample input: ("network") trues, ("usb") falses.
+function isRemoteClass(storageClass) {
+    return storageClass === "network" || storageClass === "phone"
+}
+
+// Sample input: (["size"]) trues, ([]) falses.
+function sizeHidden(hiddenCols) {
+    return hiddenCols.indexOf("size") >= 0
+}
+
+// Sample input: ("list", [], "", true) trues, ("grid", [], "", true) falses.
+function wantsSizes(viewMode, hiddenCols, storageClass, storageKnown) {
+    if (!storageKnown) return false
+    if (isRemoteClass(storageClass)) return false
+    if (viewMode === "grid") return false
+    if (viewMode === "list" && sizeHidden(hiddenCols)) return false
+    return true
+}
+
+// null covers both "never asked" and "asked and still waiting": the Size cell renders both as the middle dot.
 function sizeFor(state, row) {
     var value = state.file[row]
     return value && typeof value === "object" ? value : null

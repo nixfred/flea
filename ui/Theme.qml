@@ -6,6 +6,7 @@ import QtQuick
 import qs.Commons
 import "js/Columns.js" as Columns
 import "js/Contrast.js" as Contrast
+import "js/Density.js" as Density
 import "js/Palette.js" as Palette
 import "js/TextSize.js" as TextSize
 
@@ -47,10 +48,15 @@ Singleton {
         readonly property color foreground: Color.foreground
         property color muted: Qt.darker(Color.foreground, 1.4)
         readonly property color accent: Color.accent
-        readonly property color error: Color.urgent
+        property color error: Color.urgent
+        // Error ink on the status bar's own surface, lifted there the way error is on the background.
+        property color errorOnSurface: Color.urgent
         property color surface: root.fallbackColor.surface
         property color symlink: root.fallbackColor.symlink
         property color executable: root.fallbackColor.executable
+        // The accent as a frame rather than as ink: on a card's own surface a frame is a graphical
+        // object, so it is lifted to 3:1 there the way symlink and executable are lifted on the list.
+        property color accentFrame: Color.accent
     }
 
     readonly property QtObject font: QtObject {
@@ -63,7 +69,8 @@ Singleton {
         readonly property int caption: root.overridden ? TextSize.caption(root.baseSize) : Style.font.caption
     }
 
-    readonly property real densityRatio: ViewState.density === "compact" ? 0.5 : ViewState.density === "comfortable" ? 1.5 : 1
+    // Tight drops the padding through Density040, Compact stays the default.
+    readonly property real densityRatio: Density.ratioFor(ViewState.density)
 
     readonly property QtObject spacing: QtObject {
         readonly property int hairline: Style.spacing.hairline
@@ -72,7 +79,10 @@ Singleton {
         readonly property int gap: Math.round(Style.spacing.rowGap * root.sizeRatio)
     }
 
-    // One glyph's advance in a monospace face is every glyph's advance, so this sizes every fixed column.
+    // One glyph's advance in a monospace face is every glyph's advance, so this sizes every fixed column; row names budget off bodyAdvance, grid captions off bodySmallAdvance.
+    readonly property real glyphAdvance: glyphMetrics.advanceWidth
+    // The body-face advance the row names draw at; Row and ColumnRow budget off this, never the caption one.
+    readonly property real bodyAdvance: bodyGlyphMetrics.advanceWidth
     TextMetrics {
         id: glyphMetrics
         font.family: Style.font.family
@@ -80,23 +90,37 @@ Singleton {
         text: "0"
     }
 
-    // The header and every row read these, so the two cannot drift apart.
+    // Trash draws its Deleted cell at body, and body/bodySmall is not one ratio across the size stops.
+    TextMetrics { id: bodyGlyphMetrics; font.family: Style.font.family; font.pixelSize: root.font.body; text: "0" }
+    readonly property real bodySmallAdvance: root.glyphAdvance // Same inputs as glyphMetrics, so one object serves both; grid tile budgets off this, never the body one.
+
+    // The header and every row read the stored widths so the two cannot drift apart; a drag previews in the header alone, ListColumns040 callout 1.
+    // Sample input: {"mode": "wide"} answers the measured width, {"size": -40} the same.
+    function storedWidth(key, fallback) {
+        var raw = ViewState.state.columnWidths ? ViewState.state.columnWidths[key] : undefined
+        var n = Columns.storedNumber(raw)
+        if (!(n >= 0))
+            return fallback
+        return Columns.clampListWidth(n)
+    }
     readonly property QtObject column: QtObject {
         // mode is a permanent column per the operator's ruling; Row and Header both read this width.
-        readonly property int mode: Math.round(root.modeChars * glyphMetrics.advanceWidth)
-        readonly property int size: Math.round(root.sizeChars * glyphMetrics.advanceWidth)
-        readonly property int date: Math.round(root.dateChars * glyphMetrics.advanceWidth)
+        readonly property int mode: root.storedWidth("mode", Math.round(root.modeChars * glyphMetrics.advanceWidth))
+        readonly property int size: root.storedWidth("size", Math.round(root.sizeChars * glyphMetrics.advanceWidth))
+        readonly property int date: root.storedWidth("date", Math.round(root.dateChars * glyphMetrics.advanceWidth))
+        // Trash's Deleted column: the same sixteen characters in the size that draws them, ceil because a rounded width elides at base 14.
+        readonly property int trashDate: Math.ceil(root.dateChars * bodyGlyphMetrics.advanceWidth)
         // The send picker's own, anchored the way kind below it is rather than counted in characters.
         readonly property int pickerDate: Math.round(root.pickerDateBaseWidth * root.font.bodySmall / root.pickerDateBaseBodySmall)
         // Kind text varies too much for a character count, so its base is a pixel width scaled by the same ratio bodySmall already is.
-        readonly property int kind: Math.round(root.kindBaseWidth * root.font.bodySmall / 12)
+        readonly property int kind: root.storedWidth("kind", Math.round(root.kindBaseWidth * root.font.bodySmall / 12))
         // Not a column: the floor under the name, which the four above drop one by one to protect.
         readonly property int nameMin: Math.round(root.nameMinChars * glyphMetrics.advanceWidth)
     }
 
     // Row height follows the font so it scales with omarchy display text size.
     readonly property int rowHeight: Math.round(font.bodySmall * lineBoxRatio) + 2 * spacing.rowPaddingY
-    readonly property int fileRowHeight: Math.round(font.bodySmall * lineBoxRatio) + 2 * Math.round(spacing.rowPaddingY * densityRatio)
+    readonly property int fileRowHeight: Density.rowHeight(Math.round(font.bodySmall * lineBoxRatio), spacing.rowPaddingY, ViewState.density)
     // The icon slot is the row's text line box, so an icon can never change the row height.
     readonly property int iconSize: root.rowHeight - 2 * root.spacing.rowPaddingY
     // A mark is sized from the type scale, never from its slot: 19, the canvas's own M.mark, is the row and menu one.
@@ -148,11 +172,14 @@ Singleton {
     // active segment already take, so a control under the keyboard reads at the same strength.
     readonly property real washHover: 0.08
     readonly property real washActive: 0.14
+    readonly property real disabledOpacity: 0.55
+    // An accent edge is 2px along a tall side and 3px flush along a short one, measured in Quickshell.
+    readonly property int accentEdge: 3
     // "rwxrwxrwx", Format.permissions is always exactly this wide.
     readonly property int modeChars: 9
     // "1000.0 kB": the SI ladder's tier-boundary rounding is one char wider than "999.9 kB".
     readonly property int sizeChars: 9
-    // "Yesterday, 23:16", the widest of Format.date's four forms.
+    // "2026-09-12 15:29", the one form Format.date prints.
     readonly property int dateChars: 16
     // SendPicker.html draws the chooser's date in an 80px slot, on a board whose base size is 14 and whose bodySmall is therefore 13.
     readonly property int pickerDateBaseWidth: 80
@@ -200,9 +227,7 @@ Singleton {
         readonly property int paneWidth: Math.round(root.space(350) * root.dialogWidthRatio)
         readonly property int railWidth: root.settings.panelWidth - root.settings.paneWidth
                                          - 2 * root.spacing.hairline
-        // A row's continuation line, its hint and the Display ruler, indents 52 on five settings boards; those are resolved pixels at base-size 14, whose bodySmall is 13, so space() would scale them twice.
-        readonly property int indent: Math.round(52 * root.font.bodySmall / 13)
-        // Settings.dc.html insets the rail column by 10 above its first row and below its last, on that same board.
+        // Settings.dc.html insets the rail column by 10 above its first row and below its last, in resolved pixels at base-size 14, whose bodySmall is 13, so space() would scale it twice.
         readonly property int railPaddingY: Math.round(10 * root.font.bodySmall / 13)
     }
 
@@ -211,23 +236,15 @@ Singleton {
         readonly property real fraction: 0.82
     }
 
-    // The column set a list of this width can draw, less the columns the user has hidden (qs
-    // module ViewState). ui/Header.qml and ui/Row.qml each call this with their own width, which
-    // anchoring keeps equal, so the header and the rows below it cannot disagree about which
-    // columns exist.
-    // dateWidth lets the picker afford the date at column.pickerDate, the width it actually draws.
-    function columns(width, hidden, dateWidth) {
-        return Columns.set(width, {
-            rowPaddingX: root.spacing.rowPaddingX,
-            gap: root.spacing.gap,
-            iconSize: root.iconSize,
-            nameMin: root.column.nameMin,
-            mode: root.column.mode,
-            size: root.column.size,
-            date: dateWidth === undefined ? root.column.date : dateWidth,
-            kind: root.column.kind
-        }, hidden);
-    }
+    // The columns a list of this width can draw, less the ones ViewState hides; Header and Row call
+    // it with their own anchored-equal width, so they cannot disagree, and dateWidth is the picker's.
+    readonly property var columnTokens: ({
+        rowPaddingX: root.spacing.rowPaddingX, gap: root.spacing.gap, iconSize: root.iconSize,
+        nameMin: root.column.nameMin, mode: root.column.mode,
+        size: root.column.size, date: root.column.date, kind: root.column.kind
+    })
+    function columnSet(dateWidth) { return dateWidth === undefined ? root.columnTokens : Object.assign({}, root.columnTokens, {date: dateWidth}); }
+    function columns(width, hidden, dateWidth) { return Columns.set(width, root.columnSet(dateWidth), hidden); }
 
     // The same set as one string, which is what the seam in ui/Ipc.qml compares across the two.
     function columnNames(width, hidden, dateWidth) {
@@ -277,7 +294,6 @@ Singleton {
             settingsPanelWidth: root.settings.panelWidth,
             settingsRailWidth: root.settings.railWidth,
             settingsPaneWidth: root.settings.paneWidth,
-            settingsIndent: root.settings.indent,
             settingsRailPaddingY: root.settings.railPaddingY
         };
         var lines = [];
@@ -293,11 +309,19 @@ Singleton {
         var surface = Palette.pick(found, Palette.SURFACE_KEYS, root.fallbackColor.surface);
         root.color.surface = surface;
         Color.loadColors(body);
-        root.color.muted = Palette.pick(found, ["muted"], Qt.darker(Color.foreground, 1.4));
+        // Measured over the 22 stock palettes in tests/js/themes.js: 20 set a muted under the 3:1 a
+        // caption needs, rose-pine's at 1.48, so it is lifted the way the two ladder colours below are.
+        root.color.muted = Contrast.ensureRatio(
+            Palette.pick(found, ["muted"], Qt.darker(Color.foreground, 1.4)), bg, 3);
+        root.color.accentFrame = Contrast.ensureRatio(Color.accent, surface, 3);
         root.color.symlink = Contrast.ensureRatio(
             Palette.pick(found, ["cyan", "color6"], root.fallbackColor.symlink), bg, 4.5);
         root.color.executable = Contrast.ensureRatio(
             Palette.pick(found, ["green", "color2"], root.fallbackColor.executable), bg, 4.5);
+        // Urgent is the palette's own red: seven of the 23 installed themes leave it under 4.5:1 on their own ground, so it is lifted the way symlink and executable are, and the three whose red carries no chroma at all (solitude, white, vantablack) fall back to the foreground, because a destructive row drawn in the same grey as an unavailable one reads as switched off rather than as dangerous.
+        root.color.error = Color.urgent.hsvSaturation > 0.2 ? Contrast.ensureRatio(Color.urgent, bg, 4.5) : String(Color.foreground);
+        // The status bar draws that same ink on the surface, where four themes land under 4.5.
+        root.color.errorOnSurface = Color.urgent.hsvSaturation > 0.2 ? Contrast.ensureRatio(Color.urgent, surface, 4.5) : String(Color.foreground);
         // A body that parsed to nothing left every role on its fallback, so the flag says so rather
         // than reporting that the read happened: text() returns "" for a file that is not there.
         root.ready = Palette.isPalette(found);
@@ -321,11 +345,9 @@ Singleton {
         root.reducedMotion = String(body).indexOf('"bool": false') >= 0;
     }
 
-    // blockLoading only gates calls to text()/data(); nothing forced that call before this fix,
-    // so a window could paint one frame against qs.Commons Color's own un-loaded fallback (blue)
-    // before onLoaded ever fired. Component.onCompleted calls text() itself, which blocks the
-    // Singleton's own construction, which runs before any window: colors.toml is applied before
-    // the first frame, and the later onLoaded is a harmless second, idempotent apply.
+    // blockLoading only gates calls to text()/data(), so a window could paint one frame against the
+    // un-loaded fallback; Component.onCompleted calls text() itself, which blocks this Singleton's
+    // construction before any window, and the later onLoaded is a harmless idempotent second apply.
     FileView {
         id: colorsFile
         path: root.stateDir + "/theme/colors.toml"
@@ -377,11 +399,9 @@ Singleton {
         }
     }
 
-    // Flea agrees with the compositor rather than carrying its own switch, the rule the corner
-    // radius already follows; FLEA_REDUCED_MOTION is the test override and skips the ask.
-    // Two forms below look like mistakes and are not: Quickshell.env returns null and not "" for
-    // an unset variable, so the guard is a truthiness test, and StdioCollector text is a property
-    // whose call throws. The query is Commons/Style.qml's own decoration:rounding shape.
+    // Flea agrees with the compositor rather than carrying a switch, and FLEA_REDUCED_MOTION is the
+    // test override; Quickshell.env answers null for an unset variable, so the guard is a truthiness
+    // test, StdioCollector text is a property whose call throws, and the query is Style.qml's own.
     Process {
         id: motionQuery
         running: !Quickshell.env("FLEA_REDUCED_MOTION")

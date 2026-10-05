@@ -26,6 +26,9 @@ function isRecent(location) {
 // the window's rows also carry are hidden here at every width rather than at some of them.
 var HIDDEN_COLS = ["mode", "kind"]
 
+// The chooser's s-step order: only columns it draws, since an order no header can mark has no feedback.
+var SORT_ORDERS = ["name", "size", "mtime"]
+
 // Every field defaulted, because a request that arrived short must still open a window.
 function request(text) {
     var read = {}
@@ -72,7 +75,7 @@ function subtitle(req) {
 function acceptLabel(req, count) {
     var base = req.accept.length > 0 ? req.accept : defaultAccept(req)
     if (req.multiple && count > 1) {
-        return base + " " + count
+        return base + " " + Format.count(count)
     }
     return base
 }
@@ -92,7 +95,7 @@ function statusLine(count, bytes) {
     if (count === 0) {
         return "0 selected"
     }
-    return count + " selected · " + Format.size(bytes)
+    return Format.count(count) + " selected · " + Format.size(bytes)
 }
 
 // The footer's right half, which says only the keys this mode actually answers.
@@ -116,6 +119,21 @@ function chips(req) {
     }
     out.push({ label: ALL_FILES, index: -1 })
     return out
+}
+
+// Room the path label always keeps, so a narrow window still names where the list stands.
+var CHIP_PATH_MIN = 96
+
+// Sample input: chipStripWidth(300, 400, 96) answers 204, chipStripWidth(300, 100, 96) answers 100.
+function chipStripWidth(free, chipsWidth, pathMin) {
+    if (!(free > 0) || !(chipsWidth > 0)) {
+        return 0
+    }
+    var keep = pathMin > 0 ? pathMin : 0
+    if (free <= keep) {
+        return 0
+    }
+    return Math.min(chipsWidth, free - keep)
 }
 
 // Which chip starts active: the caller's current_filter when it names one of them, else the first.
@@ -177,6 +195,36 @@ function validName(name) {
 
 // What both the strip and the status line say about a name validName() refuses, in ops.rs's words.
 var NAME_REFUSED = "a name cannot be empty, . or .. , or contain a separator"
+
+// A file double click marks the row when unmarked, then accepts; a multiple accept sends every mark.
+var DOUBLE_OPEN = "open"
+var DOUBLE_ACCEPT = "accept"
+var DOUBLE_MARK_ACCEPT = "markAccept"
+var DOUBLE_NONE = "none"
+
+// Sample input: sameTap("/a/b.txt", "/a/b.txt") answers true, sameTap("/a/b.txt", "/a/c.txt") answers false.
+function sameTap(firstPath, rowPath) {
+    return !!rowPath && rowPath === firstPath
+}
+
+// Sample input: doubleAction({mode:"open",multiple:false,directory:false}, {d:false}, "/a/b.txt", "/a/b.txt", []) answers "markAccept".
+function doubleAction(req, row, rowPath, firstPath, marks) {
+    if (!row) {
+        return DOUBLE_NONE
+    }
+    if (directory(row)) {
+        return DOUBLE_OPEN
+    }
+    // Save mode and folder requests keep their own rules, so a file double click changes nothing there.
+    if (req.mode === "save" || req.directory || req.mode === "savefiles") {
+        return DOUBLE_NONE
+    }
+    // The row path names the file, so a list rebuilt between the taps never sends another row.
+    if (!sameTap(firstPath, rowPath)) {
+        return DOUBLE_NONE
+    }
+    return marked(marks, rowPath) ? DOUBLE_ACCEPT : DOUBLE_MARK_ACCEPT
+}
 
 function join(dir, name) {
     return dir === "/" ? "/" + name : dir + "/" + name

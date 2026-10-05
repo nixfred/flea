@@ -49,7 +49,7 @@ function run(check) {
     check("a re-sort clears the selection, whose indices now name other files", reset.cleared, 1)
     check("a re-sort puts the cursor back on the first row", reset.cursor, 0)
 
-    // Size and Date Modified are orders the backend produces, so a click records them the way it
+    // Size and Modified are orders the backend produces, so a click records them the way it
     // records name: the mark, the caches, the selection and the cursor all move on the click.
     var size = pane("name", true)
     Sort.column(size, "size")
@@ -68,9 +68,9 @@ function run(check) {
 
     var date = pane("size", true)
     Sort.column(date, "mtime")
-    check("a click on Date Modified asks for mtime ascending, not the reverse it would inherit",
+    check("a click on Modified asks for mtime ascending, not the reverse it would inherit",
           date.sent.join(","), "sort mtime asc,window 0 200")
-    check("and the mark moves onto Date Modified", date.backend.sortBy + ":" + date.backend.sortDesc, "mtime:false")
+    check("and the mark moves onto Modified", date.backend.sortBy + ":" + date.backend.sortDesc, "mtime:false")
 
     // Mode is a label, not an order, so it cannot clear selection or send a request.
     var mode = pane("name", true)
@@ -139,4 +139,14 @@ function run(check) {
     Sort.next(stray)
     check("s from an order that is not in the list still lands on name",
           stray.sent.join(","), "sort name asc,window 0 200")
+
+    // A walk's rows are matches, so sorting them writes no folder sort.
+    var walk = pane("name", false)
+    walk.searchMode = "results"
+    walk.remembered = []
+    walk.backend.rememberFolderSort = function (folder, key, desc) { walk.remembered.push(folder + "|" + key) }
+    Sort.resort(walk, "size", false)
+    check("sorting a search walk still sorts and re-reads",
+          walk.sent.join(","), "sort size asc,window 0 200")
+    check("but writes no folder sort for its scope", walk.remembered.length, 0)
 }

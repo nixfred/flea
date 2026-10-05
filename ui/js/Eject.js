@@ -1,6 +1,7 @@
 .pragma library
 
 .import "Mounts.js" as Mounts
+.import "Protocols.js" as Protocols
 
 // Sample input: the lsblk --json body ui/js/Mounts.js "parseDevices" reads, taken again after
 // gio mount -e returned for /dev/sda1:
@@ -126,20 +127,70 @@ function sentence(v, label, others) {
     return { text: "Could not confirm " + label + " was ejected; do not unplug it yet.", isError: true }
 }
 
+// Only a releasable mounted row draws the mark in place of the square.
+// Sample input: {label:"NAS", group:"network", kind:"share", uri:"smb://h/data/", mounted:true}.
+function releasable(entry) {
+    if (!entry || entry.mounted !== true)
+        return false
+    if (entry.group === "device" && entry.kind === "volume")
+        return entry.removable === true
+    if (entry.group === "device" && entry.kind === "phone")
+        return true
+    if (entry.group === "network" && entry.kind === "share")
+        // Unmounting NFS needs root, so it draws no mark.
+        return Protocols.schemeOf(entry.uri) !== "nfs"
+    return false
+}
+
+// The one-click release mirrors the rows Mounts.railMenu offers.
+function releaseAction(entry) {
+    if (!releasable(entry))
+        return ""
+    if (entry.group === "device" && entry.kind === "phone")
+        return "unmountPhone"
+    return entry.group === "device" ? "eject" : "unmount"
+}
+
+// The release is picked by name, never by position. With showUnmounted on (the default
+// since 0.3.3) a volume row offers Open, Unmount, Eject, so rows[0] is the open and taking it
+// opens the stick instead of ejecting it; a phone row leads with Open the same way. Eject where
+// one is offered, otherwise the row's own unmount, "" when the rows hold no release at all.
+function releaseFromRows(rows) {
+    var list = rows || []
+    for (var i = 0; i < list.length; i++) {
+        if (list[i].action === "eject")
+            return "eject"
+    }
+    for (var j = 0; j < list.length; j++) {
+        if (list[j].action === "unmount" || list[j].action === "unmountVolume" || list[j].action === "unmountPhone")
+            return list[j].action
+    }
+    return ""
+}
+
 // Finder's Cmd+E with Cmd read as Ctrl: from the rail it releases the cursor row, from a listing the
 // removable volume the directory is inside, so the key can never release a volume the operator is
 // not looking at. The verdict is Mounts.railMenu's either way, off the lsblk poll, and the release
-// goes through the same releaseChosen a chosen menu row takes, carrying the row's key.
-function release(root, sidebar, fromRail) {
-    var entry = fromRail ? sidebar.entries[sidebar.cursorIndex] : Mounts.holding(sidebar.entries, root.path)
+// goes through the same releaseChosen a chosen menu row takes, carrying the row's key. A hidden rail
+// unloads the Sidebar with its poll, verdict state and releaseChosen, so there is nothing to read
+// and nothing to release through: the pane spins a transient DeviceMounts for one one-shot listing
+// (ui/PaneRail.qml), which completes through this same function with its own entries and
+// releaseChosen. A null rail therefore never answers from silence; it hands the key to that flow.
+function release(root, rail, fromRail) {
+    if (!rail) {
+        root.ejectHidden()
+        return
+    }
+    var entry = fromRail ? rail.entries[rail.cursorIndex] : Mounts.holding(rail.entries, root.path)
     if (!entry) {
         root.message("This is not inside a removable volume.", false)
         return
     }
     var rows = Mounts.railMenu(entry)
-    if (rows.length === 0) {
+    var pick = releaseFromRows(rows)
+    if (pick === "") {
         root.message(entry.label + " has nothing to eject or unmount.", false)
         return
     }
-    sidebar.releaseChosen(rows[0].action, Mounts.railKey(entry))
+    rail.releaseChosen(pick, Mounts.railKey(entry))
 }

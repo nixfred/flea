@@ -46,8 +46,7 @@ Item {
 
         signal pressed()
 
-        readonly property color ink: !control.available ? Theme.color.muted
-            : control.primary ? Theme.color.accent : Theme.color.foreground
+        readonly property color ink: control.available ? Theme.color.foreground : Theme.color.muted
 
         implicitWidth: control.glyph.length > 0 ? Theme.hitMin : caption.implicitWidth + 2 * Theme.spacing.gap
         implicitHeight: Theme.hitMin
@@ -66,18 +65,19 @@ Item {
         // one, and an unavailable control stays there: a frame may recede only when the control is
         // inert. ui/DialogButton.qml has drawn its own frames this way all along.
         readonly property color frame: control.available && control.primary
-            ? Theme.color.accent : Theme.color.muted
+            ? Theme.color.accentFrame : Theme.color.muted
 
         // The primary control carries its wash at rest, because it is the one action the request is
         // asking for; every other control earns one under the pointer or the keyboard.
         readonly property real wash: !control.available ? 0
-            : (control.activeFocus || press.pressed) ? Theme.washActive
-            : hover.hovered ? Theme.washHover
-            : control.primary ? Theme.washActive : 0
+            : (control.activeFocus || press.pressed || control.primary) ? Theme.washActive
+            : hover.hovered ? Theme.washHover : 0
+        // The wash carries the role now that the label does not, so only a primary's is accent.
+        readonly property color washInk: control.primary ? Theme.color.accent : Theme.color.foreground
 
         Rectangle {
             anchors.fill: parent
-            color: Qt.alpha(control.ink, control.wash)
+            color: Qt.alpha(control.washInk, control.wash)
             border.width: Theme.spacing.hairline
             border.color: control.frame
         }
@@ -254,7 +254,8 @@ Item {
             anchors.right: parent.right
             anchors.rightMargin: Theme.spacing.rowPaddingX
             anchors.verticalCenter: parent.verticalCenter
-            width: Math.min(chipRow.width, Math.max(0, (where.width - moves.width - 3 * Theme.spacing.rowPaddingX) / 2))
+            // The chips take room first and the path gives way through its anchor, keeping its minimum.
+            width: Picker.chipStripWidth(where.width - moves.width - 2 * Theme.spacing.rowPaddingX - 2 * Theme.spacing.gap, chipRow.width, Picker.CHIP_PATH_MIN)
             height: Theme.hitMin
             contentWidth: chipRow.width
             contentHeight: height
@@ -282,9 +283,7 @@ Item {
                         primary: modelData.index === root.picker.filterIndex
                         available: !root.picker.backendUnavailable && !root.picker.submitting
                         onActiveFocusChanged: if (activeFocus) types.reveal(this)
-                        // The chosen chip is accent ink over the accent wash, which makes it the same
-                        // control the Settings segmented chooser already draws; its recessed plane
-                        // went with the frames.
+                        // The chosen chip is the picker's own primary: a foreground label in an accent frame.
                         onPressed: root.chipChosen(modelData.index)
                     }
                 }

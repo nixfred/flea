@@ -39,7 +39,7 @@ fn a_dropbox_destination_replaced_before_worker_start_never_receives_the_source(
     sandbox.assert_contains(&source);
     sandbox.assert_contains(&destination);
     run_transfer_checked(1, true, vec![source.to_string_lossy().into()], destination.clone(),
-        Arc::new(AtomicBool::new(false)), tx, Some(vec![selected_source.clone()]), Some(captured.clone()));
+        Arc::new(AtomicBool::new(false)), tx, Some(vec![selected_source.clone()]), Some(captured.clone()), Policy::default());
     let results: Vec<_> = rx.iter().collect();
     assert!(results.iter().any(|message| matches!(message, OpMsg::Item {ok: false, err, ..} if err.contains("Dropbox account folder changed"))));
     assert!(results.iter().any(|message| matches!(message, OpMsg::TransferDone {ok: 0, failed: 1, entry, retry, ..}
@@ -53,7 +53,7 @@ fn a_dropbox_destination_replaced_before_worker_start_never_receives_the_source(
     sandbox.assert_contains(&source);
     sandbox.assert_contains(&destination);
     run_transfer_checked(2, true, vec![source.to_string_lossy().into()], destination.clone(),
-        Arc::new(AtomicBool::new(false)), tx, Some(vec![selected_source]), Some(captured));
+        Arc::new(AtomicBool::new(false)), tx, Some(vec![selected_source]), Some(captured), Policy::default());
     assert!(rx.iter().any(|message| matches!(message, OpMsg::TransferDone {ok: 0, failed: 1, retry, ..} if retry.is_empty())));
     assert_eq!(std::fs::read_to_string(source).unwrap(), "replacement");
     assert!(!destination.join("source").exists());
@@ -85,12 +85,14 @@ fn menu_workers_refuse_replacement_sources_before_helpers_or_mutations() {
     assert!(destination.is_absolute() && destination.starts_with(d.path()));
     let (tx, rx) = channel();
     crate::backend::archivereq::run_archive(1, true, vec![path.to_string_lossy().into()], "zip".into(), PathBuf::new(),
-        destination.clone(), &crate::backend::archive::Formats::from_tools(false, false), tx, Some(captured.clone()));
-    let OpMsg::Meta { line } = rx.recv().unwrap() else { panic!("archive terminal result"); };
+        destination.clone(), &crate::backend::archive::Formats::from_tools(false, false), tx, Some(captured.clone()),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let OpMsg::DetachedDone { line, .. } = rx.recv().unwrap() else { panic!("archive terminal result"); };
     assert!(line.contains(r#""ok":false"#) && line.contains("changed"));
     let (tx, rx) = channel();
-    crate::backend::archivereq::run_convert(2, 0, path.clone(), destination.clone(), false, tx, Some(captured));
-    let OpMsg::Meta { line } = rx.recv().unwrap() else { panic!("convert terminal result"); };
+    crate::backend::archivereq::run_convert(2, 0, path.clone(), destination.clone(), false, tx, Some(captured),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let OpMsg::DetachedDone { line, .. } = rx.recv().unwrap() else { panic!("convert terminal result"); };
     assert!(line.contains(r#""ok":false"#) && line.contains("changed"));
     assert!(!destination.exists());
     assert_eq!(std::fs::read_to_string(path).unwrap(), "replacement");
@@ -109,14 +111,12 @@ fn a_failed_item_line_carries_its_reason_escaped() {
 fn every_operation_line_matches_the_shape_the_operations_design_names() {
     assert_eq!(transferstarted_line(12, 2, false), r#"{"t":"transferstarted","id":12,"n":2,"moving":false}"#);
     assert_eq!(transferstarted_line(12, 2, true), r#"{"t":"transferstarted","id":12,"n":2,"moving":true}"#);
-    assert_eq!(
-        transferprogress_line(12, 0, "a.txt", 40000000, 120000000),
-        r#"{"t":"transferprogress","id":12,"index":0,"name":"a.txt","bytes":40000000,"total":120000000}"#
-    );
-    assert_eq!(
-        transferdone_line(12, 1, 1, 0, false, &[]),
-        r#"{"t":"transferdone","id":12,"ok":1,"failed":1,"skipped":0,"cancelled":false,"retryPaths":[]}"#
-    );
+    assert_eq!(transferprogress_line(12, 0, "a.txt", 40000000, 120000000, 0), r#"{"t":"transferprogress","id":12,"index":0,"name":"a.txt","bytes":40000000,"total":120000000,"scanned":0}"#);
+    // Directive 45: the batch's own total once its sweep settles, which is what the card's time left needs.
+    assert_eq!(transferprogress_line(12, 3, "photos", 40000000, 0, 8400000000), r#"{"t":"transferprogress","id":12,"index":3,"name":"photos","bytes":40000000,"total":0,"scanned":8400000000}"#);
+    assert_eq!(transferdone_line(12, 1, 1, 0, false, &[], false, ""), r#"{"t":"transferdone","id":12,"ok":1,"failed":1,"skipped":0,"cancelled":false,"retryPaths":[],"durable":false,"note":""}"#);
+    assert_eq!(transferdone_line(12, 1, 0, 0, false, &[], true, ""), r#"{"t":"transferdone","id":12,"ok":1,"failed":0,"skipped":0,"cancelled":false,"retryPaths":[],"durable":true,"note":""}"#);
+    assert_eq!(transferdone_line(12, 1, 0, 0, false, &[], false, crate::backend::durable::DIR_UNCONFIRMED), r#"{"t":"transferdone","id":12,"ok":1,"failed":0,"skipped":0,"cancelled":false,"retryPaths":[],"durable":false,"note":"copied, but the drive did not confirm the folder"}"#);
     assert_eq!(trashed_line(1, 0), r#"{"t":"trashed","ok":1,"failed":0}"#);
     assert_eq!(renamed_line(true, "/home/gm/new.txt"), r#"{"t":"renamed","ok":true,"path":"/home/gm/new.txt"}"#);
     assert_eq!(
@@ -309,13 +309,11 @@ fn one_failing_item_is_data_and_the_batch_carries_on() {
         "the plain failure cause retains its operation and item identity");
 }
 
-// A file with no permission bits answers EACCES to open(2) for every uid but root, so it forces
-// the failure a permission error would, in whichever order read_dir yields; what was copied stays.
+// The tree's only file has no permission bits (EACCES for every uid but root); a copied file beside it could land a ctime tick after the root, and undo keeps such a tree.
 #[test]
 fn a_copy_that_fails_short_of_a_cancel_records_the_partial_tree_and_undo_removes_it() {
     let d = TestDir::new("transferpartialtree");
     let src = d.dir("tree");
-    std::fs::write(src.join("good.txt"), "body").unwrap();
     let shut = src.join("shut.txt");
     std::fs::write(&shut, "body").unwrap();
     std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -326,12 +324,13 @@ fn a_copy_that_fails_short_of_a_cancel_records_the_partial_tree_and_undo_removes
     assert_eq!((ok, failed, cancelled), (0, 1, false));
     let partial = dest.join("tree");
     assert!(partial.is_dir(), "a failure that is not a cancel leaves what it copied");
-    assert_eq!(entry.steps, vec![undo::copied(&src, &partial, ItemIdentity::inspect(&src).unwrap()).unwrap()], "the partial tree is journaled");
+    assert!(matches!(&entry.steps[..], [Step::Copied { from, to, manifest: Some(_), .. }] if from == &src && to == &partial),
+        "the partial tree is journaled with what it created: {:?}", entry.steps);
     let mut j = Journal::new();
     j.push(entry);
     assert_eq!(j.undo().expect("undo"), "copy");
     assert!(!partial.exists(), "undo removed the partial tree");
-    assert!(src.join("good.txt").exists(), "and left the source alone");
+    assert!(shut.exists(), "and left the source alone");
 }
 
 #[test]
@@ -391,7 +390,7 @@ fn failed_transfer_retry_retains_only_original_sources_after_permission_repair()
     let mut matches = vec![(failed_source.to_str().unwrap(), 3), (collision.to_str().unwrap(), 4), (good.to_str().unwrap(), 5)];
     retain_retry(&retry, &mut matches);
     assert_eq!(matches, vec![(failed_source.to_str().unwrap(), 3)]);
-    let line = transferdone_line(9, 1, 1, 0, false, &retry);
+    let line = transferdone_line(9, 1, 1, 0, false, &retry, false, "");
     assert_eq!(crate::json::field_str_array(&line, "retryPaths"), [failed_source.to_string_lossy().into_owned()]);
     assert_eq!(std::fs::read_to_string(&collision).unwrap(), "occupied");
     assert_eq!(std::fs::read_to_string(dest.join("good.txt")).unwrap(), "copied");
@@ -403,6 +402,44 @@ fn failed_transfer_retry_retains_only_original_sources_after_permission_repair()
     retain_retry(&retry, &mut replaced);
     assert!(replaced.is_empty(), "a replacement at the failed name is never selected for retry");
     assert_eq!(std::fs::read_to_string(&failed_source).unwrap(), "replacement");
+}
+
+// A cancel landing on the last item still answers cancelled: the loop-top check has nothing left to see.
+#[test]
+fn a_cancel_on_the_last_item_answers_cancelled() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = TestDir::new("transfer-cancel-last");
+    let srcdir = d.dir("src");
+    let out = d.dir("out");
+    let only = srcdir.join("only.txt");
+    std::fs::write(&only, "body").unwrap();
+    // The rename fails ordinarily, so only the close's own cancelled answer can report the cancel.
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // The flag lands after the loop-top check of the last item, beside its ordinary failure.
+    let _cancel_at = CancelAtGuard::hold(0);
+    let (tx, rx) = channel();
+    run_transfer_checked(1, true, vec![only.to_string_lossy().into_owned()], out.clone(),
+        Arc::new(AtomicBool::new(false)), tx, None, None, Policy::default());
+    let mut lines = Vec::new();
+    let mut done = None;
+    for msg in rx.iter() {
+        match msg {
+            OpMsg::Item { index, ok, err, .. } => lines.push((index, ok, err)),
+            OpMsg::TransferDone { ok, failed, skipped, cancelled, entry, retry, .. } => {
+                done = Some((ok, failed, skipped, cancelled, entry.steps, retry));
+            }
+            _ => {}
+        }
+    }
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (ok, failed, skipped, cancelled, steps, retry) = done.expect("a terminal line");
+    assert!(cancelled, "the failure branch carries the close's cancelled answer");
+    assert_eq!((ok, failed, skipped), (0, 1, 0));
+    assert_eq!(lines, vec![(0, false, "permission denied".to_string())]);
+    assert_eq!(std::fs::read_to_string(&only).unwrap(), "body", "the refused source stays whole");
+    assert!(!out.join("only.txt").exists(), "and nothing landed");
+    assert_eq!(retry.len(), 1);
+    assert!(steps.is_empty(), "a refused move journals nothing");
 }
 
 #[test]

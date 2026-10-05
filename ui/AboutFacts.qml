@@ -1,27 +1,32 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "js/SettingsAbout.js" as About
 
 // Installed facts are read only when About is shown; each failed query keeps an explicit unknown.
 QtObject {
     id: root
     property bool active: false
     property bool loaded: false
-    property var facts: ({})
+    property var known: ({})
+    // What ui/js/SettingsAbout.js reads: the installed facts, with the updater's status and the default's claim beside them.
+    readonly property var facts: Object.assign({ update: UpdateCheck.status, handler: DefaultClaim.handler, claim: DefaultClaim.claim }, root.known)
     readonly property string binary: Quickshell.env("FLEA_BIN") || "flea"
 
     function setFact(key, value) {
-        var next = Object.assign({}, root.facts)
+        var next = Object.assign({}, root.known)
         next[key] = value
-        root.facts = next
+        root.known = next
     }
 
     onActiveChanged: {
+        // About opening is one of the updater's two automatic triggers; ui/js/Update.js decides whether the last answer stands.
+        if (root.active) UpdateCheck.checkIfDue()
         if (!root.active || root.loaded) return
         root.loaded = true
         version.running = true
         owner.running = true
-        handler.running = true
+        DefaultClaim.read()
     }
 
     property var versionQuery: Process {
@@ -46,61 +51,28 @@ QtObject {
         // Sample output: flea
         onExited: function (code) {
             if (code !== 0 || owner.answer.length === 0) {
-                root.setFact("source", "Unpackaged candidate")
+                root.setFact("source", About.installedFrom("", false))
                 root.setFact("package", "Not owned by a package")
                 return
             }
             packageVersion.command = ["pacman", "-Qi", owner.answer]
             packageVersion.running = true
-            repository.command = ["pacman", "-Si", owner.answer]
-            repository.running = true
         }
     }
     // -Qi rather than -Q: the same query carries the build date, and the Built row had nothing
     // setting it at all, so every box read "Not recorded in this build" whatever it was running.
-    // Sample output: "Name            : flea", "Version         : 0.1.6-1", "Build Date      : Tue Sep  8 01:52:54 2026".
+    // Its Validated By line is the signature src/update.rs tells OPR's flea from a local build by.
     property var packageQuery: Process {
         id: packageVersion
         environment: ({ LC_ALL: "C" })
         property string answer: ""
         stdout: StdioCollector { onStreamFinished: packageVersion.answer = this.text }
         onExited: function (code) {
-            if (code !== 0) return
-            var lines = packageVersion.answer.split("\n"), name = "", built = ""
-            for (var i = 0; i < lines.length; i++) {
-                var cut = lines[i].indexOf(":")
-                if (cut < 0) continue
-                var key = lines[i].substring(0, cut).trim(), value = lines[i].substring(cut + 1).trim()
-                if (key === "Name") name = value
-                else if (key === "Version") name = name.length > 0 ? name + " " + value : value
-                else if (key === "Build Date") built = value
-            }
-            if (name.length > 0) root.setFact("package", name)
-            if (built.length > 0) root.setFact("built", built)
+            // A package pacman cannot describe reads as unsigned, the way src/update.rs reads it.
+            var facts = About.packageFacts(code === 0 ? packageVersion.answer : "")
+            root.setFact("source", About.installedFrom(owner.answer, facts.signed))
+            if (facts.package.length > 0) root.setFact("package", facts.package)
+            if (facts.built.length > 0) root.setFact("built", facts.built)
         }
-    }
-    property var repositoryQuery: Process {
-        id: repository
-        environment: ({ LC_ALL: "C" })
-        property string answer: ""
-        stdout: StdioCollector { onStreamFinished: repository.answer = this.text }
-        // Sample output: Repository      : omarchy
-        onExited: function (code) {
-            if (code !== 0) { root.setFact("source", "Local package"); return }
-            var lines = repository.answer.split("\n")
-            for (var i = 0; i < lines.length; i++) {
-                if (lines[i].indexOf("Repository") !== 0) continue
-                var name = lines[i].substring(lines[i].indexOf(":") + 1).trim()
-                root.setFact("source", name === "omarchy" ? "Omarchy Package Repository" : name)
-                return
-            }
-        }
-    }
-    property var handlerQuery: Process {
-        id: handler
-        command: ["xdg-mime", "query", "default", "inode/directory"]
-        property string answer: ""
-        stdout: StdioCollector { onStreamFinished: handler.answer = this.text.trim() }
-        onExited: function (code) { if (code === 0 && handler.answer.length > 0) root.setFact("handler", handler.answer) }
     }
 }

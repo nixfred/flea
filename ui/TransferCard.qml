@@ -12,6 +12,8 @@ Item {
     property var transfer: Ops.emptyTransfer()
     property var owner: null
     readonly property var cancelItem: cancelButton
+    readonly property alias byteText: byteLine.text
+    readonly property alias headlineText: headline.text
     signal cancelRequested(int id)
 
     // Everything drawn comes off this sample rather than straight off the wire, because thirty
@@ -21,6 +23,18 @@ Item {
     // About four changes a second, which is what the eye reads. The backend's own byte heartbeat is
     // 150 ms (src/backend/opsreq.rs PROGRESS_EVERY), so a large file loses almost nothing here.
     readonly property int publishMs: 250
+    // TransferCard rule 3: the rate is what this card published over the last two seconds, so one
+    // slow beat cannot make it jump and a stall reads 0 B/s rather than a stale number.
+    readonly property int rateWindowMs: 2000
+    property var rateSamples: []
+    readonly property real rate: {
+        if (root.rateSamples.length < 2)
+            return 0
+        var first = root.rateSamples[0]
+        var last = root.rateSamples[root.rateSamples.length - 1]
+        var span = (last.at - first.at) / 1000
+        return span > 0 ? Math.max(0, (last.bytes - first.bytes) / span) : 0
+    }
 
     // Set the instant Cancel is pressed. src/backend/copyfile.rs stops the item in flight and
     // removes what it wrote, so this covers only the round trip to transferdone and the beat above.
@@ -43,20 +57,36 @@ Item {
     onTransferChanged: {
         // The first sample and the last are published at once; the ones between wait for the beat.
         if (!root.transfer.running || !root.shown.running || root.transfer.id !== root.shown.id) {
-            root.shown = root.transfer
+            root.publish()
         }
     }
-    onOwnerChanged: root.shown = root.transfer
+    onOwnerChanged: root.publish()
 
     Timer {
         interval: root.publishMs
         repeat: true
         running: root.transfer.running
-        onTriggered: root.shown = root.transfer
+        onTriggered: root.publish()
     }
 
+    // One published sample, and the window the rate is measured over: everything older than two
+    // seconds goes except the one sample just past the edge, which is what the span is taken from.
+    function publish() {
+        var fresh = root.transfer.id !== root.shown.id ? [] : root.rateSamples
+        root.shown = root.transfer
+        var now = Date.now()
+        var next = fresh.concat([{at: now, bytes: Transfer.movedBytes(root.shown)}])
+        var keep = 0
+        while (keep + 1 < next.length && now - next[keep + 1].at > root.rateWindowMs) {
+            keep += 1
+        }
+        root.rateSamples = next.slice(keep)
+    }
+
+    // Dimmed while the drive is being flushed: every file is already complete, so there
+    // is nothing left to stop.
     function cancel() {
-        if (!root.transfer.running || root.cancelling) return
+        if (!Transfer.cancelEnabled(root.transfer) || root.cancelling) return
         root.cancelRequested(root.transfer.id)
     }
 
@@ -116,6 +146,7 @@ Item {
 
         Text {
             width: parent.width
+            visible: text.length > 0
             text: Transfer.fileLine(root.shown)
             color: Theme.color.muted
             font.family: Theme.font.family
@@ -150,56 +181,44 @@ Item {
             }
         }
 
-        Item {
-            width: parent.width
-            height: cancelButton.height
+        // TransferCard rule 1: the bar's own caption, the figures the operator is waiting on inked
+        // in the foreground and the words between them muted. Rule 4 makes it absent, not blank,
+        // until the first byte sample lands, so the card is one row shorter until then.
+        Row {
+            id: byteLine
+            readonly property var parts: Transfer.byteParts(root.shown, root.rate)
+            // The drawn line as one string, so a driven case reads what the card says rather than a shot.
+            readonly property string text: byteLine.parts.map(function (p) { return p.text }).join("")
+            visible: byteLine.parts.length > 0
+            height: visible ? implicitHeight : 0
 
-            // The frame and paddings of ui/DialogButton.qml, which cannot carry the artifact's own
-            // x mark; a dingbat is not a mark in this language, so the mark is drawn as a glyph.
-            Rectangle {
-                id: cancelButton
-                visible: !root.cancelling
-                enabled: visible
-                Accessible.role: Accessible.Button
-                Accessible.name: "Cancel transfer"
-                Accessible.onPressAction: root.cancel()
-                anchors.right: parent.right
-                width: 2 * Theme.spacing.gap + mark.width + Theme.spacing.gap + label.implicitWidth
-                height: label.implicitHeight + Theme.spacing.gap + 2 * Theme.spacing.hairline
-                color: "transparent"
-                border.width: Theme.spacing.hairline
-                border.color: Theme.color.muted
+            Repeater {
+                model: byteLine.parts
 
-                Flea.Glyph {
-                    id: mark
-                    anchors.left: parent.left
-                    anchors.leftMargin: Theme.spacing.gap
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Theme.font.caption
-                    height: Theme.font.caption
-                    name: "x"
-                    color: Theme.color.muted
-                }
-
-                Text {
-                    id: label
-                    anchors.left: mark.right
-                    anchors.leftMargin: Theme.spacing.gap
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Cancel"
-                    color: Theme.color.muted
+                delegate: Text {
+                    required property var modelData
+                    text: modelData.text
+                    color: modelData.figure ? Theme.color.foreground : Theme.color.muted
                     font.family: Theme.font.family
-                    font.pixelSize: Theme.font.body
+                    font.pixelSize: Theme.font.caption
                     textFormat: Text.PlainText
                 }
+            }
+        }
 
-                HoverHandler { cursorShape: Qt.PointingHandCursor }
+        Item {
+            width: parent.width
+            height: cancelButton.implicitHeight
 
-                TapHandler {
-                    acceptedButtons: Qt.LeftButton
-                    gesturePolicy: TapHandler.ReleaseWithinBounds
-                    onTapped: root.cancel()
-                }
+            // Variant A: the card's Cancel is the one control every dialog draws.
+            Flea.DialogButton {
+                id: cancelButton
+                anchors.right: parent.right
+                visible: !root.cancelling
+                label: "Cancel"
+                available: Transfer.cancelEnabled(root.shown)
+                enabled: visible && Transfer.cancelEnabled(root.shown)
+                onActivated: root.cancel()
             }
 
             // The cancel is in and the item in flight is being finished rather than torn in half,

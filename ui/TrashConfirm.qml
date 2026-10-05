@@ -3,6 +3,7 @@ import qs.Commons
 import "." as Flea
 import "js/Format.js" as Format
 import "js/Keymap.js" as Keymap
+import "js/Ops.js" as Ops
 
 // The destructive choice must be reached deliberately; a reflexive Enter activates Cancel.
 FocusScope {
@@ -86,7 +87,7 @@ FocusScope {
                     Text {
                         id: title
                         width: parent.width - alertMark.width - parent.spacing
-                        text: root.snapshot.all ? "Empty Trash?" : "Delete " + root.snapshot.count + (root.snapshot.count === 1 ? " item" : " items") + " permanently?"
+                        text: root.snapshot.all ? "Empty Trash?" : "Delete " + Ops.items(root.snapshot.count) + " permanently?"
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                         color: Theme.color.foreground
@@ -96,8 +97,8 @@ FocusScope {
                 Text {
                     width: parent.width
                     text: root.snapshot.all
-                        ? root.snapshot.count + (root.snapshot.count === 1 ? " item, " : " items, ") + Format.size(root.snapshot.bytes || 0) + ". This deletes them from disk. " + Keymap.hintFor("undo") + " cannot undo it and the undo journal does not cover it."
-                        : "These " + root.scopeName + " are deleted from disk. This cannot be undone."
+                        ? Ops.deleteAllLine(root.snapshot.count, Format.size(root.snapshot.bytes || 0), Keymap.hintFor("undo"))
+                        : Ops.deleteScopeLine(root.scopeName, root.snapshot.count)
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                     color: Theme.color.foreground
@@ -107,24 +108,19 @@ FocusScope {
                     width: Math.min(parent.width, cancelButton.implicitWidth + dangerButton.implicitWidth + spacing)
                     anchors.right: parent.right
                     spacing: Theme.spacing.gap
-                    Rectangle { width: cancelButton.width; height: cancelButton.height; color: root.destructiveFocus ? "transparent" : Qt.alpha(Theme.color.accent, 0.14); Flea.DialogButton { id: cancelButton; label: "Cancel"; primary: !root.destructiveFocus; onActivated: root.cancel() } }
-                    Item {
+                    Flea.DialogButton {
+                        id: cancelButton
+                        label: "Cancel"
+                        primary: true
+                        focused: !root.destructiveFocus
+                        onActivated: root.cancel()
+                    }
+                    Flea.DialogButton {
                         id: dangerButton
-                        implicitWidth: dangerText.implicitWidth + 2 * Theme.spacing.gap
-                        height: Math.max(Theme.hitMin, dangerText.implicitHeight + Theme.spacing.gap)
-                        Rectangle { anchors.fill: parent; color: "transparent"; border.width: Theme.spacing.hairline; border.color: root.destructiveFocus ? Theme.color.error : Theme.color.muted }
-                        Text {
-                            id: dangerText
-                            anchors.centerIn: parent
-                            text: root.snapshot.all ? "Empty Trash" : "Delete"
-                            textFormat: Text.PlainText
-                            color: Theme.color.error
-                            font { family: Theme.font.family; pixelSize: Theme.font.body }
-                        }
-                        Accessible.role: Accessible.Button
-                        Accessible.name: dangerText.text
-                        Accessible.onPressAction: { root.destructiveFocus = true; root.activate() }
-                        TapHandler { onTapped: { root.destructiveFocus = true; root.activate() } }
+                        label: root.snapshot.all ? "Empty Trash" : "Delete"
+                        destructive: true
+                        focused: root.destructiveFocus
+                        onActivated: { root.destructiveFocus = true; root.activate() }
                     }
                 }
             }

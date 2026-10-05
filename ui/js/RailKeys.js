@@ -2,12 +2,41 @@
 
 .import "Eject.js" as Eject
 .import "Mounts.js" as Mounts
+.import "Nav.js" as Nav
 
 // What the rail does with a key, split out of Focus.js at its 300-line hard cap the same way
 // ui/js/PreviewKeys.js was: Focus.js decides which surface owns a key, and this is the surface.
 
+// A mount-first Enter's open has landed in root: focus follows it into the folder unless the user already left the rail.
+function landed(root, sidebar) {
+    if (!sidebar || !sidebar.focusOnOpen) return
+    sidebar.focusOnOpen = false
+    if (root.focusView === "rail") root.focusView = "list"
+}
+
+// A Sidebar open (opened or networkOpened): the pane that asked opens it, and a waiting claim lands; no pane spends the claim.
+function openFrom(pane, path, sidebar) {
+    if (!pane) { if (sidebar) sidebar.focusOnOpen = false; return }
+    Nav.openPlace(pane, path)
+    if (sidebar) landed(pane, sidebar)
+}
+
+// A mount that failed has no open to land, so its focus claim goes with the error.
+function messaged(sidebar, isError) {
+    if (isError && sidebar) sidebar.focusOnOpen = false
+}
+
+// The Trash row's accent reads as open, so the cursor shows only while Trash is open, focused, or menu-held.
+function trashCursor(trashActive, isCursor, focused, menuOnRow) {
+    if (trashActive) return true
+    if (!isCursor) return false
+    return Boolean(focused || menuOnRow)
+}
+
 // The rail answers ten of the key table's action names and ignores the rest while it has focus.
 function act(action, root, sidebar) {
+    // Any other rail key ends a mount-first open's claim on the focus.
+    sidebar.focusOnOpen = false
     switch (action) {
     case "cursorDown": sidebar.cursorIndex = Math.min(sidebar.entries.length - 1, sidebar.cursorIndex + 1); return
     case "cursorUp": sidebar.cursorIndex = Math.max(0, sidebar.cursorIndex - 1); return
@@ -15,8 +44,13 @@ function act(action, root, sidebar) {
     // they answered nothing here while every other cursor key worked.
     case "cursorFirst": sidebar.cursorIndex = 0; return
     case "cursorLast": sidebar.cursorIndex = Math.max(0, sidebar.entries.length - 1); return
-    // activate(), not a direct opened(path): a Network entry may need mounting first.
-    case "open": if (sidebar.entries.length > 0) sidebar.activate(sidebar.cursorIndex); return
+    // activate(), not opened(path), so a Network entry mounts first and focus follows the open into the folder.
+    case "open":
+        if (sidebar.entries.length === 0) return
+        // Focus follows the open only when it lands (ui/PaneRail.qml), since a mount or a share's gio info can take long or never answer.
+        sidebar.focusOnOpen = true
+        sidebar.activate(sidebar.cursorIndex)
+        return
     // Focus.LIST's own value, written out because importing Focus.js back would be a cycle.
     case "escape":
         if (root.statusBar && root.statusBar.escapePressed()) return

@@ -1,6 +1,23 @@
 // One buffer plus a span each, see AGENTS.md "Why the listing is an arena".
-use std::path::{Component, Path};
 use std::collections::HashMap;
+use std::path::{Component, Path};
+use std::sync::OnceLock;
+
+// One gio row's figures in 24 bytes, keyed by its span's name offset, which every sort carries along.
+#[derive(Clone, Copy, Debug)]
+pub struct GioMeta {
+    pub name_off: u32,
+    pub mode: u32,
+    pub size: u64,
+    pub mtime: i64,
+}
+
+// A symlink row's target keyed by the same offset; only symlink rows have one.
+#[derive(Clone, Debug)]
+pub struct GioTarget {
+    pub name_off: u32,
+    pub target: String,
+}
 
 // Enough that a normal directory never reallocates its way up from nothing.
 const NAME_RESERVE_BYTES: usize = 1 << 20;
@@ -18,6 +35,13 @@ pub struct Span {
 pub struct Listing {
     pub names: String,
     pub spans: Vec<Span>,
+    // Empty for readdir listings; the gvfs path fills it, so local rows pay no store.
+    pub gio_meta: Vec<GioMeta>,
+    pub gio_targets: Vec<GioTarget>,
+    // The directory's device once per listing; every cached row takes this dev.
+    pub base_dev: u64,
+    // The slow-pass answer, read from mountinfo once when a pass first crosses SLOW_PASS_MS.
+    thread_hint: OnceLock<bool>,
 }
 
 impl Listing {
@@ -26,7 +50,7 @@ impl Listing {
         names.reserve(NAME_RESERVE_BYTES);
         let mut spans = Vec::new();
         spans.reserve(SPAN_RESERVE);
-        Listing { names, spans }
+        Listing { names, spans, gio_meta: Vec::new(), gio_targets: Vec::new(), base_dev: 0, thread_hint: OnceLock::new() }
     }
 
     // corner: u32 offsets cap the arena at 4 GiB of names, see AGENTS.md.
@@ -49,6 +73,17 @@ impl Listing {
     // The seam: callers ask the listing; spans is public only because sort borrows it.
     pub fn is_dir(&self, i: usize) -> bool {
         self.spans[i].is_dir
+    }
+
+    // A cached gio row by its listing index: the span's offset binary searched in build order.
+    pub fn gio_for(&self, i: usize) -> Option<&GioMeta> {
+        let off = self.spans.get(i)?.off;
+        self.gio_meta.binary_search_by_key(&off, |m| m.name_off).ok().map(|at| &self.gio_meta[at])
+    }
+
+    // A cached symlink's target by the same offset; empty for every other row.
+    pub fn gio_target(&self, name_off: u32) -> &str {
+        self.gio_targets.binary_search_by_key(&name_off, |t| t.name_off).ok().map(|at| self.gio_targets[at].target.as_str()).unwrap_or("")
     }
 
     pub fn len(&self) -> usize {
@@ -78,6 +113,32 @@ fn relative_name<'a>(base: &Path, path: &'a Path) -> Option<&'a str> {
     let relative = path.strip_prefix(base).ok()?;
     if relative.components().any(|part| !matches!(part, Component::Normal(_))) { return None; }
     relative.to_str()
+}
+
+// Sample input: Some("vfat") answers false, Some("nfs") and None answer true.
+pub fn threaded_for_fstype(fstype: Option<&str>) -> bool {
+    !matches!(fstype, Some("vfat") | Some("exfat"))
+}
+
+impl Listing {
+    // Cached per listing, and only a slow pass asks: one stat of the folder and one mountinfo read, never a statfs.
+    pub fn threaded_cached(&self, base: &Path) -> bool {
+        *self.thread_hint.get_or_init(|| {
+            let dev = std::fs::metadata(base).map(|m| std::os::unix::fs::MetadataExt::dev(&m)).unwrap_or(0);
+            let body = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+            decide(dev, &body)
+        })
+    }
+
+    #[cfg(test)]
+    pub fn threaded_cached_with(&self, body: &str) -> bool {
+        *self.thread_hint.get_or_init(|| decide(self.base_dev, body))
+    }
+}
+
+// vfat and exfat stay serial; a device mountinfo does not name threads as today.
+fn decide(dev: u64, body: &str) -> bool {
+    threaded_for_fstype(super::mountinfo::fstype_for_dev(dev, body).as_deref())
 }
 
 #[cfg(test)]
@@ -156,5 +217,34 @@ mod tests {
         }
         assert_eq!(l.len(), 1000);
         assert_eq!(l.name(999), "file_999.txt");
+    }
+
+    #[test]
+    fn a_vfat_or_exfat_device_stays_serial_while_anything_else_threads() {
+        let vfat = "30 1 8:17 / /media/stick rw - vfat /dev/sdb1 rw\n";
+        let nfs = "31 1 0:45 / /media/nas rw - nfs nas:/share rw\n";
+        let fuse = "32 1 0:46 / /media/cloud rw - fuse.rclone remote: rw\n";
+        let mut l = Listing::new();
+        l.base_dev = 0x811;
+        assert!(!l.threaded_cached_with(vfat), "a slow vfat pass stays serial");
+        let mut l = Listing::new();
+        l.base_dev = 45;
+        assert!(l.threaded_cached_with(nfs), "a slow nfs pass keeps today's threads");
+        let mut l = Listing::new();
+        l.base_dev = 46;
+        assert!(l.threaded_cached_with(fuse), "a slow fuse pass keeps today's threads");
+        let l = Listing::new();
+        assert!(l.threaded_cached_with(vfat), "no match threads as today");
+    }
+
+    #[test]
+    fn only_vfat_and_exfat_fstypes_stay_serial() {
+        assert!(!threaded_for_fstype(Some("vfat")), "vfat stays serial");
+        assert!(!threaded_for_fstype(Some("exfat")), "exfat stays serial");
+        assert!(threaded_for_fstype(Some("fuse")), "fuse keeps today's threads");
+        assert!(threaded_for_fstype(Some("cifs")), "cifs keeps today's threads");
+        assert!(threaded_for_fstype(Some("nfs")), "nfs keeps today's threads");
+        assert!(threaded_for_fstype(Some("ext4")), "ext4 keeps today's threads");
+        assert!(threaded_for_fstype(None), "unknown keeps today's threads");
     }
 }

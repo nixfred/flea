@@ -46,12 +46,12 @@ pub fn count_lines(path: &Path) -> LineCount {
         }
         read += n as u64;
         if read >= LINE_BUDGET {
-            // Reaching the budget is not passing it: a file of exactly the budget has been read whole,
-            // and calling it partial dropped its last line and stated the count as a floor for nothing.
-            // One more byte asked for is what tells the two apart.
-            let mut one = [0u8; 1];
-            match f.read(&mut one) {
+            // Issue 96, nixfred: the budget bounds the work, it does not decide the answer. A file
+            // ending exactly at it was read whole, and one more byte is what tells the two apart.
+            let mut past = [0u8; 1];
+            match f.read(&mut past) {
                 Ok(0) => break,
+                // A byte back, or a read that failed, both leave this count a floor and not a total.
                 _ => return LineCount { lines: newlines, partial: true, failed: false },
             }
         }
@@ -71,18 +71,17 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
+    // Issue 96, nixfred: a file of exactly the budget had been read whole, and the early return
+    // reported the newline count as a floor, which for one unterminated line of a megabyte was zero.
     #[test]
-    fn a_file_of_exactly_the_budget_is_counted_whole_and_one_past_it_is_a_floor() {
+    fn a_file_of_exactly_the_budget_is_counted_whole() {
         let d = TestDir::new("linecountbudget");
-        // One line, ended by a newline on the budget's last byte: read whole, so nothing is a floor.
-        let mut body = vec![b'a'; LINE_BUDGET as usize - 1];
-        body.push(b'\n');
-        let c = count_lines(&d.file("whole.txt", std::str::from_utf8(&body).unwrap()));
-        assert_eq!((c.lines, c.partial, c.failed), (1, false, false), "the budget reached is not the budget passed");
-        // The same, then a chunk and a byte more the count never reads, so its one line is a floor.
-        body.resize(body.len() + 64 * 1024 + 1, b'b');
-        let c = count_lines(&d.file("over.txt", std::str::from_utf8(&body).unwrap()));
-        assert_eq!((c.lines, c.partial, c.failed), (1, true, false));
+        let exact = count_lines(&d.file("exact.txt", &"a".repeat(LINE_BUDGET as usize)));
+        let ended = count_lines(&d.file("ended.txt", &("a".repeat(LINE_BUDGET as usize - 1) + "\n")));
+        let over = count_lines(&d.file("over.txt", &"a".repeat(LINE_BUDGET as usize + 1)));
+        assert_eq!((exact.lines, exact.partial), (1, false), "a megabyte with no newline is one whole line");
+        assert_eq!((ended.lines, ended.partial), (1, false), "and so is one that ends on the budget");
+        assert_eq!((over.lines, over.partial), (0, true), "one byte more and the count is a floor again");
     }
 
     #[test]

@@ -54,6 +54,100 @@ function run(check) {
     RailKeys.act("cursorLast", railPane(), emptyRail)
     check("and an empty rail has no last row to reach", emptyRail.cursorIndex, 0)
 
+    // #181: opening a rail row hands focus to the folder it opened, and an empty rail opens nothing.
+    var opening = railPane()
+    opening.open = function (path) {}
+    // A local place opens inside activate, through the same opened signal PaneRail routes to openFrom.
+    var places = { entries: [home, volume], cursorIndex: 1, activated: [],
+                   activate: function (i) { this.activated.push(i); RailKeys.openFrom(opening, "/run/media/gm/USB", this) } }
+    RailKeys.act("open", opening, places)
+    check("Enter or l on a rail row opens that row", places.activated.join(","), "1")
+    check("and moves focus into the folder it opened", opening.focusView + "|" + places.focusOnOpen, "list|false")
+    var inert = railPane()
+    var nothing = { entries: [home, volume], cursorIndex: 1, activate: function (i) {} }
+    RailKeys.act("open", inert, nothing)
+    check("a row whose activate opens nothing leaves focus on the rail", inert.focusView, "rail")
+    var mounting = railPane()
+    var share = { label: "nas", group: "network", kind: "share", uri: "smb://nas/media", mounted: false }
+    var network = { entries: [home, share], cursorIndex: 1, activated: [], activate: function (i) { this.activated.push(i) } }
+    RailKeys.act("open", mounting, network)
+    check("an unmounted row starts its mount, keeps focus off the old folder, and asks the open to take it",
+          network.activated.join(",") + "|" + mounting.focusView + "|" + network.focusOnOpen, "1|rail|true")
+    RailKeys.act("cursorUp", mounting, network)
+    check("another rail key withdraws that claim", network.focusOnOpen, false)
+    // activate can answer before it returns: a mount that fails or opens at once must still spend or land the claim.
+    var quick = railPane()
+    var failsAtOnce = { entries: [home, share], cursorIndex: 1, activate: function (i) { RailKeys.messaged(this, true) } }
+    RailKeys.act("open", quick, failsAtOnce)
+    check("a mount that fails inside activate spends the claim and leaves focus on the rail",
+          failsAtOnce.focusOnOpen + "|" + quick.focusView, "false|rail")
+    var instant = railPane()
+    instant.open = function (path) {}
+    var opensAtOnce = { entries: [home, share], cursorIndex: 1,
+                        activate: function (i) { RailKeys.openFrom(instant, "/run/user/1000/gvfs/smb", this) } }
+    RailKeys.act("open", instant, opensAtOnce)
+    check("a mount that opens inside activate lands focus in the folder", opensAtOnce.focusOnOpen + "|" + instant.focusView, "false|list")
+    var mountedPane = railPane()
+    var mountedShare = { label: "nas", group: "network", kind: "share", uri: "smb://nas/media", path: "/run/user/1000/gvfs/smb", mounted: true }
+    mountedPane.open = function (path) {}
+    var ready = { entries: [home, mountedShare], cursorIndex: 1, activated: [], activate: function (i) { this.activated.push(i) } }
+    RailKeys.act("open", mountedPane, ready)
+    check("a mounted share whose gio info has not answered keeps focus on the rail and the claim armed",
+          mountedPane.focusView + "|" + ready.focusOnOpen + "|" + ready.activated.join(","), "rail|true|1")
+    RailKeys.openFrom(mountedPane, mountedShare.path, ready)
+    check("and focus follows when the share's open lands", mountedPane.focusView + "|" + ready.focusOnOpen, "list|false")
+    var waiting = railPane()
+    var claimed = { focusOnOpen: true }
+    RailKeys.landed(waiting, claimed)
+    check("the open that lands takes focus off the rail and spends the claim", waiting.focusView + "|" + claimed.focusOnOpen, "list|false")
+    var moved = pane()
+    moved.focusView = "preview"
+    var stale = { focusOnOpen: true }
+    RailKeys.landed(moved, stale)
+    check("a landing after the user left the rail moves nothing and still spends the claim", moved.focusView + "|" + stale.focusOnOpen, "preview|false")
+    var unclaimed = railPane()
+    RailKeys.landed(unclaimed, { focusOnOpen: false })
+    check("an open with no claim behind it leaves focus where it is", unclaimed.focusView, "rail")
+    var target = railPane()
+    target.opened = []
+    target.open = function (path) { this.opened.push(path) }
+    var mountRail = { focusOnOpen: true }
+    RailKeys.openFrom(target, "/run/user/1000/gvfs/mtp", mountRail)
+    check("a Sidebar open opens in the pane that asked and lands the claim there",
+          target.opened.join(",") + "|" + target.focusView + "|" + mountRail.focusOnOpen, "/run/user/1000/gvfs/mtp|list|false")
+    var orphan = { focusOnOpen: true }
+    RailKeys.openFrom(null, "/run/user/1000/gvfs/mtp", orphan)
+    check("an open with no pane opens nothing and spends the claim", orphan.focusOnOpen, false)
+    // The rail-hidden open: the window-long host answers with no Sidebar alive, so a null rail
+    // must open the folder without throwing and without moving any focus.
+    var hidden = railPane()
+    hidden.opened = []
+    hidden.open = function (path) { this.opened.push(path) }
+    RailKeys.openFrom(hidden, "/run/user/1000/gvfs/smb", null)
+    check("an open with no rail opens all the same and moves no focus",
+          hidden.opened.join(",") + "|" + hidden.focusView, "/run/user/1000/gvfs/smb|rail")
+    RailKeys.openFrom(null, "/run/user/1000/gvfs/smb", null)
+    check("an open with neither pane nor rail opens nothing and throws nothing", true, true)
+    RailKeys.landed(hidden, null)
+    check("a landing with no rail moves no focus and throws nothing", hidden.focusView, "rail")
+    RailKeys.messaged(null, true)
+    check("an error with no rail to claim spends nothing and throws nothing", true, true)
+    var failing = { focusOnOpen: true }
+    RailKeys.messaged(failing, false)
+    check("an ordinary message keeps the claim", failing.focusOnOpen, true)
+    RailKeys.messaged(failing, true)
+    check("a mount error spends the claim", failing.focusOnOpen, false)
+    var after = railPane()
+    after.opened = []
+    after.open = function (path) { this.opened.push(path) }
+    RailKeys.openFrom(after, "/home/user", failing)
+    check("a later open after the failed mount opens and leaves focus on the rail",
+          after.opened.join(",") + "|" + after.focusView, "/home/user|rail")
+    var nothing = railPane()
+    var bare = { entries: [], cursorIndex: 0, activated: [], activate: function (i) { this.activated.push(i) } }
+    RailKeys.act("open", nothing, bare)
+    check("an empty rail opens nothing and keeps focus", bare.activated.length + "|" + nothing.focusView, "0|rail")
+
     var railing = railPane()
     var mounted = rail([volume], 0)
     RailKeys.act("menu", railing, mounted)
@@ -71,7 +165,10 @@ function run(check) {
 
     // Finder's Cmd+E on the rail's own cursor row. The release goes through the same releaseChosen a
     // chosen menu row takes, carrying the row's key and not its index.
-    var stick = { label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", path: "/run/media/user/128GB", mounted: true, removable: true }
+    // RailAdditions rule 1's switch builds this row, so it carries the board's own menu
+    // (Open, Unmount, Eject) rather than the single Eject 0.2.1 drew: without volumeMenu the
+    // release below cannot tell rows[0] from the release.
+    var stick = { label: "128GB", group: "device", kind: "volume", device: "/dev/sda1", path: "/run/media/user/128GB", mounted: true, removable: true, volumeMenu: true }
     var ejecting = ejectPane("/home/user", [home, stick], 1)
     RailKeys.act("eject", ejecting, ejecting.sidebar)
     check("ctrl e in the rail ejects the cursor row by its key",
@@ -80,4 +177,28 @@ function run(check) {
     RailKeys.act("eject", favouriteRail, favouriteRail.sidebar)
     check("ctrl e on a favourite says why, and releases nothing",
           favouriteRail.sidebar.released.length + "|" + favouriteRail.said, "0|Home has nothing to eject or unmount.")
+    // The release is picked by name, never by position: a share offers only Unmount, and a
+    // phone leads with Open beside its Unmount the way a volume does, so rows[0] would open both.
+    var share = { label: "isos", group: "network", kind: "share", uri: "smb://example.com/isos/", path: "", mounted: true }
+    var onShare = ejectPane("/home/user", [home, share], 1)
+    RailKeys.act("eject", onShare, onShare.sidebar)
+    check("ctrl e on a share unmounts it rather than opening it",
+          onShare.sidebar.released.join(","), "unmount:smb://example.com/isos/")
+    var phone = { label: "Pixel", group: "device", kind: "phone", uri: "mtp://Google_Pixel_7_1A2B/", path: "", mounted: true }
+    var onPhone = ejectPane("/home/user", [home, phone], 1)
+    RailKeys.act("eject", onPhone, onPhone.sidebar)
+    check("ctrl e on a phone unmounts it rather than opening it",
+          onPhone.sidebar.released.join(","), "unmountPhone:mtp://Google_Pixel_7_1A2B/")
+
+    // Leaving Trash takes the accent cursor off its row: unfocused with no menu is dark.
+    check("leaving Trash takes the accent cursor off the Trash row",
+          RailKeys.trashCursor(false, true, false, false), false)
+    check("the Trash row keeps the cursor while the rail has focus",
+          RailKeys.trashCursor(false, true, true, false), true)
+    check("the Trash row keeps the cursor while its own rail menu is open",
+          RailKeys.trashCursor(false, true, false, true), true)
+    check("the Trash row keeps the cursor while Trash is open",
+          RailKeys.trashCursor(true, true, false, false), true)
+    check("a rail menu on another row leaves this one dark",
+          RailKeys.trashCursor(false, false, false, true), false)
 }
