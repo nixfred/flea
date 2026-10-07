@@ -18,16 +18,28 @@ function pane() {
         searchMode: "",
         // The selection ui/js/Tap.js reads before it decides what a right click means.
         picked: [],
+        contexts: [],
         // Only tappedMiddle asks what kind of row it landed on; the listing's own taps never do.
         rowFor: function () { return null },
         commitOpenRename: function () { if (this.renamingIndex >= 0) this.did.push("commitRename") },
         selectedIndices: function () { return this.picked },
         clearSelection: function () { this.picked = []; this.did.push("clearSelection") },
-        selectOnly: function (i) { this.picked = [i]; this.cursor = i; this.did.push("selectOnly") },
-        setCursor: function (i) { this.cursor = i; this.did.push("setCursor") },
+        selectOnly: function (i, context) {
+            this.picked = [i]
+            this.cursor = i
+            this.did.push("selectOnly")
+            this.contexts.push(context)
+        },
+        setCursor: function (i, context) {
+            this.cursor = i
+            this.did.push("setCursor")
+            this.contexts.push(context)
+        },
         toggleSelectAt: function (i) { this.cursor = i; this.did.push("toggleSelect") },
         extendSelectionTo: function (i) { this.cursor = i; this.did.push("extendSelect") },
-        act: function (action) { this.did.push(action) }
+        act: function (action) { this.did.push(action) },
+        cancelled: 0,
+        cancelSlowClick: function () { this.cancelled += 1 }
     }
 }
 
@@ -43,7 +55,7 @@ function eventPoint() {
 // The table's press column, turned back into the three things a TapHandler actually reports.
 function press(text) {
     return {
-        button: text.indexOf("right") >= 0 ? Qt.RightButton : Qt.LeftButton,
+        button: text.indexOf("right") >= 0 ? Qt.RightButton : text.indexOf("middle") >= 0 ? Qt.MiddleButton : Qt.LeftButton,
         taps: text.indexOf("x2") >= 0 ? 2 : 1,
         modifiers: (text.indexOf("ctrl") >= 0 ? Qt.ControlModifier : 0)
                  | (text.indexOf("shift") >= 0 ? Qt.ShiftModifier : 0)
@@ -80,6 +92,12 @@ function driveListing(row) {
     // A result is an ordinary listing row; what makes it one is the mode the pane is in.
     if (row.row === "result")
         sink.searchMode = "results"
+    if (p.button === Qt.MiddleButton) { // A new tab needs a whole pane, so only the joined path is driven.
+        var entry = row.row === "file" ? { n: "a.txt" } : { n: "sub", d: true }
+        var joined = Tap.tabTarget(entry, "/pane", { join: function (b, n) { return b + "/" + n } })
+        if (joined !== (row.row === "file" ? "" : "/pane/sub")) return "joined " + joined
+        return joined ? "openTab" : "nothing"
+    }
     if (p.button === Qt.RightButton) {
         var raised = menu()
         Tap.tappedMenu(2, eventPoint(), sink, raised)
@@ -124,14 +142,14 @@ function countWhere(where) {
 function run(check) {
     var rows = Keymap.POINTER
     // The denominator first: an empty table would pass every loop below by having nothing in it.
-    check("the pointer table reached the tests at all", rows.length, 20)
-    check("the table declares the listing's clicks", countWhere("listing"), 10)
+    check("the pointer table reached the tests at all", rows.length, 25)
+    check("the table declares the listing's clicks", countWhere("listing"), 12)
     check("the table declares the middle column's own click", countWhere("column"), 1)
-    check("the table declares the neighbour columns' clicks", countWhere("neighbour"), 4)
-    check("the table declares the rail's clicks", countWhere("rail"), 2)
-    // Issue 20's back button belongs to no row, so it is declared against the window itself and
-    // ui/WindowBody.qml is what carries it; nothing here can press it and tests/ui.sh does, with ydotool.
-    check("the table declares the window's own buttons", countWhere("window"), 1)
+    check("the table declares the neighbour columns' clicks", countWhere("neighbour"), 5)
+    check("the table declares the rail's clicks", countWhere("rail"), 3)
+    // Issue 20's side buttons belong to no row, so they are declared against the window itself and
+    // ui/WindowBody.qml is what carries them; nothing here can press them and tests/ui.sh does, with ydotool.
+    check("the table declares the window's own buttons", countWhere("window"), 2)
     // Issue 45's crumbs are ui/ChromeBar.qml's own targets, above the listing and not in it, so
     // driveListing has nothing to press for them either; the same tests/ui.sh case clicks one.
     check("the table declares the chrome path's clicks", countWhere("chrome"), 2)
@@ -159,9 +177,9 @@ function run(check) {
                   driveNeighbour(rows[i]), rows[i].does)
         }
     }
-    check("every listing row of the table was driven", drivenListing, 10)
+    check("every listing row of the table was driven", drivenListing, 12)
     check("every middle column row of the table was driven", drivenColumn, 1)
-    check("every neighbour row of the table was driven", drivenNeighbour, 4)
+    check("every neighbour row of the table was driven", drivenNeighbour, 5)
 
     // The operator's own defect, stated as the thing that must never come back: a single left click
     // reached act("open") on any row, in every view, before 2026-09-02.
@@ -170,6 +188,7 @@ function run(check) {
     check("one left tap opens nothing", single.did.indexOf("open"), -1)
     check("and it does move the cursor to the row it landed on", single.cursor, 4)
     check("and it marks only that row", single.selectedIndices().join(","), "4")
+    check("and a left click hands context 0", single.contexts.join(","), "0")
     single.picked = [1, 2, 3]
     Tap.tapped(4, 1, Qt.NoModifier, single)
     check("a plain tap replaces every old mark with its one row", single.selectedIndices().join(","), "4")
@@ -190,6 +209,21 @@ function run(check) {
         Tap.tapped(4, t, Qt.NoModifier, triple)
     check("a third tap does not open a second time",
           triple.did.filter(function (v) { return v === "open" }).length, 1)
+
+    // The first tap already moved the listing, so a second tap never opens again.
+    var single = pane()
+    single.singleClick = true
+    Tap.tapped(4, 1, Qt.NoModifier, single)
+    check("single-click opens on the first tap", single.did.join(","), "selectOnly,open")
+    Tap.tapped(4, 2, Qt.NoModifier, single)
+    check("and its second tap adds nothing, since the first already moved the listing",
+          single.did.join(","), "selectOnly,open")
+    var singleTriple = pane()
+    singleTriple.singleClick = true
+    for (var s = 1; s <= 3; s++)
+        Tap.tapped(4, s, Qt.NoModifier, singleTriple)
+    check("and three taps still open exactly once",
+          singleTriple.did.filter(function (v) { return v === "open" }).length, 1)
 
     // A tap on a search result takes you to the file rather than launching it, which is
     // ui/js/Search.js activateAction's whole job, and the operator's 2026-09-11 ruling is that the
@@ -268,6 +302,7 @@ function run(check) {
     Tap.tappedMenu(6, eventPoint(), menued, raised)
     check("right click moves the cursor to the row under the pointer", menued.cursor, 6)
     check("and opens the menu at the pointer, not at the row", raised.at, "7,9")
+    check("and a right click hands context 0", menued.contexts.join(","), "0")
     check("and opens nothing", menued.did.indexOf("open"), -1)
 
     // The operator's own defect, stated as the thing that must never come back: rows 1 to 3 selected,

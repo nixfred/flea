@@ -1,4 +1,5 @@
 .import "../../ui/js/Search.js" as Search
+.import "../../ui/js/RecentMode.js" as RecentMode
 
 function run(check) {
     // Rule 6: a count that is still growing says so, beside the count.
@@ -64,11 +65,18 @@ function run(check) {
             clearSelection: function () {},
             open: function (path) { this.opened += 1 },
             openWithoutHistory: function (path) { this.relisted = path },
+            // Mirrors ui/Pane.qml restoreRecentSort, so a walk from Recent restores through it.
+            restoreRecentSort: function () { RecentMode.restoreSort(this) },
             backend: { search: function (path, query, hidden) { sent.push(path + "?" + query) },
                        askFsInfo: function () { sent.push("fsinfo") } }
         }
     }
     function press(code, text) { return { key: code, text: text, modifiers: Qt.NoModifier } }
+    var delLine = typing("")
+    Search.typeKey(press(Qt.Key_Delete, "\u007f"), delLine)
+    check("DEL types nothing into search", delLine.searchQuery, "")
+    Search.typeKey(press(Qt.Key_E, "e"), delLine)
+    check("a letter still types into search", delLine.searchQuery, "e")
     var line = typing("scr")
     Search.typeKey(press(Qt.Key_E, "e"), line)
     check("a printable key extends the query", line.searchQuery, "scre")

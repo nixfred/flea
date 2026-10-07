@@ -5,6 +5,7 @@ import "js/DirSizes.js" as DirSizes
 import "js/ExtThumbs.js" as ExtThumbs
 import "js/Filter.js" as Filter
 import "js/Scroll.js" as Scroll
+import "js/ScrollOff.js" as ScrollOff
 import "js/Tap.js" as Tap
 import "js/Thumbs.js" as Thumbs
 
@@ -13,6 +14,7 @@ ListView {
     id: root
 
     property var pane: null
+    readonly property bool fileDragActive: dragSession.Drag.active
     property var menu: null
 
     // Shared once, read plainly per row, so no delegate builds its own width or array.
@@ -25,7 +27,7 @@ ListView {
     readonly property real listSizeWidth: root.listDual ? Theme.dualColumn.size : Theme.column.size
     readonly property real listDateWidth: root.listDual ? Theme.dualColumn.date : Theme.column.date
     // The same set Row.cols resolves, from the same width and hidden array, so the two cannot drift.
-    readonly property var listCols: root.listDual ? Theme.dualColumns(root.rowWidth, root.rowHiddenCols) : Theme.columns(root.rowWidth, root.rowHiddenCols, root.listDateWidth)
+    readonly property var listCols: root.pane && root.pane.recentMode.length > 0 ? Theme.columns(root.rowWidth, root.rowHiddenCols, root.listDateWidth, true, root.listDual) : root.listDual ? Theme.dualColumns(root.rowWidth, root.rowHiddenCols) : Theme.columns(root.rowWidth, root.rowHiddenCols, root.listDateWidth)
     readonly property bool listModeShown: root.listCols ? !!root.listCols.mode : false
     readonly property bool listSizeShown: root.listCols ? !!root.listCols.size : false
     readonly property bool listDateShown: root.listCols ? !!root.listCols.date : false
@@ -49,6 +51,7 @@ ListView {
     signal dirSizesCancelled()
 
     focus: true
+    keyNavigationEnabled: false
     // Hidden holds no delegates; an edit in flight keeps its own per RenameField.qml.
     model: (root.visible || root.pane.renamingIndex >= 0) ? pane.shownTotal : 0
     clip: true
@@ -111,11 +114,14 @@ ListView {
         // ordinary columns, because these rows are still this directory's own and not walk results.
         searchQuery: root.pane.searchMode.length > 0 ? root.pane.searchQuery : root.pane.filterQuery
         filtering: root.pane.shown !== null
+        // Sidebar040: Recent splits its path into Name and the fixed Location column.
+        recenting: root.pane.recentMode.length > 0
         renaming: listingIndex === root.pane.renamingIndex
         renamePane: root.pane
         // -1 is also what Filter.at answers for a stale delegate, so an idle list must never light one.
         dropTarget: dragSession.dropIndex >= 0 && listingIndex === dragSession.dropIndex
         dropCopying: dragSession.dragCopy
+        dropLinking: dragSession.dragLink
 
         onRenameCommitted: function (newName) { root.pane.commitRename(newName) }
         onRenameAbandoned: root.pane.renamingIndex = -1
@@ -128,12 +134,23 @@ ListView {
         TapHandler {
             id: tap
             enabled: !cell.renaming
-            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+            // A press held past the interval must not fire while the button is
+            // still down on a row about to be dragged; the release still arms.
+            onPressedChanged: if (pressed) root.pane.pressSlowClick()
             onTapped: function (eventPoint, button) {
-                if (button === Qt.RightButton)
+                if (button === Qt.MiddleButton)
+                    Tap.tappedTab(root.pane.rowFor(listingIndex), root.pane.path, root.pane)
+                else if (button === Qt.RightButton)
                     Tap.tappedMenu(listingIndex, eventPoint, root.pane, root.menu)
-                else
+                else {
+                    var wasSole = root.pane.slowClickWasSole(listingIndex)
                     Tap.tapped(listingIndex, tap.tapCount, tap.point.modifiers, root.pane)
+                    // The slow click renames on the pane's timer; a double click opens through tapped() above instead.
+                    if (tap.tapCount === 2) root.pane.cancelSlowClick()
+                    else if (tap.tapCount === 1 && Tap.onName(cell.nameItem(), cell, eventPoint.position, false)) root.pane.armSlowClick(listingIndex, tap.point.modifiers, dragSession.Drag.active, wasSole)
+                    else root.pane.cancelSlowClick()
+                }
             }
         }
 
@@ -143,8 +160,6 @@ ListView {
             row: cell.row
         }
     }
-
-
     // The listing keeps one row of bare ground at its end. SearchFilter rule 1 took the filter's
     // sentence off this slot, and the ground under it is not the sentence: it is where a band starts
     // and where the background menu is raised, and a listing whose last row sits flush on the bottom
@@ -169,15 +184,18 @@ ListView {
         // Hidden geometry and a restore in flight move no shared state.
         if (!root.visible || root.hiddenHeld)
             return
+        // The cursor follows the bounded view, silent while that view did not move.
+        var at = Scroll.bounded(root.contentY, root.originY, root.contentHeight, root.height)
         // Qt shifts originY when expanded delegates collapse; row offsets start at that origin.
-        var first = Math.floor((root.contentY - root.originY) / Theme.fileRowHeight)
+        var first = Math.floor((at - root.originY) / Theme.fileRowHeight)
         var last = Math.min(root.pane.shownTotal - 1, first + root.pane.visibleRows - 1)
         if (root.pane.renamingIndex >= 0) {
             var range = root.visibleRange()
             first = range.first
             last = range.last
         }
-        if (last >= first && root.pane.selectionBand === null) {
+        if (last >= first && root.pane.selectionBand === null && at !== root._clampAt) {
+            root._clampAt = at
             root.cursorClamped(first, last)
         }
         root.menu.close()
@@ -204,6 +222,8 @@ ListView {
 
     // Returning parks the view on the shared cursor once the reset rows land.
     property bool hiddenHeld: false
+    // The bounded view last emitted; a bounce holds it, so the cursor stays put.
+    property var _clampAt
     // Last parked contentY and loop turns spent; only a value stable across turns ends the hold.
     property real restoreY: -1
     property int restoreTicks: 0
@@ -281,6 +301,22 @@ ListView {
         interval: root.pane.coalesceMs
         repeat: false
         onTriggered: root.requestIfDrifted()
+    }
+
+    // The cursor keeps three rows of context above and below while scrolling; every cursor move routes through here.
+    function showCursor(view, context) {
+        var rowH = Theme.fileRowHeight
+        // The pointer case answers in pixels in the originY space, where rows start; a cut row moves just enough to show whole.
+        if (context === 0) {
+            var top = view * rowH
+            var rel = ScrollOff.containY(top, rowH, root.contentY - root.originY, root.height)
+            root.contentY = Math.max(root.originY, Math.min(root.contentHeight - root.height + root.originY, rel + root.originY))
+            return
+        }
+        var rel = root.contentY - root.originY
+        var to = ScrollOff.keyY(ScrollOff.fullyVisible(root.height, rowH), view, root.pane.shownTotal, context, rowH, rel, root.height, root.contentHeight)
+        if (to !== rel)
+            root.contentY = root.originY + to
     }
 
     // Resize and filter changes can change the visible work without moving contentY.

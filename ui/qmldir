@@ -5,18 +5,37 @@ singleton Scripts 1.0 Scripts.qml
 singleton ViewState 1.0 ViewState.qml
 singleton UpdateCheck 1.0 UpdateCheck.qml
 singleton DefaultClaim 1.0 DefaultClaim.qml
+singleton SettingsMetrics 1.0 SettingsMetrics.qml
 Backend 1.0 Backend.qml
 CheckBox 1.0 CheckBox.qml
-ChromeAction 1.0 ChromeAction.qml
 ChromeBar 1.0 ChromeBar.qml
 ChromeButton 1.0 ChromeButton.qml
 ChromeModes 1.0 ChromeModes.qml
 ColumnsArea 1.0 ColumnsArea.qml
 ColumnPane 1.0 ColumnPane.qml
 ColumnRow 1.0 ColumnRow.qml
+CountedWorker 1.0 CountedWorker.qml
 Crumb 1.0 Crumb.qml
 PreviewColumn 1.0 PreviewColumn.qml
 PreviewLines 1.0 PreviewLines.qml
+PreviewMarkdown 1.0 PreviewMarkdown.qml
+MarkdownSource 1.0 MarkdownSource.qml
+MarkdownRemote 1.0 MarkdownRemote.qml
+MarkdownPane 1.0 MarkdownPane.qml
+MarkdownText 1.0 MarkdownText.qml
+MarkdownPictures 1.0 MarkdownPictures.qml
+MarkdownImages 1.0 MarkdownImages.qml
+MarkdownMathsText 1.0 MarkdownMathsText.qml
+MarkdownQuote 1.0 MarkdownQuote.qml
+MarkdownList 1.0 MarkdownList.qml
+MarkdownBlocks 1.0 MarkdownBlocks.qml
+MarkdownBlockView 1.0 MarkdownBlockView.qml
+MarkdownTable 1.0 MarkdownTable.qml
+MarkdownTableScroll 1.0 MarkdownTableScroll.qml
+MarkdownTableWheel 1.0 MarkdownTableWheel.qml
+MarkdownFigure 1.0 MarkdownFigure.qml
+singleton FigureService 1.0 FigureService.qml
+FigureStore 1.0 FigureStore.qml
 PreviewPdf 1.0 PreviewPdf.qml
 PreviewSwap 1.0 PreviewSwap.qml
 PreviewImage 1.0 PreviewImage.qml
@@ -29,11 +48,13 @@ Divider 1.0 Divider.qml
 EscapeHint 1.0 EscapeHint.qml
 ContextMenu 1.0 ContextMenu.qml
 KeymapSheet 1.0 KeymapSheet.qml
+KeymapSheetResult 1.0 KeymapSheetResult.qml
 SettingsPanel 1.0 SettingsPanel.qml
 SettingsPane 1.0 SettingsPane.qml
 SettingsRail 1.0 SettingsRail.qml
 SettingsRow 1.0 SettingsRow.qml
 SettingsGroup 1.0 SettingsGroup.qml
+SettingsHint 1.0 SettingsHint.qml
 SettingsRuler 1.0 SettingsRuler.qml
 SettingsSegment 1.0 SettingsSegment.qml
 MediaStrip 1.0 MediaStrip.qml
@@ -54,11 +75,14 @@ FitMetrics 1.0 FitMetrics.qml
 RowDrag 1.0 RowDrag.qml
 WindowDrag 1.0 WindowDrag.qml
 Glyph 1.0 Glyph.qml
+GlyphSolid 1.0 GlyphSolid.qml
 GvfsBridge 1.0 GvfsBridge.qml
 GridTile 1.0 GridTile.qml
 GridArea 1.0 GridArea.qml
 Header 1.0 Header.qml
 Ipc 1.0 Ipc.qml
+IpcMenuState 1.0 IpcMenuState.qml
+IpcPreviewState 1.0 IpcPreviewState.qml
 List 1.0 List.qml
 MatchText 1.0 MatchText.qml
 PathJump 1.0 PathJump.qml
@@ -75,14 +99,18 @@ Opener 1.0 Opener.qml
 Preview 1.0 Preview.qml
 PreviewArchive 1.0 PreviewArchive.qml
 PreviewMedia 1.0 PreviewMedia.qml
+QuickLookPrepare 1.0 QuickLookPrepare.qml
+QuickLookWarm 1.0 QuickLookWarm.qml
 QuickLookSwap 1.0 QuickLookSwap.qml
 PreviewText 1.0 PreviewText.qml
 Row 1.0 Row.qml
 ResizeHandle 1.0 ResizeHandle.qml
 Pane 1.0 Pane.qml
 PickerChrome 1.0 PickerChrome.qml
+PickerGrid 1.0 PickerGrid.qml
 PickerHeader 1.0 PickerHeader.qml
 PickerList 1.0 PickerList.qml
+PickerSelection 1.0 PickerSelection.qml
 PickerPlaces 1.0 PickerPlaces.qml
 PickerRecent 1.0 PickerRecent.qml
 PickerSave 1.0 PickerSave.qml
@@ -102,6 +130,7 @@ TailscaleMark 1.0 TailscaleMark.qml
 StatusBar 1.0 StatusBar.qml
 SelectionBand 1.0 SelectionBand.qml
 TabBar 1.0 TabBar.qml
+TabDragGeometry 1.0 TabDragGeometry.qml
 TransferCard 1.0 TransferCard.qml
 Taildrop 1.0 Taildrop.qml
 LocalSend 1.0 LocalSend.qml
@@ -111,7 +140,9 @@ KindStack 1.0 KindStack.qml
 AboutFacts 1.0 AboutFacts.qml
 SelectionPreview 1.0 SelectionPreview.qml
 PermissionsDialog 1.0 PermissionsDialog.qml
+PermissionsHeadings 1.0 PermissionsHeadings.qml
 singleton Favourites 1.0 Favourites.qml
+singleton RailPlaces 1.0 RailPlaces.qml
 singleton ShelfPins 1.0 ShelfPins.qml
 SettingsFavourite 1.0 SettingsFavourite.qml
 TrashView 1.0 TrashView.qml

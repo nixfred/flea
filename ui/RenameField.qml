@@ -1,6 +1,5 @@
 import QtQuick
 import qs.Commons
-import "js/Buttons.js" as Buttons
 
 // The row becoming its own editor, per the States artboard: an accent frame around the name, the
 // extension muted inside that frame, enter commits and escape abandons.
@@ -25,7 +24,17 @@ Item {
     readonly property real errorHeight: errorText.length > 0 ? errorLabel.implicitHeight + Theme.spacing.gap : 0
     readonly property real fieldHeight: height - errorHeight
     readonly property alias inputItem: field
-    implicitHeight: Theme.rowHeight - 2 * Theme.spacing.rowPaddingY + errorHeight
+    // The editor's frame and the extension's patch, so a test measures the patch against the frame's four sides.
+    readonly property alias frame: editFrame
+    readonly property alias extensionPatch: mutedExtension
+    // The selection drawn as one box that fills the frame's interior, so a test measures it against the frame.
+    readonly property alias selectionBox: selectionFill
+    // The error line's width where the host gives it more than the field, or -1 for the field's own.
+    property real errorSpan: -1
+    // The one height every host draws: the row's line box, or the typed line and two hairlines where a small stop's is shorter.
+    readonly property real lineBox: Math.max(Theme.rowHeight - 2 * Theme.spacing.rowPaddingY,
+                                             Math.ceil(typedLine.height) + 2 * Theme.spacing.hairline)
+    implicitHeight: root.lineBox + errorHeight
 
     signal committed(string newName)
     signal abandoned()
@@ -137,7 +146,7 @@ Item {
         root.containing = true
         // Grid height changes reposition every tile. Contain its final position, not the old layout.
         if (root.containOnBegin && root.viewport) root.viewport.forceLayout()
-        if (root.ownsEdit() && root.visible && field.activeFocus) root.pane.setCursor(root.editIndex)
+        if (root.ownsEdit() && root.visible && field.activeFocus) root.pane.setCursor(root.editIndex, 0)
         root.containing = false
     }
     // Let the expanded row and Grid cell height settle before containing the complete error editor.
@@ -225,18 +234,34 @@ Item {
     }
 
     Rectangle {
+        id: editFrame
         width: parent.width
         height: root.fieldHeight
         color: Theme.color.background
         border.width: Theme.spacing.hairline
-        border.color: root.errorText.length > 0 ? Theme.color.error : Theme.color.muted
+        border.color: root.errorText.length > 0 ? Theme.color.error : Theme.color.accent
+    }
+
+    FontMetrics {
+        id: typedLine
+        font: field.font
+    }
+
+    // The extra arguments are read only so a layout or a scroll re-runs the binding, as mutedExtension's x does.
+    function edgeX(position, laidOut, scrolled) { return field.x + field.positionToRectangle(position).x }
+    Item {
+        id: selectionFill
+        visible: field.selectionEnd > field.selectionStart && (field.activeFocus || field.persistentSelection)
+        readonly property real fromX: Math.max(field.x, root.edgeX(field.selectionStart, field.contentWidth, field.cursorRectangle.x))
+        readonly property real toX: Math.min(field.x + field.width, root.edgeX(field.selectionEnd, field.contentWidth, field.cursorRectangle.x))
+        x: fromX
+        y: Theme.spacing.hairline
+        width: Math.max(0, toX - fromX)
+        height: root.fieldHeight - 2 * Theme.spacing.hairline
+
         Rectangle {
             anchors.fill: parent
-            anchors.margins: -Buttons.RING
-            color: "transparent"
-            border.width: Buttons.RING
-            border.color: Theme.color.foreground
-            visible: field.activeFocus && root.errorText.length === 0
+            color: Theme.color.accent
         }
     }
 
@@ -248,7 +273,8 @@ Item {
         anchors.rightMargin: Theme.spacing.gap
         verticalAlignment: TextInput.AlignVCenter
         color: Theme.color.foreground
-        selectionColor: Theme.color.accent
+        // The selection is painted by selectionFill, which fills the interior where the field's own stops at its line.
+        selectionColor: "transparent"
         selectedTextColor: Theme.color.background
         font.family: Theme.font.family
         font.pixelSize: Theme.font.body
@@ -280,8 +306,9 @@ Item {
 
     Text {
         id: errorLabel
-        anchors { top: field.bottom; left: parent.left; right: parent.right }
+        anchors { top: field.bottom; left: parent.left }
         anchors.topMargin: Theme.spacing.gap
+        width: root.errorSpan >= 0 ? root.errorSpan : root.width
         visible: root.errorText.length > 0
         text: root.errorText
         color: Theme.color.error
@@ -303,9 +330,10 @@ Item {
         // that text existed, came back 0, and the patch covered the stem instead of the extension.
         // Every view drew a rename as a bare ".txt" until the first keystroke moved the selection.
         x: field.contentWidth >= 0 ? field.x + field.positionToRectangle(root.stemEnd).x : field.x
-        y: field.y
+        // One hairline in from the frame's top and bottom, so the patch never covers the frame's sides.
+        y: field.y + Theme.spacing.hairline
         width: Math.max(0, field.width - (x - field.x))
-        height: field.height
+        height: field.height - 2 * Theme.spacing.hairline
         clip: true
 
         Rectangle {

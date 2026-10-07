@@ -1,5 +1,6 @@
 import QtQuick
 import "js/Drag.js" as DragOps
+import "js/DragOut.js" as DragOut
 import "js/Ops.js" as Ops
 
 // The platform drag belongs to the view: a tab switch may destroy the pressed delegate inside QDrag.exec().
@@ -12,46 +13,131 @@ Item {
     property real dragListing: 0
     property int dropIndex: -1
     property bool dragCopy: false
+    property bool dragShift: false
+    property bool dragLink: false
+    property bool awaitingPaths: false
+    property bool buttonUp: false
     property var dragMime: ({})
     property var feedback: null
 
     Drag.dragType: Drag.Automatic
-    // Foreign applications see copy only; Flea resolves its own move from the source identity and device.
-    Drag.supportedActions: Qt.CopyAction
-    Drag.proposedAction: Qt.CopyAction
+    // Plain lift offers copy alone, narrowed by modifiers (a browser uploader refuses move); Ctrl copy, Shift move, both link, so any receiver takes the lift's verb.
+    Drag.supportedActions: root.dragLink ? Qt.LinkAction : root.dragCopy ? Qt.CopyAction : root.dragShift ? Qt.MoveAction : Qt.CopyAction
+    Drag.proposedAction: root.dragLink ? Qt.LinkAction : root.dragCopy ? Qt.CopyAction : root.dragShift ? Qt.MoveAction : Qt.CopyAction
     Drag.mimeData: root.dragMime
-    Drag.onDragFinished: root.liftEnded()
+    // The receiver moves or copies itself: deleting on its acceptance would trash files before Files reads them.
+    Drag.onDragFinished: function () { root.liftEnded() }
 
     function liftBegan(index, centroid) {
         if (!root.pane || root.pane.listInFlight || index < 0 || !root.pane.rowFor(index)) return
+        if (root.pane.cancelSlowClick) root.pane.cancelSlowClick()
+        root.buttonUp = false
+        root.awaitingPaths = false
+        if (root.pane) root.pane.awaitingPaths = false
         root.dragRows = DragOps.carried(root.pane, index)
         root.dragListing = root.pane.backend ? root.pane.backend.heldListing : 0
         root.dropIndex = -1
-        root.liftMoved(centroid)
-        root.dragMime = DragOps.mimeFor(root.pane, root.dragRows, root.dragCopy)
-        root.feedback = DragOps.feedbackFor(root.dragMime[DragOps.ROWS_MIME],
-            (root.dragMime["text/uri-list"] || "").split("\r\n"))
-        root.showTarget("", root.feedback.dev)
-        // This enters the platform event loop; every payload field must already be fixed.
-        root.Drag.active = true
+        // Ctrl is the threshold's, and a paths reply must not sample it again.
+        root.dragCopy = DragOps.copying(centroid.modifiers)
+        root.dragShift = DragOps.shifting(centroid.modifiers)
+        root.dragLink = DragOps.linking(centroid.modifiers)
+        root.dragMime = DragOps.mimeFor(root.pane, root.dragRows, root.dragCopy, root.dragShift)
+        if (root.dragMime["text/uri-list"]) {
+            root.startOffer()
+            return
+        }
+        if (!root.pane.backend || !DragOut.askAllowed(root.pane.pathsPending, root.pane.clipPending)) {
+            root.cannotLeave()
+            return
+        }
+        root.awaitingPaths = true
+        if (root.pane) root.pane.awaitingPaths = true
+        var dev = root.pane.backend.dirDev || 0
+        root.feedback = { own: true, copy: root.dragCopy, shift: root.dragShift, dev: dev,
+                          deletable: DragOps.listingDeletable(root.pane), count: root.dragRows.length, canLeave: true }
+        root.say(DragOps.feedbackLine(root.feedback, "", dev))
+        var rows = root.dragRows.slice()
+        var listing = root.dragListing
+        var copy = root.dragCopy
+        var shift = root.dragShift
+        var link = root.dragLink
+        root.pane.pathsPending = {
+            kind: "drag", rows: rows, listing: listing, copy: copy, shift: shift, link: link,
+            deliver: function (list, pending) { root.deliverPaths(list, pending) }
+        }
+        root.pane.backend.send({ c: "paths", rows: rows, listing: listing })
+    }
+
+    function liftReleased() {
+        root.buttonUp = true
     }
 
     function liftMoved(centroid) {
+        if (root.awaitingPaths || root.Drag.active) return
         root.dragCopy = DragOps.copying(centroid.modifiers)
+        root.dragShift = DragOps.shifting(centroid.modifiers)
+        root.dragLink = DragOps.linking(centroid.modifiers)
+    }
+
+    function startOffer() {
+        root.feedback = DragOps.feedbackFor(root.dragMime[DragOps.ROWS_MIME],
+            (root.dragMime["text/uri-list"] || "").split("\r\n"))
+        root.showTarget("", root.feedback.dev)
+        // Drag.Automatic runs QDrag::exec synchronously, so a finish inside it must not overwrite the hold: arm the watch first.
+        if (root.pane) root.pane.dragHolding = true
+        root.Drag.active = true
+    }
+
+    function deliverPaths(list, pending) {
+        root.awaitingPaths = false
+        if (root.pane) root.pane.awaitingPaths = false
+        var held = root.pane && root.pane.backend ? root.pane.backend.heldListing : 0
+        if (root.buttonUp || held !== pending.listing || !list || list.length !== pending.rows.length) {
+            root.cannotLeave()
+            return
+        }
+        root.dragCopy = pending.copy
+        root.dragShift = pending.shift === true
+        root.dragLink = pending.link === true || (pending.copy === true && pending.shift === true)
+        root.dragMime = root.mimeForPaths(pending.rows, list, pending.copy, root.dragShift)
+        root.startOffer()
+    }
+
+    function mimeForPaths(rows, paths, copy, shift) {
+        var mime = {}
+        var dev = root.pane.backend ? root.pane.backend.dirDev : 0
+        mime[DragOps.ROWS_MIME] = DragOps.markerPayload(rows, copy, root.pane.path, dev, DragOps.listingDeletable(root.pane), shift === true)
+        var uris = []
+        for (var i = 0; i < paths.length; i++) uris.push(DragOps.uriFor(paths[i]))
+        mime["text/uri-list"] = uris.join("\r\n") + "\r\n"
+        mime["text/plain"] = paths.join("\n")
+        return mime
+    }
+
+    // Too wide carries no uri-list, so the gesture ends here and the refusal reads as a pane message.
+    function cannotLeave() {
+        var line = DragOps.line(root.dragRows.length, "", root.dragCopy, root.dragLink) + DragOps.reachNote(false)
+        root.awaitingPaths = false
+        root.liftEnded()
+        if (root.pane) root.pane.message(line, false)
     }
 
     function verbAt(marker, row) {
         return DragOps.verbFor(DragOps.isOwnDrag(marker), DragOps.markerCopying(marker),
-                               DragOps.markerDev(marker), row ? row.v : 0)
+                               DragOps.markerShift(marker), DragOps.markerDev(marker),
+                               row ? row.v : 0, DragOps.markerDeletable(marker))
     }
 
     function liftEnded() {
         root.Drag.active = false
+        if (root.pane) { root.pane.dragHolding = false; root.pane.awaitingPaths = false }
         root.dragRows = []
         root.dragListing = 0
         root.dragMime = ({})
         root.dropIndex = -1
         root.dragCopy = false
+        root.dragShift = false
+        root.dragLink = false
         root.feedback = null
         // A different view may now speak for this gesture; its activity is separate from every transfer.
         var bar = root.pane ? root.pane.statusBar : null
@@ -75,14 +161,15 @@ Item {
         bar.setActivity(root, text, Ops.emptyTransfer())
     }
 
-    function enterTarget(marker, urls, name, destDev, shelf) {
-        root.feedback = DragOps.feedbackFor(marker, urls, shelf)
+    function enterTarget(marker, urls, name, destDev, shelf, proposed) {
+        root.feedback = DragOps.feedbackFor(marker, urls, shelf, proposed)
         root.showTarget(name, destDev)
     }
 
     function showTarget(name, destDev) {
         if (!root.feedback) return
         root.dragCopy = DragOps.copyingFor(root.feedback, destDev)
+        root.dragLink = DragOps.linkingFor(root.feedback, destDev)
         root.say(DragOps.feedbackLine(root.feedback, name, destDev))
     }
 

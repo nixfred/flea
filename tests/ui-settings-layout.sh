@@ -14,7 +14,7 @@ case_settingscompact() {
     omarchy-drive window float flea >/dev/null
 
     for viewport in 1100x800 800x600 560x400 480x240; do
-        hyprctl dispatch "hl.dsp.window.resize({ x = ${viewport%x*}, y = ${viewport#*x}, exact = true, window = \"address:$addr\" })" >/dev/null
+        hypr_window_resize "$addr" "${viewport%x*}" "${viewport#*x}" || fail "settingscompact: could not resize owned window"
         omarchy-drive window center flea >/dev/null
         settle
         read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
@@ -32,9 +32,26 @@ case_settingscompact() {
             || fail "settingscompact: stable height is not measured View content"
         if [[ "$viewport" == 1100x800 ]]; then
             scroll=$(ipc settingsScrollState)
-            # Border subtraction can differ by one floating-point rounding step, never a pixel tolerance.
-            jq -e '((.pane.height - .compactHeight) | fabs) <= (.compactHeight * pow(2; -52))' <<< "$scroll" >/dev/null \
-                || fail "settingscompact: View has unused space or unexpected scrolling: $scroll"
+            # A View taller than the clamp (ui/SettingsPanel.qml clampMargin each side) scrolls inside a clamped card.
+            clamp_margin=8
+            max_h=$(( wh - 2 * clamp_margin ))
+            if (( ch < max_h )); then
+                # Border subtraction can differ by one floating-point rounding step, never a pixel tolerance.
+                jq -e '((.pane.height - .compactHeight) | fabs) <= (.compactHeight * pow(2; -52))' <<< "$scroll" >/dev/null \
+                    || fail "settingscompact: View has unused space or unexpected scrolling: $scroll"
+            else
+                [[ "$ch" == "$max_h" ]] \
+                    || fail "settingscompact: clamped View card is $ch high, not the $max_h clamp in $viewport"
+                jq -e '.pane.contentHeight > .pane.height' <<< "$scroll" >/dev/null \
+                    || fail "settingscompact: clamped View has no scrolling: $scroll"
+                last_view=$(ipc settingsModel | jq -er '[.[] | select(.kind == "check")][-1].id')
+                settings_focus_row "$last_view"
+                ipc settingsScrollState | jq -e '.pane.y > 0' >/dev/null \
+                    || fail "settingscompact: clamped View did not scroll to $last_view"
+                read -r rx ry <<< "$(ipc settingsRowCentre "$last_view")"
+                (( ry > cy && ry < cy + ch )) \
+                    || fail "settingscompact: clamped View focus on $last_view is outside the card"
+            fi
         fi
         shot "settings-view-$viewport"
         settings_focus_row columns

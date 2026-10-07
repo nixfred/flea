@@ -2,14 +2,17 @@
 
 .import "Archive.js" as Archive
 .import "Convert.js" as Convert
+.import "CopyAs.js" as CopyAs
+.import "Clipboard.js" as Clipboard
+.import "ClipSelection.js" as ClipSelection
 .import "Filter.js" as Filter
 .import "Format.js" as Format
 .import "Transfer.js" as Transfer
 .import "Status.js" as Status
 
-// The clipboard is entirely client-side: the backend knows about a transfer, never about a pending paste.
+// The pane mirrors the system file selection and keeps a local copy if ownership fails.
 function emptyClipboard() {
-    return { paths: [], moving: false }
+    return Clipboard.empty()
 }
 
 // What the status bar and the card are tracking while a transfer runs; id is what a cancel names.
@@ -85,6 +88,17 @@ function transferFailure(t, name, error) {
     return (t.moving ? "Move" : "Copy") + " failed: " + name + " · " + error
 }
 
+// MenuAdditions040: Paste as links answers one line per request, and one
+// journal entry, so one undo removes every link it created.
+function linkedLine(ok, failed, skipped, note) {
+    var line = "Linked " + items(ok)
+    if (failed > 0) line += " · " + Format.count(failed) + " failed"
+    if (skipped > 0) line += " · " + Format.count(skipped) + " skipped"
+    // A stranded replace rides ahead of the undo hint, so the counts keep their shape.
+    if (String(note || "").length > 0) line += " · " + note
+    return line + (ok > 0 ? Status.UNDO_HINT : "")
+}
+
 // Only the identity-checked locate reply supplies these selected retry matches.
 function retrySelectionLine(matches) {
     if (!matches.length) return ""
@@ -92,12 +106,15 @@ function retrySelectionLine(matches) {
 }
 
 // The canvas draws this one verbatim: "Moved 4 items to Trash · z undoes".
-function trashed(ok, failed) {
+// A failure names its reason, so a hung mount or a denial reads as what happened rather than silence.
+function trashed(ok, failed, reason) {
+    var why = String(reason || "")
     if (ok === 0)
-        return failed === 1 ? "That item could not be moved to Trash." : items(failed) + " could not be moved to Trash."
+        return failed === 1 ? "That item could not be moved to Trash" + (why.length > 0 ? ": " + why + "." : ".")
+                            : items(failed) + " could not be moved to Trash" + (why.length > 0 ? ": " + why + "." : ".")
     var line = "Moved " + items(ok) + " to Trash"
     if (failed > 0)
-        line += ", " + Format.count(failed) + " failed"
+        line += ", " + Format.count(failed) + " failed" + (why.length > 0 ? ": " + why : "")
     return line + Status.UNDO_HINT
 }
 
@@ -177,9 +194,26 @@ function newFolder(pane) {
     pane.backend.mkdir(pane.path)
 }
 
-// Every view draws the same inline editor: the list and the grid inside the row, the columns view
-// over its active column, see ui/ColumnPane.qml's own corner.
-function startRename(pane, menuId, index) {
+// A ready snapshot over the unchanged identity opens at once, one still in flight takes the F2 route, a moved identity is stale.
+function menuRenameRoute(ready, identity, currentIdentity) {
+    if ((identity || "") === "" || identity !== currentIdentity) return "stale"
+    return ready === true ? "now" : "f2"
+}
+
+// No live editor sends the refusal to the status bar and closes the edit.
+function refuseRename(pane, reason) {
+    if (pane.renamingIndex >= 0 && pane.renameEditor() !== null) {
+        pane.renameError = reason
+        return "editor"
+    }
+    pane.message(reason, true)
+    if (pane.renamingIndex >= 0)
+        pane.renamingIndex = -1
+    return "status"
+}
+
+// One inline editor in every view; a pointer rename passes context 0 so the list never moves under it.
+function startRename(pane, menuId, index, context) {
     if (pane.renamePending) return
     // The row the request named, not wherever the cursor has reached by the time the reply lands.
     var named = index !== undefined && index >= 0
@@ -188,7 +222,7 @@ function startRename(pane, menuId, index) {
     if (!row) return
     // A hidden row has no delegate to draw the editor in, so it would open on the filter clearing.
     if (!named && !Filter.cursorShown(pane)) return sayNoTarget(pane)
-    pane.setCursor(at)
+    pane.setCursor(at, context)
     pane.renameError = ""
     pane.renameSource = pane.join(pane.path, row.n)
     pane.renameMenuId = menuId || 0
@@ -223,29 +257,42 @@ function trash(pane, menuId) {
     pane.backend.trash(idx, menuId)
 }
 
-// The clipboard has to hold absolute paths, because a paste happens in a different directory and the
-// listing those indices belonged to is gone by then. The backend resolves them while it still can.
+// One line while a paths round trip is out; every asker refuses through it, so none steals another's reply.
+function pathsBusy(pane) {
+    pane.message("Still resolving the last selection; try again.", false)
+}
+
+// Resolve absolute paths with each request's own verb, deferring the latest overlapping selection.
 function clip(pane, moving, paths) {
-    if (paths) {
-        pane.clipboard = {paths: paths, moving: moving}
-        pane.message(copied(paths.length, moving), false)
-        return
-    }
-    var idx = targetIndices(pane)
-    if (idx.length === 0) return sayNoTarget(pane)
-    pane.clipPending = moving
-    pane.backend.askPaths(idx)
+    if (!paths && pane.pathsPending) { pathsBusy(pane); return }
+    var indices = paths ? [] : targetIndices(pane)
+    if (!paths && indices.length === 0) return sayNoTarget(pane)
+    ClipSelection.take(pane, moving, paths, indices, copied)
 }
 
 // The answer to the askPaths above; nothing is on the clipboard until this lands.
 function clipResolved(pane, list) {
-    if (pane.clipPending === null) {
+    ClipSelection.resolved(pane, list, copied)
+}
+
+function clipFailed(pane) {
+    ClipSelection.failed(pane)
+}
+
+// MenuAdditions040: Copy as names absolute paths, because like the clipboard
+// a copy happens in a different directory from the listing it was started
+// from. With paths the text goes out at once; without, the backend resolves
+// the indices while it still can, the same rule clip follows.
+function copyAs(pane, kind, paths) {
+    if (paths && paths.length > 0) {
+        pane.opener.copyText(CopyAs.lines(paths, kind))
         return
     }
-    var moving = pane.clipPending
-    pane.clipPending = null
-    pane.clipboard = { paths: list, moving: moving }
-    pane.message(copied(list.length, moving), false)
+    if (pane.pathsPending || pane.clipPending !== null) { pathsBusy(pane); return }
+    var idx = targetIndices(pane)
+    if (idx.length === 0) return sayNoTarget(pane)
+    pane.pathsPending = { kind: "copyAs", format: kind }
+    pane.backend.askPaths(idx)
 }
 
 // Two kinds of success, said apart: an extract whose archive index could not be read was published
@@ -255,15 +302,8 @@ function archiveDoneLine(verified) {
                     : "Extracted. The archive index could not be read, so this was not verified."
 }
 
-function paste(pane) {
-    var clip = pane.clipboard
-    if (!clip || clip.paths.length === 0) {
-        pane.message("There is nothing to paste; y copies and x cuts.", false)
-        return
-    }
-    // A cut is spent once its paste goes out, see ui/CollideHost.qml; a copy stays so it can be pasted again.
-    pane.collide.ask({ c: "transfer", op: clip.moving ? "move" : "copy", paths: clip.paths, dest: pane.path }, null, clip.moving)
-}
+function paste(pane, forceMove) { Clipboard.paste(pane, "", forceMove === true) }
+function pasteLink(pane, kind) { Clipboard.paste(pane, kind, false) }
 
 function undo(pane) {
     pane.backend.undo()
@@ -300,6 +340,7 @@ function sendTaildrop(pane, taildrop, peerId, path) {
 function compress(pane, format) {
     var idx = targetIndices(pane)
     if (idx.length === 0) return sayNoTarget(pane)
+    if (pane.pathsPending || pane.clipPending !== null) { pathsBusy(pane); return }
     // The archive request names paths and has no rows form, so the indices are resolved first and the
     // request is built in compressResolved. Naming them here would drop every row outside the window.
     pane.pathsPending = { kind: "compress", format: format }
@@ -325,8 +366,22 @@ function compressResolved(pane, list, format, menuId) {
 function pathsResolved(pane, list) {
     var pending = pane.pathsPending
     pane.pathsPending = null
+    if (pending && pending.kind === "drag") { pending.deliver(list, pending); return }
     if (pending && pending.kind === "compress") {
         compressResolved(pane, list, pending.format)
+        return
+    }
+    // MenuAdditions040: every Copy as variant covers the whole selection, one
+    // path per line, through wl-copy; nothing reaches the file clipboard.
+    if (pending && pending.kind === "copyAs") {
+        if (list.length > 0)
+            pane.opener.copyText(CopyAs.lines(list, pending.format))
+        return
+    }
+    // MenuAdditions040: Permissions takes the whole selection, so the dialog
+    // opens over every resolved path rather than the cursor row alone.
+    if (pending && pending.kind === "permissions") {
+        pane.openPermissionsWith(list)
         return
     }
     clipResolved(pane, list)

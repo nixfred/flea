@@ -6,7 +6,8 @@
 function route(root, message) {
     if (message.t === "listed") {
         root.dirDev = message.v || 0
-        root.listed(message.n, message.read, message.sort, message.path || "")
+        root.dirWritable = message.w !== false
+        root.listed(message.n, message.read, message.sort, message.path || "", message.changed)
     } else if (message.t === "rows") {
         root.rows(message.start, message.rows, message.ms, message.kinds || [], message.listing || 0)
     } else if (message.t === "error") {
@@ -39,10 +40,20 @@ function route(root, message) {
         root.transferDone(message.id, message.ok, message.failed, message.skipped, message.cancelled, message.retryPaths || [], message.durable === true, message.note || "")
     } else if (message.t === "collisions") {
         root.collisions(message.id, message.total, message.names || [])
+    // MenuAdditions040: Paste as links answers one line per request, and one
+    // journal entry, so one undo removes every link it created.
+    } else if (message.t === "linked") {
+        root.linked(message.ok || 0, message.failed || 0, message.skipped || 0, message.note || "")
+    // MenuAdditions040: Show original reveals the link's target in its own folder.
+    } else if (message.t === "linktarget") {
+        root.linkTarget(message.path || "", message.directory || "", message.name || "", message.id || 0)
     } else if (message.t === "trashed") {
-        root.trashed(message.ok, message.failed)
+        root.trashed(message.ok, message.failed, message.err || "")
     } else if (message.t === "renamed") {
         root.renamed(message.ok, message.path)
+    } else if (message.t === "slow") {
+        // A remote write past its deadline: information first, the reply itself later.
+        root.slowOp(message.op || "", message.path || "", message.msg || "")
     } else if (message.t === "made") {
         root.made(message.ok, message.path)
     } else if (message.t === "duplicated") {
@@ -65,13 +76,21 @@ function route(root, message) {
         root.pickerResult(message)
     } else if (message.t === "menuaction") {
         root.menuResult(message)
+    } else if (message.t === "pdfcopied") {
+        root.pdfCopied(message.id || 0, message.path || "", message.err || "")
     } else if (message.t === "meta") {
         root.metaResult(message)
         root.meta(message.row, message.w, message.h, message.orient || 1, message.ms, message.rate, message.entries, message.unpacked, message.afailed, message.names, message.lines, message.partial, message.lfailed === true, message.target, message.targetdir, message.owner || "")
+    } else if (message.t === "shebang") {
+        root.shebang(message.path || "", message.hasShebang === true, message.id || 0)
+    } else if (message.t === "clip") {
+        root.clipResult(message)
     } else if (message.t === "fsinfo") {
         root.fsInfo(message.fs, message.free, message.path || "", message.class || "")
     } else if (message.t === "changed") {
         root.changed(message.path || "")
+    } else if (message.t === "unmounted") {
+        root.unmounted(message.path || "", message.parent || "")
     } else if (message.t === "jumped") {
         root.jumped(message.id || 0, message.favourites || [], message.zoxide || [], message.recent || [], message.frecency || {})
     } else if (message.t === "peeked") {

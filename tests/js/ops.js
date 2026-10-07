@@ -1,3 +1,5 @@
+.import "menuhunt.js" as MenuHunt
+.import "../../ui/js/Clipboard.js" as Clipboard
 .import "../../ui/js/Ops.js" as Ops
 .import "../../ui/js/Transfer.js" as Transfer
 
@@ -120,6 +122,7 @@ function run(check) {
             join: function (a, b) { return a + "/" + b },
             sticky: function () {}, collide: { ask: function (msg) { asked.push(msg); return true } },
             backend: {
+                heldListing: 1,
                 send: function (msg) { sent.push(msg) },
                 askPaths: function (rows) { sent.push({ c: "paths", rows: rows }) },
                 mkdir: function (path) { sent.push({ c: "mkdir", path: path }) },
@@ -129,6 +132,8 @@ function run(check) {
             },
             message: function () {},
             clipPending: null,
+            clipQueue: [], clipSequence: 0,
+            clipboardState: Clipboard.state(), clipboardWatchFailed: false, listInFlight: false,
             pathsPending: null,
             clipboard: null
         }
@@ -167,7 +172,7 @@ function run(check) {
     // The condition on opening Pane.qml: one paths reply now has two possible askers, and the
     // clipboard is the one that already worked. An unclaimed reply must still land where it always did.
     var clipPane = windowedPane([])
-    clipPane.clipPending = true
+    Ops.clip(clipPane, true)
     Ops.pathsResolved(clipPane, ["/d/a", "/d/b"])
     check("a paths reply with nothing pending still reaches the clipboard",
           clipPane.clipboard ? clipPane.clipboard.paths.length + "/" + clipPane.clipboard.moving : "lost",
@@ -190,21 +195,73 @@ function run(check) {
           String(zipPane.pathsPending),
           "null")
 
+    // A paths round trip in flight refuses every other asker out loud, so none steals another's reply.
+    function pathsPane(sent) {
+        var p = windowedPane(sent)
+        p.said = []
+        p.message = function (text, failed) { p.said.push([text, failed]) }
+        p.opener = { copied: [], copyText: function (text) { this.copied.push(text) } }
+        p.openPermissionsWith = function (list) { p.permitted = list }
+        return p
+    }
+    var copySent = []
+    var copyPane = pathsPane(copySent)
+    Ops.copyAs(copyPane, "path", ["/d/a", "/d/b"])
+    check("Copy as with paths copies at once in the asked format",
+          copyPane.opener.copied.join(";") + "|" + copySent.length + "|" + String(copyPane.pathsPending),
+          "/d/a\n/d/b|0|null")
+    var askSent = []
+    var askPane = pathsPane(askSent)
+    Ops.copyAs(askPane, "quoted")
+    check("Copy as without paths asks under a copyAs claim",
+          askSent.length + "|" + askPane.pathsPending.kind + "|" + askPane.pathsPending.format,
+          "1|copyAs|quoted")
+    var heldSent = []
+    var heldPane = pathsPane(heldSent)
+    heldPane.pathsPending = { kind: "drag" }
+    Ops.copyAs(heldPane, "path")
+    check("Copy as refuses while a drag claim is waiting",
+          heldSent.length + "|" + heldPane.pathsPending.kind + "|" + JSON.stringify(heldPane.said),
+          "0|drag|[[\"Still resolving the last selection; try again.\",false]]")
+    MenuHunt.clipboard(check, pathsPane)
+    var zipSent = []
+    var zipBusy = pathsPane(zipSent)
+    zipBusy.clipPending = { sequence: 1, moving: true }
+    Ops.compress(zipBusy, "zip")
+    check("a compress refuses out loud while a cut is waiting",
+          zipSent.length + "|" + String(zipBusy.pathsPending) + "|" + JSON.stringify(zipBusy.said),
+          "0|null|[[\"Still resolving the last selection; try again.\",false]]")
+    var answeredPane = pathsPane([])
+    answeredPane.pathsPending = { kind: "copyAs", format: "quoted" }
+    Ops.pathsResolved(answeredPane, ["/d/a b"])
+    check("a copyAs reply copies the resolved list in the claimed format",
+          answeredPane.opener.copied.join(";") + "|" + String(answeredPane.pathsPending),
+          "'/d/a b'|null")
+    var allowedPane = pathsPane([])
+    allowedPane.pathsPending = { kind: "permissions" }
+    Ops.pathsResolved(allowedPane, ["/d/x"])
+    check("a permissions reply opens the dialog over the resolved list",
+          (allowedPane.permitted || []).join(",") + "|" + String(allowedPane.pathsPending),
+          "/d/x|null")
+
     var captured = ["/d/captured.txt", "/d/second.txt"]
     var capturedRequests = []
     var capturedPane = windowedPane(capturedRequests)
     Ops.clip(capturedPane, true, captured)
     check("a menu clipboard action retains captured paths without resolving the current listing",
           capturedPane.clipboard.paths.join(",") + "|" + capturedPane.clipboard.moving + "|" + capturedRequests.length,
-          "/d/captured.txt,/d/second.txt|true|0")
+          "/d/captured.txt,/d/second.txt|true|1")
+    check("captured clipboard paths reach the system without another row lookup",
+          capturedRequests[0].c + "|" + capturedRequests[0].paths.join(","),
+          "clipSet|/d/captured.txt,/d/second.txt")
     Ops.compressResolved(capturedPane, captured, "zip", 31)
     check("compression carries the captured paths and menu identity into the worker",
-          capturedRequests[0].paths.join(",") + "|" + capturedRequests[0].menuId,
+          capturedRequests[1].paths.join(",") + "|" + capturedRequests[1].menuId,
           "/d/captured.txt,/d/second.txt|31")
     Ops.moveToDropbox(capturedPane, "/dropbox", 32)
     check("Dropbox transfer retains the menu identity alongside the full selection",
           capturedPane.asked.length === 1 ? capturedPane.asked[0].menuId + "|" + capturedPane.asked[0].rows.length + "|" + capturedRequests.length
-                                          : "not asked", "32|40|1")
+                                          : "not asked", "32|40|2")
 
     var t = Ops.started(12, true, 3)
     check("a started transfer carries its id, its direction and its count",
@@ -271,6 +328,46 @@ function run(check) {
     check("menu rename retains its identity for the editor lifetime", menuRename.renameMenuId, 33)
     Ops.commitRename(menuRename, "renamed.txt")
     check("committing retains the captured menu identity", renameIdentity, 33)
+
+    // Issue #170: a ready snapshot over the unchanged identity opens now, one in flight takes F2, a moved identity refuses.
+    check("the menu rename decision lives in Ops.js", typeof Ops.menuRenameRoute, "function")
+    if (typeof Ops.menuRenameRoute === "function") {
+        check("a ready snapshot over the current selection opens at once",
+              Ops.menuRenameRoute(true, "sel-3", "sel-3"), "now")
+        check("a snapshot still in flight over it takes the F2 route",
+              Ops.menuRenameRoute(false, "sel-3", "sel-3"), "f2")
+        check("a ready snapshot over a moved selection refuses",
+              Ops.menuRenameRoute(true, "sel-3", "sel-4"), "stale")
+        check("a snapshot still in flight over a moved selection refuses too",
+              Ops.menuRenameRoute(false, "sel-3", "sel-4"), "stale")
+        check("an empty identity never opens and never takes the F2 route",
+              Ops.menuRenameRoute(true, "", ""), "stale")
+    }
+
+    // Grid closing review G1: with the tile's Loader retired and the rename
+    // refused, no live editor exists to show it, so the refusal goes to the
+    // status bar as an error and the edit closes; otherwise the editor shows it.
+    check("the refusal route lives in Ops.js", typeof Ops.refuseRename, "function")
+    if (typeof Ops.refuseRename === "function") {
+        function refusalPane(editor) {
+            return { renamingIndex: 3, renameError: "",
+                     renameEditor: function () { return editor },
+                     said: [], message: function (text, isError) { this.said.push([text, isError]) } }
+        }
+        var live = refusalPane({})
+        check("a live editor shows the refusal itself",
+              Ops.refuseRename(live, "b-existing.md already exists.") + "|" + live.renameError + "|" + live.said.length + "|" + live.renamingIndex,
+              "editor|b-existing.md already exists.|0|3")
+        var retired = refusalPane(null)
+        check("no live editor sends the same sentence to the status bar and closes the edit",
+              Ops.refuseRename(retired, "b-existing.md already exists.") + "|" + retired.renameError + "|" + JSON.stringify(retired.said) + "|" + retired.renamingIndex,
+              "status||[[\"b-existing.md already exists.\",true]]|-1")
+        var settled = refusalPane(null)
+        settled.renamingIndex = -1
+        check("a settled edit still says the refusal once",
+              Ops.refuseRename(settled, "gone.") + "|" + JSON.stringify(settled.said),
+              "status|[[\"gone.\",true]]")
+    }
 
     var operationIds = []
     var convertedArguments = null
@@ -387,4 +484,28 @@ function run(check) {
     check("no verdict note leaves the shipped line alone",
           Ops.transferDone({ moving: false, n: 2 }, 2, 0, 0, false, false, ""),
           "Copied 2 items · z undoes")
+
+    // A slow click renames with context 0 so the list stays still; F2 and r keep the three-row context.
+    function contextPane() {
+        return { cursorIndex: 5, path: "/d", renamingIndex: -1, renamePending: false,
+            renameError: "", renameSource: "", renameMenuId: 0,
+            rowFor: function () { return { n: "f.txt" } },
+            join: function (base, name) { return base + "/" + name },
+            message: function () {},
+            seen: "unset",
+            setCursor: function (index, context) { this.seen = context } }
+    }
+    var pointerRename = contextPane()
+    Ops.startRename(pointerRename, 0, 5, 0)
+    check("a pointer rename sets the cursor with context 0", pointerRename.seen, 0)
+    var keyboardRename = contextPane()
+    Ops.startRename(keyboardRename, 0, 5)
+    check("a keyboard rename keeps no pointer context", keyboardRename.seen, undefined)
+    // A stranded replace rides ahead of the undo hint, and silence stays silent.
+    check("a stranded link is named on the linked line",
+          Ops.linkedLine(1, 1, 0, "the link left at /d/b.txt could not be removed (stale); the replaced item stays in the trash"),
+          "Linked 1 item · 1 failed · the link left at /d/b.txt could not be removed (stale); the replaced item stays in the trash · z undoes")
+    check("no stranded note leaves the shipped line alone",
+          Ops.linkedLine(2, 0, 0, ""),
+          "Linked 2 items · z undoes")
 }

@@ -1,7 +1,9 @@
 import QtQuick
+import "js/RecentMode.js" as RecentMode
 import "js/Anchor.js" as Anchor
 import "js/DirSizes.js" as DirSizes
 import "js/Nav.js" as Nav
+import "js/Reload.js" as Reload
 import "js/Search.js" as Search
 import "js/Swap.js" as Swap
 import "js/Tabs.js" as Tabs
@@ -37,14 +39,14 @@ Item {
     }
 
     // The listed line held or fallen-back rows wait for is kept for them, an earlier request's is dropped, any other applied.
-    function takeListed(total, readMs, sortMs, path) {
+    function takeListed(total, readMs, sortMs, path, changed) {
         var action = Swap.onListed(root.phase, root.pane.listInFlight, path, root.pane.listingPath)
         if (action === Swap.KEEP) {
-            root.phase = Swap.kept(root.phase, { total: total, readMs: readMs, sortMs: sortMs, path: path })
+            root.phase = Swap.kept(root.phase, { total: total, readMs: readMs, sortMs: sortMs, path: path, changed: changed })
             root.pane.listedSeen = true
         } else if (action === Swap.APPLY) {
             root.phase = Swap.heard(root.phase, root.pane.searchMode === Search.RESULTS)
-            root.applyListed(total, readMs, sortMs, path)
+            root.applyListed(total, readMs, sortMs, path, changed)
         }
     }
 
@@ -62,7 +64,7 @@ Item {
             return
         }
         root.pane.held = start
-        root.pane.rows = items
+        root.pane.rows = RecentMode.stampRows(root.pane, items)
         root.pane.kindNames = kinds
         root.rowsLanded()
     }
@@ -76,9 +78,9 @@ Item {
             root.phase = Swap.landed(root.phase)
         // The rows go in before the count, so each delegate the count builds is built on its own row.
         root.pane.held = start
-        root.pane.rows = items
+        root.pane.rows = RecentMode.stampRows(root.pane, items)
         root.pane.kindNames = kinds
-        root.applyListed(reply.total, reply.readMs, reply.sortMs, reply.path)
+        root.applyListed(reply.total, reply.readMs, reply.sortMs, reply.path, reply.changed)
         root.rowsLanded()
     }
 
@@ -96,10 +98,11 @@ Item {
         Nav.forget(root.pane, query)
     }
 
-    function applyListed(total, readMs, sortMs, path) {
+    function applyListed(total, readMs, sortMs, path, changed) {
         var pane = root.pane
         pane.thumbState = Thumbs.empty()
         pane.dirSizeState = DirSizes.empty()
+        pane.reloadChanged = (changed === undefined || changed === null) ? -1 : changed
         if (!pane.dualMode && !pane.listInFlight && pane.searchMode.length === 0) {
             ViewState.changeLeaf("sort", { key: pane.backend.sortBy === "mtime" ? "date" : pane.backend.sortBy,
                                          reverse: pane.backend.sortDesc })
@@ -127,7 +130,11 @@ Item {
         if (pane.rowsAt === 0 && pane.inputAt > 0 && pane.rowFor(pane.cursorIndex))
             pane.rowsAt = Date.now()
         pane.applyPendingSelect()
-        root.wire.anchor = Anchor.apply(pane, root.wire.anchor)
+        root.wire.anchor = Anchor.apply(pane, root.wire.anchor, Theme.fileRowHeight)
+        if (pane.preferenceAnchor)
+            pane.preferenceAnchor = Anchor.applyPreference(pane, pane.preferenceAnchor)
+        // A manual reload's notice, said only when rows changed; every other listing owes none.
+        Reload.landed(pane)
         Tabs.applyPending(pane)
         pane.listArea.restartSettle()
         if (pane.listInFlight) {

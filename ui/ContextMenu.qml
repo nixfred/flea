@@ -4,20 +4,20 @@ import "." as Flea
 import "js/Keymap.js" as Keymap
 import "js/LockedMenu.js" as LockedMenu
 import "js/Menu.js" as Menu
+import "js/MenuFit.js" as MenuFit
 import "js/MenuRefresh.js" as MenuRefresh
 
 // A plain overlay, not a QQC Popup: the one Controls import cost 10 ms of warm startup.
 Item {
     id: root
 
-    // Fires with the row's own action string ("open", "trash"); a chosen Taildrop peer fires
-    // "taildrop:<peerId>" instead, so one signal covers both without a second wire. The header's
-    // rows fire "col:<key>" and "toggleHidden", routed in ui/Pane.qml's onChosen.
+    // Row actions, provider leaves and header choices share this signal, routed by Pane.
     signal chosen(string action)
     signal refused(string reason)
     signal snapshotRequested()
 
     property bool opened: false
+    property bool preparing: false
     // Driven from ui/Pane.qml's own state, so this file owns no hidden-file logic itself.
     property bool showHidden: false
     // [{id, label}], the reachable Taildrop targets; installed providers keep their disabled reason.
@@ -26,18 +26,28 @@ Item {
     property var localSend: ({ installed: false, peers: [], checking: false })
     property string taildropReason: ""
     property bool providersRefreshing: false
+    property bool refreshOwed: false
     property var lastProviderAnswer: null
     // The archive formats this box actually probed, and whether a converter is installed at all.
     property var archiveFormats: []
     property bool canConvert: false
     property bool canExtract: false
     property bool clipboardAvailable: false
+    property bool clipboardWatchFailed: false
     // Whether the cursor row is a file, an archive, an image; all decided client-side. Only a file row takes send peers.
     property bool rowIsFile: false
     property bool rowIsArchive: false
     property bool rowIsImage: false
+    // MenuAdditions040: Show original is visible but only on a symlink.
+    property bool rowIsSymlink: false
+    // MenuAdditions040 callout 10: the two-byte shebang read of the cursor row at menu open.
+    property bool rowHasShebang: false
+    // ... and whether the menu's single target is the cursor row itself.
+    property bool cursorIsTarget: false
     property int rowMode: 0
     property int selectionCount: 0
+    // MenuAdditions040: Permissions takes the whole selection.
+    property var selectionModes: []
     // OpenWith.html's flyout rows, filled by ui/PaneMenuActions.qml when the registry answers.
     property var openWithApps: []
     property bool openWithLoaded: false
@@ -57,7 +67,7 @@ Item {
     // locked folder's own menu rather than the parent's background one.
     property string tileTarget: ""
     property int tileMode: 0
-    // The folder this opening answers for, captured at open and cleared at close, the rail's own pattern.
+    // The folder this opening answers for, captured at open and cleared at close.
     property string lockedPath: ""
     property int lockedMode: 0
     readonly property bool forLocked: root.lockedPath.length > 0
@@ -99,12 +109,16 @@ Item {
     property int cursor: 0
     property int openSubmenuRow: -1
     property int submenuCursor: 0
-    readonly property bool submenuOpen: root.openSubmenuRow >= 0
+    // A hidden row still opens its flyout from the action.
+    property string loneFlyoutAction: ""
+    readonly property bool submenuOpen: root.openSubmenuRow >= 0 || root.loneFlyoutAction.length > 0
+    onSubmenuOpenChanged: if (!root.submenuOpen) MenuRefresh.pressChanged(root, false)
     // The glyph every open flyout row draws, read back so a test can name it without OCR.
     function submenuGlyphs() {
         if (!root.submenuOpen)
             return ""
-        var mark = Menu.submenuGlyph(root.entries[root.openSubmenuRow].action)
+        var mark = Menu.submenuGlyph(root.loneFlyoutAction.length > 0
+            ? root.loneFlyoutAction : root.entries[root.openSubmenuRow].action)
         var out = []
         for (var i = 0; i < root.submenuEntries.length; i++) {
             // What the row draws, not what the flyout defaults to: an Open with row carries its own
@@ -116,31 +130,40 @@ Item {
         return out.join("|")
     }
 
-    // The entries the open flyout draws, which belong to the row that opened it.
-    readonly property var submenuEntries: root.submenuOpen && root.entries[root.openSubmenuRow]
-        ? root.entries[root.openSubmenuRow].submenu : []
+    // The open flyout draws the row's entries, or the lone action's leaves.
+    readonly property var submenuEntries: root.loneFlyoutAction.length > 0
+        ? Menu.flyoutEntries(root.loneFlyoutAction)
+        : (root.submenuOpen && root.entries[root.openSubmenuRow]
+            ? root.entries[root.openSubmenuRow].submenu : [])
 
     // The row list this menu currently offers; a test reads this back through shell.qml's IPC.
     property var entries: []
+    // True while a new list's rows build, so the card's fit reads none then and reads them once when they stand.
+    property bool rowsBuilding: false
+    function setEntries(next) { root.rowsBuilding = true; try { root.entries = next } finally { root.rowsBuilding = false } }
     property bool canTrash: true
+    // False in a read-only folder, off the listing's own w flag; true until the pane knows better.
+    property bool dirWritable: true
+    // A filesystem that holds no links offers no Paste as rows; true until the pane knows better.
+    property bool canLink: true
     // Issue 179: the background menu's Sort by flyout offers its forget row only for this folder.
     property bool hasFolderSort: false
 
-    // The construction lives in ui/js/Menu.js now, so the rows are unit-testable without a window:
-    // listingEntries(p) builds the listing's rows from the pane's state and headerEntries() the column titles' own on a right click (ui/Header.qml); this file only routes between them.
-    function buildEntries() {
-        // Which release a rail row offers is the rail's knowledge, not the listing's, so the rail
-        // hands its rows in already built; see ui/js/Mounts.js "railMenu".
+    // Menu.js builds entries from the context shared by the row menu and query; includeHidden is the keymap sheet's.
+    function buildEntries(flyoutAction, includeHidden) {
+        // Rail rows arrive built with their own release verdicts.
         if (root.forRail)
             return root.railEntries
         if (root.forHeader)
             return Menu.headerEntries(ViewState.hiddenCols, root.showHidden)
-        // The Locked tile's own rows, acting on the locked folder without listing it; never the
-        // background rows, which would create in or paste into the parent standing behind it.
+        // Locked rows address the denied folder rather than its covered parent.
         if (root.forLocked)
             return LockedMenu.lockedEntries({ lockedMode: root.lockedMode, hiddenActions: ViewState.menuHidden })
+        return Menu.listingEntries(root.listingContext(flyoutAction, includeHidden))
+    }
+    function listingContext(flyoutAction, includeHidden) {
         var view = MenuRefresh.providerView(root.lastProviderAnswer, MenuRefresh.live(root))
-        return Menu.listingEntries({
+        return {
             showHidden: root.showHidden,
             hasRow: root.hasRow,
             rowInDropbox: root.rowInDropbox,
@@ -157,17 +180,22 @@ Item {
             canConvert: root.canConvert,
             canExtract: root.canExtract,
             clipboardAvailable: root.clipboardAvailable,
+            clipboardWatchFailed: root.clipboardWatchFailed,
             canTrash: root.canTrash,
+            canLink: root.canLink,
+            dirWritable: root.dirWritable,
             openWithApps: root.openWithApps,
             openWithLoaded: root.openWithLoaded,
             rowMode: root.rowMode, selectionCount: root.selectionCount,
+            rowIsSymlink: root.rowIsSymlink, selectionModes: root.selectionModes,
+            hasShebang: root.rowHasShebang, cursorIsTarget: root.cursorIsTarget,
             scripts: Flea.Scripts.entries, localSendInstalled: root.localSend.installed, localSendPeers: root.localSend.peers, localSendChecking: view.localSendChecking,
             // The Menus settings section's stored set; ui/js/Menu.js applyHidden is what reads it.
-            hiddenActions: ViewState.menuHidden,
+            hiddenActions: includeHidden === true ? [] : ViewState.menuHidden.filter(function(id) { return id !== flyoutAction }),
             // ExtThumbs: the class row's presence and label read these, never "this drive".
             storageClass: root.storageClass, thumbPreview: ViewState.preview,
             updateVersion: UpdateCheck.menuVersion, hasFolderSort: root.hasFolderSort
-        })
+        }
     }
 
     // The row item at an index, for ui/Ipc.qml: a driven test clicks a menu row without deriving its geometry from a row count the Menus settings can now change under it.
@@ -180,6 +208,13 @@ Item {
     function stepCursor(from, delta) { return Menu.stepRow(root.entries, from, delta) }
     // The same rule inside a flyout: OpenWith.html's tail row sits under its own separator.
     function stepSubmenu(from, delta) { return Menu.stepRow(root.submenuEntries, from, delta) }
+    // A wheel over the main frame closes the flyout first, the same path moving the pointer
+    // onto a plain row takes, and then steps; the highlight never moves where it is not drawn.
+    function stepMain(delta) {
+        root.openSubmenuRow = -1
+        root.loneFlyoutAction = ""
+        root.cursor = root.stepCursor(root.cursor, delta)
+    }
 
     function firstRow() {
         return root.stepCursor(-1, 1)
@@ -197,10 +232,7 @@ Item {
         root.place(scenePoint)
     }
 
-    // The listing's other entrance, from a right click that landed on no row at all: ui/List.qml,
-    // ui/GridArea.qml and ui/ColumnPane.qml each answer for their own empty space, and this one
-    // instance then draws ui/js/Menu.js backgroundEntries instead of the cursor row's. While a
-    // Locked tile is drawn the whole listing is that tile, so the click names the locked folder.
+    // Empty-space clicks draw background entries, or the Locked tile's own folder menu.
     function openBackground(scenePoint) {
         if (root.tileTarget.length > 0) {
             root.openLocked(root.tileTarget, root.tileMode, scenePoint)
@@ -270,6 +302,8 @@ Item {
     }
 
     function place(scenePoint) {
+        root.refreshOwed = false
+        root.preparing = true
         if (!root.opened)
             root.focusHolder = root.Window.window ? root.Window.window.activeFocusItem : null
         root.pointerGlobal = Qt.point(-1, -1)
@@ -279,14 +313,18 @@ Item {
         var point = root.mapFromItem(null, scenePoint)
         root.placeX = point.x
         root.placeY = point.y
-        root.entries = root.buildEntries()
+        root.setEntries(root.buildEntries())
         root.openedIdentity = root.selectionIdentity
+        root.loneFlyoutAction = ""
         scroll.contentY = 0
+        scroll.resetSteps()
+        subScroll.resetSteps()
         root.clampFrame()
         root.cursor = root.firstRow()
         root.openSubmenuRow = -1
         root.submenuCursor = 0
         root.opened = true
+        root.preparing = false
         if (root.hasRow && !root.forRail && !root.forHeader) root.snapshotRequested()
         keyCatcher.forceActiveFocus()
     }
@@ -296,10 +334,12 @@ Item {
 
     // Every wheel scroll calls this, so a shut menu costs nothing and never touches focus.
     function close() {
+        root.refreshOwed = false
         if (!root.opened)
             return
         root.opened = false
         root.openSubmenuRow = -1
+        root.loneFlyoutAction = ""
         root.clearRail()
         var holder = root.focusHolder && root.focusHolder.visible && root.focusHolder.enabled ? root.focusHolder : root.focusOwner
         if (holder)
@@ -328,27 +368,72 @@ Item {
     // One signal covers every submenu: the row's own action, a colon, and the entry chosen inside it.
     function chooseSub(id) {
         var entry = root.entries[root.openSubmenuRow]
-        if (!entry || !root.validateChoice(entry.action, id)) return
+        var action = root.loneFlyoutAction || (entry ? entry.action : "")
+        if (root.loneFlyoutAction.length > 0) {
+            var lonePick = Menu.loneChoice(root.loneFlyoutAction, id, root.forRail, root.forHeader, root.hasRow, root.openedIdentity, root.selectionIdentity)
+            if (lonePick.kind !== "fire") {
+                root.refuseLone(lonePick.kind)
+                return
+            }
+        }
+        if (!action || !root.validateChoice(action, id)) return
         root.close()
-        if (entry)
-            root.chosen(entry.action + ":" + id)
+        root.chosen(action + ":" + id)
     }
 
     function openSubmenu(index) {
+        root.loneFlyoutAction = ""
         if (!Menu.hasSubmenu(root.entries[index]) || root.entries[index].disabled === true) return
         root.openSubmenuRow = index
         root.submenuCursor = 0
         subScroll.contentY = 0
     }
 
+    // c and P open Copy as and Paste as with the flyout already open.
+    function openSubmenuFor(action) {
+        var leaves = Menu.flyoutEntries(action)
+        if (!leaves.length) return false
+        if (action === "pasteAs" && !root.clipboardAvailable) {
+            root.close()
+            root.refused(Menu.EMPTY_CLIPBOARD)
+            return false
+        }
+        if (!root.validateChoice(action, leaves[0].id)) return false
+        var pick = Menu.submenuFor(action, root.entries, root.clipboardAvailable)
+        if (pick.kind === "row") {
+            root.cursor = pick.index
+            root.openSubmenu(pick.index)
+            return true
+        }
+        if (pick.kind === "lone") {
+            root.openSubmenuRow = -1
+            root.loneFlyoutAction = action
+            root.submenuCursor = 0
+            subScroll.contentY = 0
+            return true
+        }
+        if (pick.kind === "refuse") {
+            root.close()
+            root.refused(Menu.EMPTY_CLIPBOARD)
+            return false
+        }
+        return false
+    }
+
     // Fresh capabilities use the normal inventory; selection stays on its action and placement uses the existing clamp.
     function refreshProviderRows() {
         if (!root.opened || root.forRail || root.forHeader || root.forLocked) return
+        // Replacing a pressed delegate destroys its grab before release can activate it.
+        if (MenuRefresh.anyPressed(menuRows, subRows)) {
+            root.refreshOwed = true
+            return
+        }
+        root.refreshOwed = false
         var next = root.buildEntries()
         // An answer that changed nothing drawn leaves every row standing: no model reset, no cursor move.
         if (MenuRefresh.unchanged(root.entries, next)) return
         var selection = MenuRefresh.refreshedCursor(root.entries, next, root.cursor, root.openSubmenuRow, root.submenuCursor)
-        root.entries = next
+        root.setEntries(next)
         root.cursor = selection.cursor
         root.openSubmenuRow = selection.submenuRow
         root.submenuCursor = selection.submenuCursor
@@ -360,11 +445,19 @@ Item {
         root.refreshProviderRows()
     }
 
+    function refuseLone(kind) {
+        root.close()
+        root.refused(kind === "moved" ? "Selected items changed; reopen the menu."
+                                     : "That action is no longer available; reopen the menu.")
+    }
+
     // Rebuild only to validate; rows stay fixed while the menu is open under the pointer.
-    function validateChoice(action, subId) {
+    function validateChoice(action, subId, includeHidden) {
         var identityChanged = !root.forRail && !root.forHeader && root.hasRow
                               && root.openedIdentity !== root.selectionIdentity
-        var live = root.buildEntries()
+        root.preparing = true
+        var live = root.buildEntries(subId && Menu.flyoutEntries(action).length ? action : "", includeHidden)
+        root.preparing = false
         for (var i = 0; !identityChanged && i < live.length; i++) {
             var entry = live[i]
             if (entry.action !== action || entry.disabled === true) continue
@@ -373,14 +466,14 @@ Item {
             for (var j = 0; j < sub.length; j++)
                 if (sub[j].id === subId && sub[j].disabled !== true) return true
         }
-        root.close()
-        root.refused(identityChanged ? "Selected items changed; reopen the menu."
-                                     : "That action is no longer available; reopen the menu.")
+        root.refuseLone(identityChanged ? "moved" : "unavailable")
         return false
     }
 
-    // Rows above the open one are a mix of full rows and separators, so the offset is summed, not multiplied.
+    // Offsets are summed, not multiplied; a lone flyout stands at the top.
     function submenuOffset() {
+        if (root.loneFlyoutAction.length > 0)
+            return 0
         var y = 0
         for (var i = 0; i < root.openSubmenuRow; i++)
             y += root.entries[i].separator === true ? separatorProbe.separatorHeight : Theme.rowHeight
@@ -406,9 +499,17 @@ Item {
         onWheel: function (wheel) { wheel.accepted = true }
     }
 
+    // How far an edge fade reaches past the card's padding, as a share of a row, so it covers the first cut row without washing a whole one.
+    readonly property real fadeRowShare: 0.7
+    readonly property real fadeReach: Math.round(Theme.rowHeight * root.fadeRowShare)
+    // The widest row's wanted width in a card's column; a binding that calls it follows every row's own text.
+    function widestRow(column) { return MenuFit.widestWanted(column.children) }
+
     Rectangle {
         id: frame
-        width: Math.max(0, Math.min(root.workArea.width, Theme.menuWidth))
+        // Theme.menuWidth, or the widest row's own width when a label and its hint need more, never past the work area.
+        width: Math.max(0, Math.min(root.workArea.width, root.rowsBuilding ? Theme.menuWidth : Math.max(Theme.menuWidth, root.widestRow(rows))))
+        onWidthChanged: if (root.opened) root.clampFrame()
         // The vertical inset keeps the first and last row's square highlight off the rounded corners.
         height: Math.max(0, Math.min(rows.implicitHeight + 2 * Theme.spacing.rowPaddingY,
                                     root.workArea.height - 2 * root.workAreaInset))
@@ -420,9 +521,16 @@ Item {
         // Mirrors hyprland decoration:rounding, same as NetworkDialog; 0 on a stock box stays square.
         radius: Style.cornerRadius
 
+        // The card takes every press no row takes (padding, separator, disabled row); a stepped body is no Flickable, so the closing ground would.
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.LeftButton | Qt.RightButton }
+
         Flea.CardScroll {
             id: scroll
-            gutter: 0 // Menus keep no scroll gutter; the bar overlays.
+            // A menu steps the highlight, never pixel scrolls: one row a notch, one row per
+            // row height of gained touchpad travel, and reveal() follows. No bar, no lane.
+            highlightSteps: true
+            stepBy: function (delta) { root.stepMain(delta) }
+            revealClearY: root.fadeReach
             anchors.fill: parent
             anchors.topMargin: Theme.spacing.rowPaddingY
             anchors.bottomMargin: Theme.spacing.rowPaddingY
@@ -439,6 +547,7 @@ Item {
                     required property int index
                     width: rows.width
                     entry: row.modelData
+                    onPressedChanged: MenuRefresh.pressChanged(root, row.pressed)
                     current: !root.submenuOpen && root.cursor === row.index
                     lastPointerGlobal: root.pointerGlobal
                     onPointerSeen: function (at) { root.pointerGlobal = at }
@@ -446,7 +555,7 @@ Item {
                         if (root.pointerSettling) return
                         root.cursor = row.index
                         if (Menu.hasSubmenu(row.modelData)) root.openSubmenu(row.index)
-                        else root.openSubmenuRow = -1
+                        else { root.openSubmenuRow = -1; root.loneFlyoutAction = "" }
                     }
                     onActivated: {
                         if (Menu.hasSubmenu(row.modelData))
@@ -460,10 +569,14 @@ Item {
         }
         Flea.MenuEdgeFade {
             anchors.top: parent.top
+            inset: Theme.spacing.rowPaddingY
+            reach: root.fadeReach
             visible: scroll.contentY > 0
         }
         Flea.MenuEdgeFade {
             anchors.bottom: parent.bottom
+            inset: Theme.spacing.rowPaddingY
+            reach: root.fadeReach
             visible: scroll.contentY + scroll.height < scroll.contentHeight
             rotation: 180
         }
@@ -478,7 +591,7 @@ Item {
         // peers.y already carries the inset, so the flyout frame itself stays on the row grid.
         y: Math.max(root.workArea.y + root.workAreaInset,
                     Math.min(frame.y + root.submenuOffset(), root.workArea.y + root.workArea.height - root.workAreaInset - height))
-        width: Math.max(0, Math.min(Theme.menuWidth, root.workArea.width))
+        width: Math.max(0, Math.min(Math.max(Theme.menuWidth, root.widestRow(peers)), root.workArea.width))
         height: Math.max(0, Math.min(peers.implicitHeight + 2 * Theme.spacing.rowPaddingY,
                                     root.workArea.height - 2 * root.workAreaInset))
         color: Theme.color.surface
@@ -486,9 +599,15 @@ Item {
         border.color: Theme.color.muted
         radius: Style.cornerRadius
 
+        // The flyout takes its dead presses the same way.
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.LeftButton | Qt.RightButton }
+
         Flea.CardScroll {
             id: subScroll
-            gutter: 0 // Menus keep no scroll gutter; the bar overlays.
+            // The flyout steps like the main frame, through its own cursor and reveal.
+            highlightSteps: true
+            stepBy: function (delta) { root.submenuCursor = root.stepSubmenu(root.submenuCursor, delta) }
+            revealClearY: root.fadeReach
             anchors.fill: parent
             anchors.topMargin: Theme.spacing.rowPaddingY
             anchors.bottomMargin: Theme.spacing.rowPaddingY
@@ -508,15 +627,20 @@ Item {
                     // read-back submenuGlyphs() above and the drawn row cannot answer differently.
                     // A flyout row may carry its own mark and caption: OpenWith.html rides each
                     // application's own Icon in the mark slot and puts "default" in the hint slot,
-                    // and its tail row sits under a separator. Every other flyout keeps one glyph.
+                    // and its tail row sits under a separator. MenuAdditions040 leaves carry a
+                    // keyHint letter instead, drawn only while key hints are on, like every hint.
                     entry: ({ label: subRow.modelData.label, action: "",
                               disabled: subRow.modelData.disabled === true,
                               separator: subRow.modelData.separator === true,
-                              hint: subRow.modelData.hint,
+                              hint: subRow.modelData.hint !== undefined ? subRow.modelData.hint
+                                  : subRow.modelData.keyHint !== undefined && ViewState.keyHints
+                                  ? subRow.modelData.keyHint : undefined,
                               icon: subRow.modelData.icon,
                               glyph: subRow.modelData.glyph !== undefined ? subRow.modelData.glyph
-                                   : Menu.submenuGlyph(root.entries[root.openSubmenuRow].action) })
+                                   : Menu.submenuGlyph(root.loneFlyoutAction.length > 0
+                                       ? root.loneFlyoutAction : root.entries[root.openSubmenuRow].action) })
                     current: root.submenuCursor === subRow.index
+                    onPressedChanged: MenuRefresh.pressChanged(root, subRow.pressed)
                     // A flyout opened by key can land under the resting pointer too, so it reads the same point.
                     lastPointerGlobal: root.pointerGlobal
                     onPointerSeen: function (at) { root.pointerGlobal = at }
@@ -525,6 +649,19 @@ Item {
                 }
             }
         }
+        }
+        Flea.MenuEdgeFade {
+            anchors.top: parent.top
+            inset: Theme.spacing.rowPaddingY
+            reach: root.fadeReach
+            visible: subScroll.contentY > 0
+        }
+        Flea.MenuEdgeFade {
+            anchors.bottom: parent.bottom
+            inset: Theme.spacing.rowPaddingY
+            reach: root.fadeReach
+            visible: subScroll.contentY + subScroll.height < subScroll.contentHeight
+            rotation: 180
         }
     }
 
@@ -540,9 +677,10 @@ Item {
             var action = Keymap.lookup(event.key, event.text, event.modifiers, "menu")
             event.accepted = true
             if (action === "escape") {
-                if (root.submenuOpen)
+                if (root.submenuOpen) {
                     root.openSubmenuRow = -1
-                else
+                    root.loneFlyoutAction = ""
+                } else
                     root.close()
                 event.accepted = true
                 return
@@ -563,8 +701,24 @@ Item {
                 event.accepted = true
                 return
             }
-            if (action === "parent") { root.openSubmenuRow = -1; return }
+            if (action === "parent") {
+                root.openSubmenuRow = -1
+                root.loneFlyoutAction = ""
+                return
+            }
             if (action === "menuRight") { root.openSubmenu(root.cursor); return }
+            // A flyout letter answers only the flyout it was opened for.
+            if (root.submenuOpen) {
+                var opener = root.loneFlyoutAction.length > 0
+                    ? { action: root.loneFlyoutAction } : root.entries[root.openSubmenuRow]
+                if (opener && (opener.action === "copyAs" || opener.action === "pasteAs")) {
+                    var leaves = root.submenuEntries
+                    for (var l = 0; l < leaves.length; l++) {
+                        if (leaves[l].separator === true) continue
+                        if (leaves[l].id === action) { root.chooseSub(leaves[l].id); return }
+                    }
+                }
+            }
             if (action === "open" || action === "preview") {
                 if (root.submenuOpen) {
                     var sub = root.submenuEntries[root.submenuCursor]

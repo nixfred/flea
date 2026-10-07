@@ -10,12 +10,43 @@ Item {
     id: root
 
     property var picker: null
+    property var submissionFocus: null
+
+    function submissionChanged() {
+        var window = root.Window.window
+        if (root.picker.submitting) {
+            var before = window ? window.activeFocusItem : null
+            root.submissionFocus = null
+            root.picker.stepFocus(null, false)
+            root.submissionFocus = {before: before, stepped: window ? window.activeFocusItem : null}
+            return
+        }
+        var pending = root.submissionFocus
+        // Replies clear submitting before they answer and before disabled controls re-enable.
+        Qt.callLater(function() {
+            if (!pending || root.submissionFocus !== pending) return
+            root.submissionFocus = null
+            if (root.picker.answered || root.picker.submitting) return
+            var before = pending.before
+            if (before && before.visible && before.enabled && pending.stepped && pending.stepped.activeFocus)
+                before.forceActiveFocus()
+        })
+    }
+
+    Connections {
+        target: root.Window.window
+        function onActiveFocusItemChanged() {
+            if (root.submissionFocus && root.Window.window.activeFocusItem !== root.submissionFocus.stepped)
+                root.submissionFocus = null
+        }
+    }
 
     signal cancelRequested()
     signal acceptRequested()
     signal backRequested()
     signal upRequested()
     signal chipChosen(int index)
+    signal viewChosen(string mode)
 
     readonly property var req: root.picker.req
     readonly property var chips: Picker.chips(root.req)
@@ -24,18 +55,42 @@ Item {
 
     implicitHeight: ask.height + where.height
 
-    // The picker's chrome control: a mark, or a word. GM's 2026-09-11 ruling moved its frame off the
-    // divider's ink, which ui/picker.qml's own comment says the board drew both in: a frame and a
-    // rule in one ink are one line, and the controls dissolved into the chrome as the scale dropped.
-    // The frame carries the role, muted or accent, and the wash inside it carries the state.
+    // The picker's answers are ButtonSystem040 A's one control; the picker owns Tab.
+    component Answer: Flea.DialogButton {
+        id: answer
+        property string name: answer.label
+        tabHandle: true
+        enabled: answer.available
+        activeFocusOnTab: answer.available
+        onTabbed: function(from, back) { root.picker.stepFocus(answer, back) }
+    }
+
+    // Back, Up and the view marks are Tier A chrome marks, frameless: muted at rest, the keyboard lifts one to the foreground, a lit view stays in it.
+    component Mark: Flea.ChromeButton {
+        id: mark
+        property bool lit: false
+        readonly property bool available: mark.enabled
+        property string name: mark.accessName
+        gesturePolicy: TapHandler.ReleaseWithinBounds
+        restingColor: mark.lit ? Theme.color.foreground : Theme.color.muted
+        activeFocusOnTab: mark.enabled
+        keyboardFocused: mark.activeFocus
+        Keys.onTabPressed: function(event) { root.picker.stepFocus(mark, (event.modifiers & Qt.ShiftModifier) !== 0) }
+        Keys.onBacktabPressed: root.picker.stepFocus(mark, true)
+        Keys.onReturnPressed: if (mark.enabled) mark.activated()
+        Keys.onEnterPressed: if (mark.enabled) mark.activated()
+        Keys.onSpacePressed: if (mark.enabled) mark.activated()
+    }
+
+    // A filter chip (Picker040's dropdown replaces it in 0.3.10): a word in a muted frame, the chosen one an accent frame and wash.
     component Framed: Item {
         id: control
 
-        property string glyph: ""
         property string label: ""
         property string name: control.label
         property bool primary: false
         property bool available: true
+        opacity: available ? 1 : Theme.disabledOpacity
         enabled: available
         activeFocusOnTab: available
         Keys.onTabPressed: function(event) { root.picker.stepFocus(control, (event.modifiers & Qt.ShiftModifier) !== 0) }
@@ -46,9 +101,9 @@ Item {
 
         signal pressed()
 
-        readonly property color ink: control.available ? Theme.color.foreground : Theme.color.muted
+        readonly property color ink: !control.available ? Theme.color.muted : Theme.color.foreground
 
-        implicitWidth: control.glyph.length > 0 ? Theme.hitMin : caption.implicitWidth + 2 * Theme.spacing.gap
+        implicitWidth: caption.implicitWidth + 2 * Theme.spacing.gap
         implicitHeight: Theme.hitMin
         scale: press.pressed && control.available && !Theme.reducedMotion ? 0.96 : 1
 
@@ -61,18 +116,13 @@ Item {
             NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
         }
 
-        // Muted is the resting frame of a neutral control, the role ThemeRoles.html gives an inactive
-        // one, and an unavailable control stays there: a frame may recede only when the control is
-        // inert. ui/DialogButton.qml has drawn its own frames this way all along.
-        readonly property color frame: control.available && control.primary
+        readonly property color frame: control.primary
             ? Theme.color.accentFrame : Theme.color.muted
 
-        // The primary control carries its wash at rest, because it is the one action the request is
-        // asking for; every other control earns one under the pointer or the keyboard.
-        readonly property real wash: !control.available ? 0
-            : (control.activeFocus || press.pressed || control.primary) ? Theme.washActive
+        // The chosen chip carries its wash at rest; every other earns one under the pointer or the keyboard.
+        readonly property real wash: control.primary ? Theme.washActive : !control.available ? 0
+            : (control.activeFocus || press.pressed) ? Theme.washActive
             : hover.hovered ? Theme.washHover : 0
-        // The wash carries the role now that the label does not, so only a primary's is accent.
         readonly property color washInk: control.primary ? Theme.color.accent : Theme.color.foreground
 
         Rectangle {
@@ -82,19 +132,9 @@ Item {
             border.color: control.frame
         }
 
-        Flea.Glyph {
-            anchors.centerIn: parent
-            visible: control.glyph.length > 0
-            width: Theme.chromeMarkSize
-            height: Theme.chromeMarkSize
-            name: control.glyph
-            color: control.ink
-        }
-
         Text {
             id: caption
             anchors.centerIn: parent
-            visible: control.glyph.length === 0
             text: control.label
             color: control.ink
             font.family: Theme.font.family
@@ -158,28 +198,27 @@ Item {
             }
         }
 
+        // Above the strip's rule: the answers' 2 px ring reaches the strip's own edges, and the rule must not cut it.
         Row {
             id: buttons
+            z: 1
             anchors.right: parent.right
             anchors.rightMargin: Theme.spacing.rowPaddingX
             anchors.verticalCenter: parent.verticalCenter
             spacing: Theme.spacing.gap
 
-            // The board's chrome button is its hit box plus the hairline frame around it, 26 at base-size 14.
-            Framed {
+            Answer {
                 id: cancelButton
-                height: Theme.hitMin + 2 * Theme.spacing.hairline
                 label: "Cancel"
-                onPressed: root.cancelRequested()
+                onActivated: root.cancelRequested()
             }
 
-            Framed {
+            Answer {
                 id: acceptButton
-                height: Theme.hitMin + 2 * Theme.spacing.hairline
                 label: Picker.acceptLabel(root.req, root.picker.marks.length)
                 primary: true
                 available: root.picker.canAccept
-                onPressed: root.acceptRequested()
+                onActivated: root.acceptRequested()
             }
         }
 
@@ -214,21 +253,20 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Theme.spacing.gap
 
-            Framed {
+            Mark {
                 id: backButton
                 glyph: "arrow-left"
-                name: "Back"
-                available: !root.picker.backendUnavailable && root.picker.history.length > 0 && !root.picker.submitting
-                onPressed: root.backRequested()
+                enabled: !root.picker.backendUnavailable && root.picker.history.length > 0 && !root.picker.submitting
+                onActivated: root.backRequested()
             }
 
-            Framed {
+            Mark {
                 id: upButton
                 glyph: "arrow-up"
-                name: root.picker.recent ? "Parent folder unavailable in Recent" : "Parent folder"
+                accessName: root.picker.recent ? "Parent folder unavailable in Recent" : "Parent folder"
                 // The board's own rule, drawn as its disabled Up: a history has no directory above it.
-                available: !root.picker.backendUnavailable && !root.picker.submitting && !root.picker.recent && Picker.parentOf(root.picker.path) !== root.picker.path
-                onPressed: root.upRequested()
+                enabled: !root.picker.backendUnavailable && !root.picker.submitting && !root.picker.recent && Picker.parentOf(root.picker.path) !== root.picker.path
+                onActivated: root.upRequested()
             }
         }
 
@@ -249,13 +287,14 @@ Item {
         }
 
         // The caller's filters, and All files beside them; a request with no filters draws no chips.
+        // The view marks keep the far right, so the chips give way through their anchor.
         Flickable {
             id: types
             anchors.right: parent.right
-            anchors.rightMargin: Theme.spacing.rowPaddingX
+            anchors.rightMargin: views.width + Theme.spacing.rowPaddingX + Theme.spacing.gap
             anchors.verticalCenter: parent.verticalCenter
             // The chips take room first and the path gives way through its anchor, keeping its minimum.
-            width: Picker.chipStripWidth(where.width - moves.width - 2 * Theme.spacing.rowPaddingX - 2 * Theme.spacing.gap, chipRow.width, Picker.CHIP_PATH_MIN)
+            width: Picker.chipStripWidth(where.width - moves.width - views.width - 2 * Theme.spacing.rowPaddingX - 3 * Theme.spacing.gap, chipRow.width, Picker.CHIP_PATH_MIN)
             height: Theme.hitMin
             contentWidth: chipRow.width
             contentHeight: height
@@ -291,12 +330,37 @@ Item {
         }
     }
 
+    // Pointer and ctrl-1/ctrl-3 targets only; callout 12 keeps them out of the Tab walk.
+    Row {
+        id: views
+        anchors.right: parent.right
+        anchors.rightMargin: Theme.spacing.rowPaddingX
+        anchors.verticalCenter: where.verticalCenter
+        spacing: Theme.spacing.gap
+
+        Mark {
+            id: listButton
+            glyph: "list"
+            lit: root.picker.viewMode === "list"
+            activeFocusOnTab: false
+            onActivated: root.viewChosen("list")
+        }
+
+        Mark {
+            id: gridButton
+            glyph: "grid"
+            lit: root.picker.viewMode === "grid"
+            activeFocusOnTab: false
+            onActivated: root.viewChosen("grid")
+        }
+    }
+
     function focusItems() {
         var items = [cancelButton, acceptButton, backButton, upButton]
         for (var i = 0; i < chipRepeater.count; i++) items.push(chipRepeater.itemAt(i))
         return items
     }
     function controls() {
-        return root.focusItems().map(function(item) { return root.picker.control(item.name, item, item.available) })
+        return root.focusItems().concat([listButton, gridButton]).map(function(item) { return root.picker.control(item.name, item, item.available) })
     }
 }

@@ -3,6 +3,7 @@ import "flea"
 import "flea" as Flea
 import "flea/js/Filter.js" as Filter
 import "flea/js/Ops.js" as Ops
+import "flea/js/TextSize.js" as TextSize
 // The real GridArea and GridTile must retain and contain a bottom editor through global cell reflow.
 Window {
     id: probe
@@ -15,6 +16,9 @@ Window {
     property int plainHeight: 0
     property int heightChanges: 0
     property int replacementChanges: 0
+    property var savedFont: null
+    property var savedGrid: null
+    property int savedRowHeight: 0
     property var pendingRequest: ({source: "/fixture/f1199.txt", destination: "/fixture/pending.md"})
     function check(ok, label) {
         checks++
@@ -54,6 +58,10 @@ Window {
         property string renameError: ""
         property var renameRequest: null
         readonly property bool renamePending: renameRequest !== null
+        // Grid closing review G1: the status-bar refusal the pending turns assert.
+        property var said: []
+        function message(text, isError) { said.push([text, isError]) }
+        function renameEditor() { return probe.editor() }
         property var selectionBand: null
         property var clipboard: null
         property var thumbState: ({file: {}, order: []})
@@ -237,8 +245,20 @@ Window {
                 editPane.setCursor(1201)
             }
             if (probe.step === 10) {
-                // Exercise begin-time cell growth as well as the native 134 px normal-cell case.
-                Theme.rowHeight = 111
+                // Largest OEM stop with Theme.qml geometry: caption line 15/11, line box 1.8, cell floor 146.
+                probe.savedFont = Theme.font
+                probe.savedGrid = Theme.grid
+                probe.savedRowHeight = Theme.rowHeight
+                var tallStop = TextSize.STOPS[TextSize.STOPS.length - 1]
+                var tallBodySmall = TextSize.bodySmall(tallStop)
+                var tallCaption = TextSize.caption(tallStop)
+                Theme.font = {family: "monospace", body: tallStop, bodySmall: tallBodySmall, caption: tallCaption}
+                var captionLineRatio = 15 / 11 // Theme.qml grid captionLineHeight per caption px.
+                var lineBoxRatio = 1.8 // Theme.qml lineBoxRatio per bodySmall px.
+                var cellFloor = 146 // Theme.qml grid reference viewport floor at base size.
+                var tallLine = tallCaption * captionLineRatio
+                Theme.grid = {captionHeight: 2 * tallLine, captionLineHeight: tallLine, minCellWidth: cellFloor}
+                Theme.rowHeight = Math.round(tallBodySmall * lineBoxRatio) + 2 * Theme.spacing.rowPaddingY
                 editPane.renamingIndex = 1201
             }
             if (probe.step === 11) {
@@ -307,6 +327,10 @@ Window {
                 view.visible = false
             }
             if (probe.step === 18) {
+                // Tall transition done: put the saved stub tokens back so later steps settle to plainHeight.
+                Theme.font = probe.savedFont
+                Theme.grid = probe.savedGrid
+                Theme.rowHeight = probe.savedRowHeight
                 probe.check(editPane.renamingIndex === -1 && editPane.renameError === "", "nonpending hide still abandons")
                 view.visible = true
                 editPane.setCursor(1201)

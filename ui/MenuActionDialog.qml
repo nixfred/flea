@@ -1,7 +1,6 @@
 import QtQuick
 import qs.Commons
 import "." as Flea
-import "js/Buttons.js" as Buttons
 import "js/Format.js" as Format
 
 // Menu-only actions share the existing card, field and button language.
@@ -167,9 +166,10 @@ FocusScope {
     Rectangle {
         id: card
         visible: !confirmation.opened
-        anchors.centerIn: parent
-        width: Math.max(0, Math.min(Theme.space(420) * Theme.dialogWidthRatio, root.width - 2 * Theme.spacing.gap))
-        height: Math.max(0, Math.min(body.wanted + 2 * Theme.spacing.rowPaddingX, root.height - 2 * Theme.spacing.gap))
+        x: Theme.cardOrigin(root.width, width)
+        y: Theme.cardOrigin(root.height, height)
+        width: Theme.cardSpan(Theme.space(420) * Theme.dialogWidthRatio, root.width - 2 * Theme.spacing.gap)
+        height: Theme.cardSpan(body.wanted + 2 * Theme.spacing.rowPaddingX, root.height - 2 * Theme.spacing.gap)
         color: Theme.color.surface
         border.color: Theme.color.muted
         border.width: Theme.spacing.hairline
@@ -182,10 +182,11 @@ FocusScope {
         }
         Flea.CardScroll {
             id: body
+            bleed: Theme.ringClearance
             anchors.fill: parent
-            anchors.margins: Theme.spacing.rowPaddingX
+            anchors.margins: Theme.spacing.rowPaddingX - Theme.ringClearance
             Column {
-                width: body.width
+                width: body.holderWidth
                 spacing: Theme.spacing.gap
                 Flea.DialogTitle {
                     width: parent.width
@@ -203,22 +204,17 @@ FocusScope {
                 Rectangle {
                     visible: root.inputAction
                     width: parent.width
-                    height: Theme.rowHeight
+                    height: Theme.rowHeight - Theme.spacing.rowPaddingY
                     color: Theme.color.background
-                    border.color: Theme.color.muted
+                    border.color: field.activeFocus ? Theme.color.accent : Theme.color.muted
                     border.width: Theme.spacing.hairline
-                    Rectangle {
-                        anchors.fill: parent
-                        anchors.margins: -Buttons.RING
-                        color: "transparent"
-                        border.width: Buttons.RING
-                        border.color: Theme.color.foreground
-                        visible: field.activeFocus
-                    }
                     TextInput {
                         id: field
-                        anchors.fill: parent
-                        anchors.margins: Theme.spacing.gap
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: Theme.spacing.gap
+                        anchors.rightMargin: Theme.spacing.gap
                         color: Theme.color.foreground
                         selectionColor: Theme.color.accent
                         selectedTextColor: Theme.color.background
@@ -246,7 +242,7 @@ FocusScope {
                     ].concat(root.facts.symlink ? [["Link target", root.facts.target]] : []) : []
                     Column {
                         required property var modelData
-                        width: body.width
+                        width: body.holderWidth
                         Text { width: parent.width; text: parent.modelData[0]; textFormat: Text.PlainText; color: Theme.color.muted; font { family: Theme.font.family; pixelSize: Theme.font.caption } }
                         Text { width: parent.width; text: parent.modelData[1]; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; color: Theme.color.foreground; font { family: Theme.font.family; pixelSize: Theme.font.body } }
                     }

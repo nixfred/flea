@@ -29,10 +29,9 @@ cardsize_rect() {
     printf 'CARD_RECT surface=%s viewport=%sx%s rect=%s\n' "$name" "$ww" "$wh" "$rect"
 }
 
-cardsize_dispatch() {
+cardsize_resize() {
     local result
-    result=$(hyprctl dispatch "$1" 2>&1) || fail "cardsizes: compositor dispatch failed: $result"
-    [[ "$result" == ok* ]] || fail "cardsizes: compositor refused dispatch: $result"
+    result=$(hypr_window_resize "$@" 2>&1) || fail "cardsizes: compositor resize failed: $result"
 }
 
 cardsize_network() {
@@ -53,6 +52,7 @@ cardsize_focus() {
 case_cardsizes() {
     local dir="$fixture_root/cardsizes" addr viewport initial_width initial_height wx wy ww wh index=0
     local base protocol network_rect before sy content visible after bx by bw bh cx cy focus last menu_count step box body eye rows menu_rect menu_width work_width
+    local area ax ay aw ah candidate rect rx ry rw rh centre ccx ccy
     sandbox_make "$dir"
     mkdir -p "$dir/listing" "$dir/config" "$dir/data" "$dir/bin" || fail "cardsizes: fixture creation failed"
     export XDG_CONFIG_HOME="$dir/config" XDG_DATA_HOME="$dir/data"
@@ -95,7 +95,7 @@ OPENER
         if [[ "$viewport" == fullscreen ]]; then
             omarchy-drive window fullscreen "$addr" >/dev/null || fail "cardsizes: fullscreen failed"
         else
-            cardsize_dispatch "hl.dsp.window.resize({ x = ${viewport%x*}, y = ${viewport#*x}, exact = true, window = \"address:$addr\" })"
+            cardsize_resize "$addr" "${viewport%x*}" "${viewport#*x}"
             omarchy-drive window center "$addr" >/dev/null || fail "cardsizes: centering failed"
         fi
         settle
@@ -191,6 +191,28 @@ OPENER
         last=$((rows - 1))
         (( last < 17 )) || last=16
         (( last >= 0 )) || fail "cardsizes: no visible listing row for menu placement"
+        # visibleRows rounds up, so the last row can sit half below the list clip: use the deepest whole one.
+        area=$(ipc listAreaRect) || fail "cardsizes: listing area geometry failed"
+        [[ "$area" =~ ^-?[0-9]+\ -?[0-9]+\ [0-9]+\ [0-9]+$ ]] || fail "cardsizes: invalid listing area: $area"
+        read -r ax ay aw ah <<< "$area"
+        candidate=$last
+        last=-1
+        while (( candidate >= 0 )); do
+            rect=$(ipc rowRect "$candidate") || fail "cardsizes: row $candidate has no rectangle"
+            [[ "$rect" =~ ^-?[0-9]+\ -?[0-9]+\ [0-9]+\ [0-9]+$ ]] || fail "cardsizes: invalid row rectangle for $candidate: $rect"
+            read -r rx ry rw rh <<< "$rect"
+            if (( rx >= ax && ry >= ay && rx + rw <= ax + aw && ry + rh <= ay + ah )); then
+                last=$candidate
+                break
+            fi
+            candidate=$((candidate - 1))
+        done
+        (( last >= 0 )) || fail "cardsizes: no fully visible listing row for menu placement (area $area)"
+        centre=$(ipc rowCentre "$last") || fail "cardsizes: row $last has no centre"
+        [[ "$centre" =~ ^-?[0-9]+\ -?[0-9]+$ ]] || fail "cardsizes: invalid row centre for $last: $centre"
+        read -r ccx ccy <<< "$centre"
+        (( ccx >= ax && ccx <= ax + aw && ccy >= ay && ccy <= ay + ah )) \
+            || fail "cardsizes: row $last centre $centre lies outside listing area $area"
         click_row "$last" right || fail "cardsizes: bottom-row context menu failed"
         cardsize_expect contextMenuVisible true
         menu_rect=$(ipc contextMenuRect) || fail "cardsizes: menu frame observation failed"

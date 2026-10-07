@@ -1,6 +1,16 @@
 .pragma library
-
 .import "Search.js" as Search
+.import "Tabs.js" as Tabs
+
+// Hit the drawn label instead of the whole name slot, including centered grid captions.
+function onName(label, owner, point, centered) {
+    if (!label || !label.visible) return false
+    var at = label.mapFromItem(owner, point.x, point.y)
+    var width = Math.min(label.width, label.contentWidth === undefined ? label.implicitWidth : label.contentWidth)
+    var height = Math.min(label.height, label.contentHeight === undefined ? label.implicitHeight : label.contentHeight)
+    var left = centered ? (label.width - width) / 2 : 0
+    return at.x >= left && at.x < left + width && at.y >= 0 && at.y < height
+}
 
 // The pointer contract, declared in keys.toml's [[pointer]] table and decided here and nowhere
 // else. tests/js/tap.js drives every row of Keymap.POINTER through the three functions below, so a
@@ -11,9 +21,11 @@
 // idempotent on a row, so it runs on both taps of a double click rather than behind a double-click
 // timer, which would delay every selection by the whole mouseDoubleClickInterval.
 
-// The listing: the list view, the grid view, and the columns view's own middle column.
+// One tap selects, the second opens; a click carries context 0 so the list never moves under the pointer.
 function tapped(index, tapCount, modifiers, root) {
     if (index < 0) return
+    // Single-click mode opens on the first tap alone, so later taps of one gesture add nothing.
+    if (root.singleClick === true && tapCount !== 1) return
     // Finder's two selection modifiers. Neither ever opens, and only the first tap of one counts,
     // so a modified double click selects once instead of toggling itself back off.
     if (modifiers & Qt.ControlModifier) {
@@ -32,15 +44,15 @@ function tapped(index, tapCount, modifiers, root) {
     var verb = Search.activateAction(root)
     if (verb === "reveal" && tapCount !== 1)
         return
-    // Finder commits an open inline rename when you click away, and the field's own text is what
-    // lands. It goes first so the write happens before the selection moves under it.
+    // Finder commits an open rename on click-away first, so its text lands before the selection moves.
     root.commitOpenRename()
-    // The plain tap replaces the selection with this row, Finder's rule: leaving the old one
-    // standing would extend the next shift+click from an anchor nothing on screen names, and every
-    // write operation targets the selection ahead of the cursor row.
-    root.selectOnly(index)
+    // A plain tap replaces the selection, so the next shift+click extends from a row on screen.
+    root.selectOnly(index, 0)
     if (tapCount === 2 || verb === "reveal")
         root.act(verb)
+    // Single-click mode opens files and folders on one tap, like the middle column already does.
+    if (tapCount === 1 && verb === "open" && root.singleClick === true)
+        root.act("open")
 }
 
 // The columns view's own middle column, and ui/ColumnsArea.qml is its only caller, which is what
@@ -60,7 +72,7 @@ function tappedMiddle(index, tapCount, modifiers, root) {
     if (tapCount !== 1)
         return
     root.commitOpenRename()
-    root.selectOnly(index)
+    root.selectOnly(index, 0)
     // A directory listed as a search result is still a result, so the one decision point answers here
     // too: it reveals rather than opening, exactly as the same row does in the list view.
     root.act(Search.activateAction(root))
@@ -77,8 +89,9 @@ function tappedMenu(index, eventPoint, root, menu) {
     var picked = root.selectedIndices()
     if (picked.length > 0 && picked.indexOf(index) < 0)
         root.clearSelection()
-    root.setCursor(index)
+    root.setCursor(index, 0)
     menu.openAt(eventPoint.scenePosition)
+    root.cancelSlowClick()
 }
 
 // A right click that landed on no row raises the directory's own menu, in all three views and the
@@ -97,7 +110,22 @@ function onBackground(view, eventPoint) {
 function tappedColumn(row, button, tapCount) {
     if (!row || button === Qt.RightButton)
         return ""
+    if (button === Qt.MiddleButton)
+        return row.d && tapCount === 1 ? "openTab" : ""
     if (row.d)
         return tapCount === 1 ? "reveal" : ""
     return tapCount === 2 ? "open" : ""
+}
+
+// Middle click on a directory opens it in a new tab; a file has no directory to show.
+function tabTarget(row, base, root) {
+    return row && row.d && typeof row.n === "string" ? root.join(base, row.n) : ""
+}
+
+function tappedTab(row, base, root) {
+    var target = tabTarget(row, base, root)
+    if (target.length === 0)
+        return
+    root.commitOpenRename()
+    Tabs.openNew(root, target)
 }

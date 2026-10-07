@@ -9,9 +9,7 @@ import "js/Nav.js" as Nav
 import "js/Swap.js" as Swap
 import "js/Tap.js" as Tap
 
-// The Miller three-pane. The parent and the child are read with peek, which never touches the pane's
-// own listing; the middle column is that listing, so the cursor, the selection and every per-row
-// facility keep working exactly as they do in the list view.
+// Miller columns peek their neighbours; the active listing shares List's cursor, selection and row operations.
 Item {
     id: root
 
@@ -29,6 +27,8 @@ Item {
     // peekKey -> the mode of a peek that came back denied, which answers zero rows as an empty one does.
     property var denials: ({})
     property int peekVersion: 0
+    // The column directories drawn at the last refresh, which every watching peek names so the backend unwatches the rest.
+    readonly property var keep: ({ drawn: [] })
 
     readonly property string parentPath: Nav.parentOf(root.pane.path)
     // Extra columns are ancestors, oldest first, each with the parent column's own peek.
@@ -92,19 +92,18 @@ Item {
         return root.peekVersion >= 0 && path.length > 0 && root.peeked[key] !== undefined
     }
 
-    function ask(path) {
+    // again re-asks a column already held, the rows staying until the reply replaces them; rearm asks even with the first ask out, because the backend unwatched the column when it left the drawn set.
+    function ask(path, again, rearm) {
         var key = root.peekKey(path), sent = Columns.sentKey(key, root.pane.windowSize)
-        if (path.length > 0 && !root.peeked[key] && !Columns.hasAsk(root.pending, sent)) {
+        if (path.length > 0 && (again === true || !root.peeked[key]) && (rearm === true || !Columns.hasAsk(root.pending, sent))) {
             root.pending = Columns.trackAsk(root.pending, sent)
-            root.pane.backend.peek(path, root.pane.windowSize, root.pane.showHidden)
+            root.pane.backend.peek(path, root.pane.windowSize, root.pane.showHidden, undefined, root.keep.drawn)
         }
     }
 
     // Hidden view asks nothing; the gates are computed fresh, so a handler mid-notify cannot read a stale sibling binding.
     function refreshNeighbours() { if (!root.visible) return
-        var asks = Columns.neighbourAsks(root.pane.path, root.width, root.columnsLimit)
-        for (var i = 0; i < asks.length; i++) root.ask(asks[i])
-        root.ask(root.childPath)
+        Columns.keepAsks(root.keep, Columns.neighbourAsks(root.pane.path, root.width, root.columnsLimit), root.childPath).forEach(function (one) { root.ask(one.path, one.again, one.again) })
         root.askMeta()
         root.askThumb()
     }
@@ -183,6 +182,9 @@ Item {
     // The one column whose rows are the pane's own, for ui/Ipc.qml: a neighbour column's background navigates to its drawn directory first, so no peek lands a background right click at once.
     function activeColumn() { return active }
     readonly property var scrollBar: active.scrollBar
+    readonly property bool fileDragActive: active.fileDragActive || parentColumn.fileDragActive || childColumn.fileDragActive
+        || !!(grandparentLoader.item && grandparentLoader.item.fileDragActive)
+        || !!(greatGrandparentLoader.item && greatGrandparentLoader.item.fileDragActive)
     // All active views accept a view position; the pane maps filtered listing indices before calling.
     function itemAtIndex(index) { return active.itemAtIndex(index) }
     function activeContentY() { return active.contentY() }
@@ -208,11 +210,13 @@ Item {
     function childItemAt(index) { return childColumn.itemAtIndex(index) }
     function childEmptyItem() { return childColumn.emptyItem }
     function frameItem() { return preview.frameItem }
+    function pictureItem() { return preview.pictureItem }
     function playerLoaded() { return preview.playerLoaded() }
     readonly property int previewIndex: preview.visible ? preview.loadedIndex : -1
     function thumbShown() { return preview.thumbShown }
     function frameReady() { return preview.frameStatus === Image.Ready }
     function textLines() { return preview.textLines() }
+    function markdownText() { return preview.markdownText() }
     function linesItem() { return preview.linesItem }
     function archiveItem() { return preview.archiveItem }
     function archiveNames() { return preview.archiveNames() }
@@ -294,6 +298,9 @@ Item {
     Connections {
         target: root.pane.backend
 
+        // The backend watches each column's directory and says so with the line the listed folder gets; the pane's own path is PaneWire's.
+        function onChanged(path) { if (root.peeked[root.peekKey(path)] !== undefined) root.ask(path, true) }
+
         // hidden, hiddenLast and first are the request's own, echoed; first keeps a 1 or 512 repair peek out of a column waiting on the window size.
         function onPeeked(path, hidden, total, rows, readFailed, mode, hiddenLast, first) {
             var key = Columns.peekKey(path, hidden, hiddenLast), sent = Columns.sentKey(key, first)
@@ -352,11 +359,13 @@ Item {
                 dim: true
                 showDivider: true
                 onActivated: function (name, isDir) { root.activateNeighbour(root.greatGrandparentPath, name, isDir) }
+                onRowPressed: root.pane.pressSlowClick()
                 onNeighbourMenuRequested: function (name) { root.menuOnNeighbour(root.greatGrandparentPath, name) }
                 onNeighbourBackgroundRequested: function (eventPoint) {
                     if (root.showGreatGrandparent && root.greatGrandparentShown)
                         root.menuOnNeighbourBackground(root.greatGrandparentPath, eventPoint)
                 }
+                onTabRequested: function (row) { Tap.tappedTab(row, root.greatGrandparentPath, root.pane) }
             }
         }
 
@@ -375,11 +384,13 @@ Item {
                 dim: true
                 showDivider: true
                 onActivated: function (name, isDir) { root.activateNeighbour(root.grandparentPath, name, isDir) }
+                onRowPressed: root.pane.pressSlowClick()
                 onNeighbourMenuRequested: function (name) { root.menuOnNeighbour(root.grandparentPath, name) }
                 onNeighbourBackgroundRequested: function (eventPoint) {
                     if (root.showGrandparent && root.grandparentShown)
                         root.menuOnNeighbourBackground(root.grandparentPath, eventPoint)
                 }
+                onTabRequested: function (row) { Tap.tappedTab(row, root.grandparentPath, root.pane) }
             }
         }
 
@@ -396,11 +407,13 @@ Item {
             dim: true
             showDivider: true
             onActivated: function (name, isDir) { root.activateNeighbour(root.parentPath, name, isDir) }
+            onRowPressed: root.pane.pressSlowClick()
             onNeighbourMenuRequested: function (name) { root.menuOnNeighbour(root.parentPath, name) }
             onNeighbourBackgroundRequested: function (eventPoint) {
                 if (root.showParent && root.parentShown)
                     root.menuOnNeighbourBackground(root.parentPath, eventPoint)
             }
+            onTabRequested: function (row) { Tap.tappedTab(row, root.parentPath, root.pane) }
         }
 
         // The pane's own listing, which is why this column and only this one takes the accent.
@@ -414,8 +427,17 @@ Item {
             pane: root.pane
             showDivider: root.thirdShown
             // The list's and the grid's own two routes, reached from the one column whose rows are the pane's listing, so a click means the same thing in all three views.
-            onPicked: function (index, tapCount, modifiers) { Tap.tappedMiddle(index, tapCount, modifiers, root.pane) }
+            onPicked: function (index, tapCount, modifiers, onName) {
+                var wasSole = root.pane.slowClickWasSole(index)
+                Tap.tappedMiddle(index, tapCount, modifiers, root.pane)
+                // The slow click renames on the pane's timer; a double click opens through tappedMiddle() above instead.
+                if (tapCount === 2) root.pane.cancelSlowClick()
+                else if (tapCount === 1 && onName) root.pane.armSlowClick(index, modifiers, active.fileDragActive, wasSole)
+                else root.pane.cancelSlowClick()
+            }
             onMenuRequested: function (index, eventPoint) { Tap.tappedMenu(index, eventPoint, root.pane, root.menu) }
+            onRowPressed: root.pane.pressSlowClick()
+            onTabRequested: function (row) { Tap.tappedTab(row, root.pane.path, root.pane) }
             onBackgroundMenuRequested: function (eventPoint) { root.menu.openBackground(eventPoint.scenePosition) }
             onThumbsApplied: function (work) { root.thumbsApplied(work) }
             onDirSizesApplied: function (ask) { root.dirSizesApplied(ask) }
@@ -439,11 +461,13 @@ Item {
                 lockedMode: root.deniedMode(root.shownChildPath)
                 drawsEmpty: root.answered(root.shownChildPath)
                 onActivated: function (name, isDir) { root.activateNeighbour(root.shownChildPath, name, isDir) }
+                onRowPressed: root.pane.pressSlowClick()
                 onNeighbourMenuRequested: function (name) { root.menuOnNeighbour(root.shownChildPath, name) }
                 onNeighbourBackgroundRequested: function (eventPoint) {
                     if (root.shownIsDir && root.shownChildPath.length > 0)
                         root.menuOnNeighbourBackground(root.shownChildPath, eventPoint)
                 }
+                onTabRequested: function (row) { Tap.tappedTab(row, root.shownChildPath, root.pane) }
             }
 
             Flea.SelectionPreview {
@@ -456,4 +480,12 @@ Item {
             }
         }
     }
+
+    // For ui/Ipc.qml: the names a drawn neighbour column holds, "|" joined, and "" when that column is not drawn.
+    function drawnNames(slot) {
+        var drawn = slot === "child" ? root.shownIsDir : (slot === "parent" && root.showParent && root.parentShown)
+        return drawn ? (slot === "child" ? childColumn.rows : parentColumn.rows).map(function (row) { return row.n }).join("|") : ""
+    }
+    // For ui/Ipc.qml: the names the window last read for a folder, drawn or not.
+    function peekNames(path) { return root.rowsFor(path).map(function (row) { return row.n }).join("|") }
 }

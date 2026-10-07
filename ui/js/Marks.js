@@ -18,35 +18,78 @@ function selectAll(pane) {
     }
 }
 
+// A gesture continues while nothing else moved the cursor since the last extend left it;
+// any other cursor move, and any mark made outside the gesture, ends it through shiftState.
+function continuing(pane) {
+    var state = pane.selection.shiftState()
+    return state !== null && pane.cursorIndex === state.last && (pane.cursorSeq || 0) === (state.seq || 0)
+}
+
+// Invert flips the drawn marks; a row no filter draws is never selected.
+function inverted(total, shown, selected) {
+    var drawn = shown === null ? range(total) : shown.slice()
+    var has = {}
+    for (var s = 0; s < selected.length; s++)
+        has[selected[s]] = true
+    var out = []
+    for (var i = 0; i < drawn.length; i++) {
+        if (has[drawn[i]] !== true)
+            out.push(drawn[i])
+    }
+    return out
+}
+
+function range(total) {
+    var out = []
+    for (var r = 0; r < total; r++)
+        out.push(r)
+    return out
+}
+
+// The pane's own invert, through the same drawn set selectAll reads.
+function invert(pane) {
+    var next = inverted(pane.total, pane.shown, pane.selectedIndices())
+    pane.selection.clear()
+    for (var i = 0; i < next.length; i++)
+        pane.selection.toggle(next[i])
+    pane.selectionVersion += 1
+}
+
 // Shift+J and Shift+K, the whole gesture: the cursor moves through what is drawn and the selection
-// follows it. corner: the anchor only re-latches to the cursor once the selection is empty, so a
-// plain j/k move never has to special-case a shift+j/k chain already in progress.
+// is the base the gesture started from plus the drawn rows between the anchor and the cursor, so
+// several blocks can be marked and the gesture's own range still grows and shrinks.
 function extend(pane, delta) {
-    if (pane.selection.count() === 0) {
+    if (!continuing(pane)) {
+        pane.selection.shiftBegin(pane.selectedIndices(), pane.cursorIndex, pane.cursorSeq || 0)
         pane.selectionAnchor = pane.cursorIndex
     }
     Filter.moveCursor(pane, delta)
     extendTo(pane, pane.selectionAnchor)
+    pane.selection.shiftMoved(pane.cursorIndex, pane.cursorSeq || 0)
     pane.selectionVersion += 1
 }
 
-// Shift+click, the absolute twin of extend() above: the cursor lands on the clicked row and the
-// selection covers the drawn rows between it and the anchor the gesture started from.
+// Shift+click, the absolute twin of extend() above: the anchor latches to the cursor row before the
+// click, which a plain click or ctrl+click already sets, and consecutive shift+clicks share one base.
+// A click carries context 0 so the list never moves under the pointer.
 function extendToRow(pane, index) {
-    if (pane.selection.count() === 0) {
+    if (!continuing(pane)) {
+        pane.selection.shiftBegin(pane.selectedIndices(), pane.cursorIndex, pane.cursorSeq || 0)
         pane.selectionAnchor = pane.cursorIndex
     }
-    Filter.setCursor(pane, index)
+    Filter.setCursor(pane, index, 0)
     extendTo(pane, pane.selectionAnchor)
+    pane.selection.shiftMoved(pane.cursorIndex, pane.cursorSeq || 0)
     pane.selectionVersion += 1
 }
 
 // Ctrl+click, v's mouse twin. An empty set means the cursor row is selected, so it joins first.
+// A click carries context 0 so the list never moves under the pointer.
 function toggleRow(pane, index) {
     if (pane.selection.count() === 0 && pane.cursorIndex !== index) {
         pane.selection.toggle(pane.cursorIndex)
     }
-    Filter.setCursor(pane, index)
+    Filter.setCursor(pane, index, 0)
     pane.selection.toggle(index)
     pane.selectionAnchor = index
     pane.selectionVersion += 1
@@ -56,7 +99,8 @@ function toggleRow(pane, index) {
 function follow(pane) {
     if (!pane.selection.follows() || pane.cursorIndex === pane.selectedIndices()[0])
         return
-    pane.selection.only(pane.cursorIndex)
+    var keep = pane.selection.isLanded ? pane.selection.isLanded() : false
+    pane.selection.only(pane.cursorIndex, keep)
     pane.selectionAnchor = pane.cursorIndex
     pane.selectionVersion += 1
 }
@@ -68,15 +112,31 @@ function toggleSelect(pane) {
     pane.selectionVersion += 1
 }
 
-// The rows drawn between the cursor and the anchor, for both gestures above.
+// The drawn rows between cursor and anchor; a shrinking gesture keeps its base.
 function extendTo(pane, anchor) {
-    if (pane.shown === null) {
-        pane.selection.extendTo(pane.cursorIndex, anchor)
+    var state = pane.selection.shiftState()
+    if (state === null) {
+        if (pane.shown === null) {
+            pane.selection.extendTo(pane.cursorIndex, anchor)
+            return
+        }
+        pane.selection.clear()
+        var single = Filter.between(pane.shown, pane.cursorIndex, anchor)
+        for (var i = 0; i < single.length; i++) {
+            pane.selection.toggle(single[i])
+        }
         return
     }
-    pane.selection.clear()
-    var range = Filter.between(pane.shown, pane.cursorIndex, anchor)
-    for (var i = 0; i < range.length; i++) {
-        pane.selection.toggle(range[i])
+    var range
+    if (pane.shown === null) {
+        range = []
+        var lo = Math.min(pane.cursorIndex, anchor)
+        var hi = Math.max(pane.cursorIndex, anchor)
+        for (var r = lo; r <= hi; r++) {
+            range.push(r)
+        }
+    } else {
+        range = Filter.between(pane.shown, pane.cursorIndex, anchor)
     }
+    pane.selection.shiftApply(range)
 }

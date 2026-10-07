@@ -131,6 +131,7 @@ function run(check) {
     runNeighbourAsks(check)
     runColumnMenu(check)
     runFolderHold(check)
+    runTabWiring(check)
 }
 
 // ColumnsWidth board (#167, #69): the columns count follows the window width, 2 below 900 up to 5 from 2300, capped by the View limit shipping at 3.
@@ -332,6 +333,28 @@ function runFolderHold(check) {
     var capNext = capGuard >= 0 ? capBody.indexOf("if (!root.holding", capGuard) : -1
     check("structural: cap orders guard before fallback arm", capGuard >= 0 && capReturn > capGuard && capReturn < capNext, true)
     check("the folder guard runs under Qt in preview-swap", Source.source("tests/preview-swap.qml").indexOf('Quickshell.env("PREVIEW_SWAP_FOLDERGUARD")') >= 0, true)
+}
+
+// Middle click opens the drawn folder in a tab, so each column wires its own path.
+function runTabWiring(check) {
+    var area = Source.source("ui/ColumnsArea.qml")
+    // Sample input: slice("id: a onTabRequested Tap.tappedTab(row, p) id: b", "id: a", "id: b").
+    var greatTab = Source.slice(area, "id: greatGrandparentLoader", "id: grandparentLoader")
+    var grandTab = Source.slice(area, "id: grandparentLoader", "id: parentColumn")
+    var parentTab = Source.slice(area, "id: parentColumn", "id: active")
+    var activeTab = Source.slice(area, "id: active", "id: childColumn")
+    var childTab = Source.slice(area, "id: childColumn", "id: preview")
+    check("great-grandparent tab stays in its own column", greatTab.split("onTabRequested").length - 1, 1)
+    check("great-grandparent opens its drawn folder in a tab", greatTab.indexOf("Tap.tappedTab(row, root.greatGrandparentPath, root.pane)") >= 0, true)
+    check("grandparent tab stays in its own column", grandTab.split("onTabRequested").length - 1, 1)
+    check("grandparent opens its drawn folder in a tab", grandTab.indexOf("Tap.tappedTab(row, root.grandparentPath, root.pane)") >= 0, true)
+    check("parent tab stays in its own column", parentTab.split("onTabRequested").length - 1, 1)
+    check("parent opens its drawn folder in a tab", parentTab.indexOf("Tap.tappedTab(row, root.parentPath, root.pane)") >= 0, true)
+    check("current tab stays in its own column", activeTab.split("onTabRequested").length - 1, 1)
+    check("current opens its drawn folder in a tab", activeTab.indexOf("Tap.tappedTab(row, root.pane.path, root.pane)") >= 0, true)
+    check("child tab stays in its own column", childTab.split("onTabRequested").length - 1, 1)
+    check("child opens its drawn folder in a tab", childTab.indexOf("Tap.tappedTab(row, root.shownChildPath, root.pane)") >= 0, true)
+    check("each of the five columns answers a tab", area.split("onTabRequested").length - 1, 5)
 }
 
 // w8 colroot: at / no ancestor repeats the active column, so the slot stays blank and Left stays a no-op.
@@ -554,6 +577,31 @@ function runColumnMenu(check) {
     onFailed(deadBackend.pane, deadBackend.root, "backend", "", "child is gone", 0)
     check("a dead backend drops both intents at once", deadBackend.pane.pendingBackground, "")
     check("with the row one beside it", deadBackend.pane.pendingMenu, false)
+    // A stranded twin with a matching request closes it, and an undo-shaped one with none re-reads the listing.
+    function strandedDoubles(request) {
+        var p = {path: "/a", listingPath: "/a", listInFlight: false, listedSeen: false,
+            pendingMenu: false, pendingBackground: "", pendingBackgroundAt: null,
+            total: 0, held: 0, rows: [], kindNames: [], cursorIndex: 0, renamingIndex: 2,
+            renameRequest: request, renamePending: false, renameKeepsPointerRow: false, renameError: "",
+            transfer: {id: 0}, searchMode: "", clipPending: null, pathsPending: null,
+            listingState: "ready", stateMessage: "", lockedMode: 0, said: [], refreshed: []}
+        p.message = function (t) { p.said.push(t) }
+        p.refresh = function (sel) { p.refreshed.push(sel) }
+        p.renameEditor = function () { return null }
+        p.swap = {drop: function () {}}
+        p.backend = {heldListing: 0}
+        var r = {renameOnArrival: "", stale: false, anchor: null, retryId: 0, retryPaths: [],
+            retryFolder: "", retryListing: "", retrySelectionText: "", renamed: []}
+        r.refreshRename = function (req, sel) { r.renamed.push(sel) }
+        return {pane: p, root: r}
+    }
+    var strandedTwin = strandedDoubles({source: "/a/old.txt", destination: "/a/new.txt"})
+    onFailed(strandedTwin.pane, strandedTwin.root, "rename-stranded", "/a/old.txt", "input/output failed", 0)
+    check("a stranded rename closes its request", strandedTwin.pane.renameRequest, null)
+    check("a stranded rename ends the edit selecting nothing", strandedTwin.root.renamed.length === 1 && strandedTwin.root.renamed[0] === "", true)
+    var strandedUndo = strandedDoubles(null)
+    onFailed(strandedUndo.pane, strandedUndo.root, "rename-stranded", "/a/old.txt", "input/output failed", 0)
+    check("an undo-shaped stranded failure re-reads the listing selecting nothing", strandedUndo.pane.refreshed.length === 1 && strandedUndo.pane.refreshed[0] === "", true)
     function bgListing() {
         var p = {listInFlight: false, path: "/a", listingPath: "", pendingBackground: "", pendingBackgroundAt: null,
             searchMode: "", filterQuery: "", filterTyping: false, listingState: "ready", stateMessage: "", lockedMode: 0,
@@ -606,7 +654,7 @@ function runColumnMenu(check) {
     var deadBackend = Source.slice(wire, "A dead backend ends every listing", "var request = pane.renameRequest")
     check("a dead backend still drops both deferred menus",
         deadBackend.indexOf("pane.pendingMenu = false") >= 0 && deadBackend.indexOf("Nav.clearPendingBackground(pane)") >= 0, true)
-    var failedTail = Source.slice(wire, "if (!Swap.failListing(pane, where)) {", "Neither the child")
+    var failedTail = Source.slice(wire, "if (!listingEnded) {", "Neither the child")
     check("the ended listing drops both deferred menus",
         failedTail.indexOf("pane.pendingMenu = false") >= 0 && failedTail.indexOf("Nav.clearPendingBackground(pane)") >= 0, true)
     var nav = Source.source("ui/js/Nav.js")

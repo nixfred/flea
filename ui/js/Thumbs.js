@@ -57,6 +57,15 @@ function forget(state, row) {
     }
 }
 
+// A miss on a generating class returns to unasked; on a cache-only class it stays a miss.
+function miss(state, row, generating, cap) {
+    if (generating === true) {
+        forget(state, row)
+        return { file: state.file, order: state.order }
+    }
+    return remember(state, row, "", cap)
+}
+
 // The wrapper is new so a QML binding on it re-evaluates; the map inside is mutated in place.
 function applied(state, work) {
     for (var i = 0; i < work.drop.length; i++) {
@@ -113,6 +122,13 @@ function thumbLimit(thumbWidth, thumbHeight, originalWidth, originalHeight) {
     if (originalLongest > 0)
         return originalLongest / thumbLongest
     return thumbLongest < CACHE_SIZE ? 1 : Infinity
+}
+
+// A video poster fills the frame; an image keeps the never-enlarge cap.
+function posterLimit(isVideo, thumbWidth, thumbHeight, originalWidth, originalHeight) {
+    if (isVideo)
+        return Infinity
+    return thumbLimit(thumbWidth, thumbHeight, originalWidth, originalHeight)
 }
 
 // Backend icon identity distinguishes image thumbnails from video without opening any extra file.

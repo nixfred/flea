@@ -7,6 +7,7 @@
 *.swp
 *.swo
 *~
+__pycache__/
 
 # OS droppings
 .DS_Store
@@ -20,3 +21,6 @@ docs/pending/
 
 # Session and build-tracking state, never shipped.
 .superpowers/
+
+# Python bytecode from importing extensionless helpers, never shipped.
+__pycache__/

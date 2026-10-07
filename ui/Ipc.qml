@@ -21,6 +21,11 @@ QtObject {
     property var shareBrowser: null
     property var emptyState: null
     property var permissionsDialog: null
+    property IpcMenuState menuProbe: IpcMenuState { pane: root.pane; fleaWindow: root.fleaWindow }
+    property IpcPreviewState previewReaders: IpcPreviewState {
+        fleaWindow: root.fleaWindow
+        pane: root.pane
+    }
     // Overlays and the columns view are built by their first open, see ui/shell.qml, so until then
     // each reader below answers the empty value its type has: "", false or -1, never a throw.
     readonly property var columns: root.pane ? root.pane.columnsArea : null
@@ -29,11 +34,24 @@ QtObject {
             && (item.available === undefined || item.available), focused: !!item && item.activeFocus,
             centre: item ? root.fleaWindow.centreOf(item) : "", rect: item ? root.fleaWindow.rectOf(item) : ""}
     }
+    // Which role a frame draws in, so a capture asserts the frame's colour without knowing the theme.
+    function roleOf(color) {
+        return Qt.colorEqual(color, Theme.color.error) ? "error" : Qt.colorEqual(color, Theme.color.accent) ? "accent" : Qt.colorEqual(color, Theme.color.muted) ? "muted" : "other"
+    }
     function confirmationState(item) {
         return item ? {opened: item.opened, token: item.snapshot.token || 0, count: item.snapshot.count || 0,
             all: item.snapshot.all === true, destructiveFocus: item.destructiveFocus, title: item.titleText,
             rect: root.fleaWindow.rectOf(item.cardItem), cancel: root.controlState("Cancel", item.cancelItem),
             danger: root.controlState("Delete", item.dangerItem)} : {opened: false}
+    }
+    function firstVisibleText(item) {
+        if (!item || !item.visible) return ""
+        if (typeof item.text === "string" && item.text.length > 0) return item.text
+        for (var i = 0; i < item.children.length; i++) {
+            var text = root.firstVisibleText(item.children[i])
+            if (text.length > 0) return text
+        }
+        return ""
     }
 
     // The wrapper holds the references because an IpcHandler marshals every property it owns.
@@ -70,6 +88,8 @@ QtObject {
         function selectionCount(): int { return root.pane.selectionCount() }
         function favouritesSaving(): bool { return Favourites.busy || Favourites.operationActive }
         function selectedIndices(): string { return root.pane.selectedIndices().join(",") }
+        function fileClipboard(): string { return JSON.stringify(root.pane.clipboard) }
+        function rowClipMark(i: int): string { var row = root.pane.itemFor(i); return row ? row.clipMark : "unavailable" }
         function focusView(): string { return root.pane.focusView }
         function keyDeliveryState(): string {
             var pane = root.pane
@@ -87,6 +107,11 @@ QtObject {
         function visibleRowName(i: int): string {
             var item = root.pane.visibleItemFor(i)
             return item && item.visible && item.row ? item.row.n : ""
+        }
+        // Sample output: 33252, the st_mode the held row carries, -1 for a row that is not drawn.
+        function visibleRowMode(i: int): int {
+            var item = root.pane.visibleItemFor(i)
+            return item && item.visible && item.row ? Number(item.row.p) : -1
         }
         function railCursor(): int { return root.pane.railCursor }
         function railCount(): int { return root.pane.railCount }
@@ -144,14 +169,7 @@ QtObject {
             return JSON.stringify({held: root.pane.held, loaded: root.pane.rows.length,
                 windowSize: root.pane.windowSize, total: root.pane.total, shownTotal: root.pane.shownTotal})
         }
-        function menuState(): string {
-            var menu = root.pane.contextMenu()
-            return JSON.stringify({opened: menu.visible, entries: menu.entries, cursor: menu.cursor,
-                snapshotReady: root.pane.menuActions.ready, snapshotId: root.pane.menuActions.requestId,
-                submenu: menu.submenuOpen, submenuCursor: menu.submenuCursor, submenuEntries: menu.submenuEntries,
-                frame: root.fleaWindow.rectOf(menu.frameItem), flyout: root.fleaWindow.rectOf(menu.submenuFrameItem),
-                workArea: menu.workArea, forHeader: menu.forHeader, forRail: menu.forRail, hasRow: menu.hasRow})
-        }
+        function menuState(): string { return root.menuProbe.state() }
         function contextMenuModel(): string { return JSON.stringify(root.pane.contextMenu().entries) }
         function providerState(): string {
             var pane = root.pane, actions = pane.menuActions, taildrop = pane.taildropService, dropbox = pane.dropboxService
@@ -208,6 +226,8 @@ QtObject {
                 }),
                 rect: root.fleaWindow.rectOf(dialog.cardItem),
                 rowHeight: Theme.rowHeight, eyebrowHeight: dialog.eyebrowHeight,
+                titleRuleRect: root.fleaWindow.rectOf(dialog.titleRuleItem), searchRect: root.fleaWindow.rectOf(dialog.searchItem),
+                gap: Theme.spacing.gap, searchTrail: dialog.searchTrail,
                 listRect: root.fleaWindow.rectOf(dialog.applicationsItem),
                 rowRect: root.fleaWindow.rectOf(dialog.applicationItem(dialog.cursor)),
                 controls: [root.controlState("Field", dialog.fieldItem), root.controlState("Applications", dialog.applicationsItem),
@@ -215,15 +235,19 @@ QtObject {
                     Object.assign(root.controlState("Open", dialog.submitItem), {enabled: dialog.canSubmit})]})
         }
         function permissionsState(): string {
-            var dialog = root.permissionsDialog
-            if (!dialog) return JSON.stringify({opened: false})
-            return JSON.stringify({opened: dialog.opened, facts: dialog.facts, path: dialog.path, mode: dialog.modeText,
+            var probe = root, dialog = probe.permissionsDialog, inputReady = probe.pane.listArea.activeFocus && !probe.pane.listInFlight
+            if (!dialog) return JSON.stringify({opened: false, inputReady: inputReady})
+            return JSON.stringify({opened: dialog.opened, inputReady: !dialog.opened && !dialog.visible && inputReady, facts: dialog.facts, path: dialog.path, mode: dialog.modeText,
+                title: root.firstVisibleText(dialog.cardItem), paths: dialog.multiPaths,
                 displayedError: dialog.displayedError, displayedSummary: dialog.displayedSummary,
-                bodyRect: root.fleaWindow.rectOf(dialog.bodyItem),
+                bodyRect: root.fleaWindow.rectOf(dialog.bodyItem), octalFrame: root.roleOf(dialog.octalFrame.border.color),
                 editable: dialog.editable, busy: dialog.busy, error: dialog.errorText, rect: root.fleaWindow.rectOf(dialog.cardItem),
                 controls: dialog.controls().map(function(control) {
+                    var box = control.item.children.find(function(child) { return typeof child.value === "string" }), point = typeof control.item.hovered === "boolean" ? control.item : control.item.children.find(function(child) { return typeof child.hovered === "boolean" })
                     return Object.assign(root.controlState(control.name, control.item), {checked: control.checked, bit: control.bit,
-                        enabled: control.enabled === undefined ? control.item.enabled : control.enabled})
+                        value: box ? box.value : undefined, hovered: !!point && point.hovered, pressed: !!point && point.pressed,
+                        ring: !!control.item.ringItem && control.item.ringItem.visible,
+                        enabled: dialog.isMulti || control.enabled === undefined ? control.item.enabled : control.enabled})
                 })})
         }
         function trashState(): string {
@@ -245,7 +269,7 @@ QtObject {
         function trashControlCentre(name: string): string {
             var view = root.pane.trash.item
             if (!view) return ""
-            var item = ({back: view.backItem, up: view.upItem, cancel: view.confirmationItem.cancelItem, danger: view.confirmationItem.dangerItem})[name]
+            var item = ({back: view.backItem, up: view.upItem, empty: view.emptyItem, cancel: view.confirmationItem.cancelItem, danger: view.confirmationItem.dangerItem})[name]
             return item ? root.fleaWindow.centreOf(item) : ""
         }
 
@@ -404,29 +428,20 @@ QtObject {
         function railRenameEditorLive(): bool { return root.pane.sidebar.renameEditor() !== null }
         function railRenameEditorText(): string { var e = root.pane.sidebar.renameEditor(); return e ? e.editorText : "" }
         function railRenameFieldShown(): bool { var e = root.pane.sidebar.renameEditor(); return e ? e.editorShown : false }
-        function previewOpen(): bool { return root.pane.preview.active }
-        function previewKind(): string { return root.pane.preview.kind }
-        function previewState(): string { return root.pane.preview.status }
-        function previewPosition(): int { return root.pane.preview.position } function previewDuration(): int { return root.pane.preview.duration }
-        // Fix round 1: what the strip actually draws, not a re-derived guess at its visible: expression.
-        function previewStrip(): string { return JSON.stringify({ visible: root.pane.preview.stripVisible, muted: root.pane.preview.muted, mute: root.fleaWindow.centreOf(root.pane.preview.muteMark) }) }
-        // A 0.25 zoom step and an expand flag are not legible off a screenshot, so the seam is the
-        // only honest answer for either; "" means no PDF is loaded, which is not zoom 1 or false.
-        function previewPdfPage(): int { var p = root.pane.preview.pdfItem; return p ? p.page : -1 }
-        function previewPdfZoom(): string { var p = root.pane.preview.pdfItem; return p ? String(p.zoom) : "" }
-        function previewPdfFocus(): int { var p = root.pane.preview.pdfItem; return p ? p.pdfControlIndex : -1 }
-        function pdfState(overlay: bool): string {
-            var p = overlay ? root.pane.preview.pdfItem : root.pane.previewColumnItem
-            if (!p) return "null"
-            return JSON.stringify({ page: overlay ? p.page : p.pdfPage(), pages: overlay ? p.pageCount : p.pdfPages,
-                frame: overlay ? "" : root.fleaWindow.rectOf(p.pdfFrameItem),
-                toolbar: overlay ? "" : root.fleaWindow.rectOf(p.pdfToolbarItem),
-                zoom: overlay ? p.zoom : p.pdfZoom, scrollY: p.pdfScrollY, focused: p.activeFocus, control: p.pdfControlIndex,
-                controls: p.pdfControls.map(function (control) { return { name: control.accessName, enabled: control.enabled,
-                    visible: control.visible, centre: root.fleaWindow.centreOf(control) } }) })
-        }
-        function previewExpanded(): string { var p = root.pane.preview.pdfItem; return p ? String(p.expanded) : "" }
-        function previewSwapState(): string { return JSON.stringify({ column: root.columns ? root.columns.swapState() : null, look: root.pane.preview.swapState() }) }
+        function previewOpen(): bool { return root.previewReaders.previewOpen() }
+        function columnMarkdownView(): string { return root.previewReaders.columnMarkdownView() }
+        function previewKind(): string { return root.previewReaders.previewKind() }
+        function previewState(): string { return root.previewReaders.previewState() }
+        function previewFigures(): string { return root.previewReaders.previewFigures() }
+        function previewPosition(): int { return root.previewReaders.previewPosition() }
+        function previewDuration(): int { return root.previewReaders.previewDuration() }
+        function previewStrip(): string { return root.previewReaders.previewStrip() }
+        function previewPdfPage(): int { return root.previewReaders.previewPdfPage() }
+        function previewPdfZoom(): string { return root.previewReaders.previewPdfZoom() }
+        function previewPdfFocus(): int { return root.previewReaders.previewPdfFocus() }
+        function pdfState(overlay: bool): string { return root.previewReaders.pdfState(overlay) }
+        function previewExpanded(): string { return root.previewReaders.previewExpanded() }
+        function previewSwapState(): string { return root.previewReaders.previewSwapState() }
         function previewSelectionState(): string {
             var column = root.pane.previewColumnItem
             return JSON.stringify({view: root.pane.viewMode, width: root.pane.listSlot.width,
@@ -483,6 +498,12 @@ QtObject {
             var item = root.pane.header.cell(name)
             return item ? root.fleaWindow.centreOf(item) : ""
         }
+        // The last drag the header saw, "startX|lastX|startWidth|preview", kept after release
+        // until the next press, so a test asserts the column followed the pointer as the app saw it.
+        function headerDragTrace(): string {
+            var h = root.pane.header
+            return h.dragStartX + "|" + h.dragLastX + "|" + h.dragStartWidth + "|" + h.dragPreview
+        }
         // The header's drawn columns beside a row's. Both resolve theirs from their own width
         // through Theme.columns, so a disagreement shows up here rather than as a stray column.
         function columnSet(i: int): string {
@@ -501,7 +522,10 @@ QtObject {
                 previewReady: column !== null && column.frameStatus === Image.Ready})
         }
         function viewContentY(): int { return Math.round(root.pane.viewMode === "columns" && root.columns ? root.columns.activeContentY() : root.pane.listArea.contentY) }
+        // The true end of travel in contentY terms: the column view or the list area, origin plus content minus viewport, whole pixels.
+        function viewEndY(): int { var v = root.pane.viewMode === "columns" && root.columns ? root.columns.activeColumn().viewport : root.pane.listArea; return Math.round(v.originY + v.contentHeight - v.height) }
         function listAreaRect(): string { return root.fleaWindow.rectOf(root.pane.listArea) }
+        function listingDropActive(): bool { return root.previewReaders.listingDropActive() }
         function rowRect(i: int): string { return root.fleaWindow.rectOf(root.pane.visibleItemFor(i)) }
         function dragPaneGeometry(side: int, index: int): string {
             var pane = side >= 0 && side < root.panes.length ? root.panes[side] : null
@@ -521,16 +545,26 @@ QtObject {
         function columnThumbShown(): bool { return root.columns ? root.columns.thumbShown() : false }
         function columnFrameReady(): bool { return root.columns ? root.columns.frameReady() : false }
         function columnTextLines(): string { return root.columns ? root.columns.textLines() : "" }
+        function columnMarkdownText(): string { return root.columns ? root.columns.markdownText() : "" }
         function columnLinesRect(): string { return root.columns ? root.fleaWindow.rectOf(root.columns.linesItem()) : "" }
         function columnArchiveRect(): string { return root.columns ? root.fleaWindow.rectOf(root.columns.archiveItem()) : "" }
-        function previewSurfaceRect(): string { return root.fleaWindow.rectOf(root.pane.preview.surfaceItem()) }
-        function previewMediaLoaded(): bool { return root.pane.preview.mediaLoaded() }
-        function previewText(): string { return root.pane.preview.textShown() }
-        function previewArchiveNames(): string { return root.pane.preview.archiveNames() }
+        function previewSurfaceRect(): string { return root.previewReaders.previewSurfaceRect() }
+        function previewTable(): string { return root.previewReaders.previewTable() }
+        function previewPictureRect(): string { return root.previewReaders.previewPictureRect() }
+        function previewMediaLoaded(): bool { return root.previewReaders.previewMediaLoaded() }
+        function previewText(): string { return root.previewReaders.previewText() }
+        function previewMarkdownView(): string { return root.previewReaders.previewMarkdownView() }
+        function previewCloseState(): string { return root.previewReaders.previewCloseState() }
+        function previewEndGap(): int { return root.previewReaders.previewEndGap() }
+        function previewScrollY(): int { return root.previewReaders.previewScrollY() }
+        function previewTextLength(): int { return root.previewReaders.previewTextLength() }
+        function previewTextTail(n: int): string { return root.previewReaders.previewTextTail(n) }
+        function previewArchiveNames(): string { return root.previewReaders.previewArchiveNames() }
         function columnArchiveNames(): string { return root.columns ? root.columns.archiveNames() : "" }
         function columnFailure(): string { return root.columns ? root.columns.failureText() : "" }
         function rowThumbRect(i: int): string { var item = root.pane.visibleItemFor(i); return item && item.thumbItem ? root.fleaWindow.rectOf(item.thumbItem) : "" }
         function columnFrameRect(): string { return root.columns ? root.fleaWindow.rectOf(root.columns.frameItem()) : "" }
+        function columnPictureRect(): string { return root.columns ? root.fleaWindow.rectOf(root.columns.pictureItem()) : "" }
         function columnChildEmpty(): string { var e = root.columns ? root.columns.childEmptyItem() : null; return e ? e.visible + " " + e.opacity.toFixed(2) + " " + e.markItem.opacity.toFixed(2) : "" }
         function columnChildMarkRect(): string { var e = root.columns ? root.columns.childEmptyItem() : null; return e ? root.fleaWindow.rectOf(e.markItem) : "" }
         function columnChildRowCentre(i: int): string { return root.columns ? root.fleaWindow.centreOf(root.columns.childItemAt(i)) : "" }
@@ -595,12 +629,18 @@ QtObject {
         function swapState(): string { return JSON.stringify(root.pane.swap.describe()) }
         function thumbFile(i: int): string { return root.pane.thumbFor(i) }
         function rowCentre(i: int): string { return root.pane.rowFor(i) ? root.fleaWindow.centreOf(root.pane.visibleItemFor(i)) : "" }
-        // The same lookup as rowCentre, but for the preview's own seek slider, so a test can drive
-        // a real wheel event over it without hardcoding the strip's layout.
-        function previewSliderCentre(): string {
-            return root.pane.preview.active && root.pane.preview.isMedia ? root.fleaWindow.centreOf(root.pane.preview.seekSlider) : ""
+        function rowNameCentre(i: int): string {
+            var label = root.rowNameItem(i)
+            if (!label) return ""
+            var width = Math.min(label.width, label.contentWidth === undefined ? label.implicitWidth : label.contentWidth)
+            var height = Math.min(label.height, label.contentHeight === undefined ? label.implicitHeight : label.contentHeight)
+            var x = root.pane.viewMode === "grid" ? label.width / 2 : width / 2
+            var point = label.mapToItem(null, x, height / 2)
+            return Math.round(point.x) + " " + Math.round(point.y)
         }
-        // The same lookup as rowCentre, but for a rail row: the rail has no ListView, so Sidebar.railItemFor(i) walks its own two Repeaters instead.
+        function rowNameRect(i: int): string { return root.fleaWindow.rectOf(root.rowNameItem(i)) }
+        function previewSliderCentre(): string { return root.previewReaders.previewSliderCentre() }
+        // The same lookup as rowCentre, but for a rail row: the rail has no ListView, so Sidebar.railItemFor(i) walks its own Repeaters instead.
         function railRowCentre(i: int): string { return root.fleaWindow.centreOf(root.pane.sidebar.railItemFor(i)) }
         function railLabel(i: int): string { var item = root.pane.sidebar.railItemFor(i); return item ? item.modelData.label : "" }
         function railLabels(): string { var out = []; for (var i = 0; i < root.pane.railCount; i++) { var item = root.pane.sidebar.railItemFor(i); out.push(item ? item.modelData.label : "") } return out.join("|") }
@@ -621,6 +661,13 @@ QtObject {
         function keymapSheetOpen(): bool { return root.keymapSheet ? root.keymapSheet.opened : false }
         // One row per line, "<cap> <wording>", so a test asserts the sheet without OCR.
         function keymapSheetRows(): string { return root.keymapSheet ? root.keymapSheet.rows() : "" }
+        // The result rows as JSON with keys, label, where (the drawn muted text) and disabled, so a test asserts the where on screen.
+        function keymapSheetResults(): string { return root.keymapSheet ? root.keymapSheet.resultState() : "[]" }
+        // Sidebar040: the query the typed keys narrowed the sheet to, "" at rest.
+        function keymapQuery(): string { return root.keymapSheet ? root.keymapSheet.query : "" }
+        // Sidebar040: the main window's Recent place, "" off and "results" once the history answered.
+        function recentMode(): string { return root.pane.recentMode }
+        function recentFrom(): string { return root.pane.recentFrom }
         function convertFormat(): string { return root.convertDialog ? root.convertDialog.format : "" }
         function convertStrip(): bool { return root.convertDialog ? root.convertDialog.strip : false }
         function convertState(): string {
@@ -685,6 +732,8 @@ QtObject {
         function pathBarOpen(): bool { return root.chrome.editing }
         function pathBarText(): string { return String(root.chrome.editText) }
         function pathCentre(): string { return root.fleaWindow.centreOf(root.chrome.pathArea) }
+        // The open path field's frame, "x y width height", the accent hairline a native capture is read against.
+        function pathFrameRect(): string { return root.fleaWindow.rectOf(root.chrome.pathFrame) }
         // The elision marker, or "" while the whole path fits: the one spot the crumbs slide under.
         function elisionCentre(): string {
             return root.chrome.elisionMarker ? root.fleaWindow.centreOf(root.chrome.elisionMarker) : ""
@@ -803,7 +852,11 @@ QtObject {
             return out.join("\n")
         }
         function networkStartIndex(): int { return root.pane.sidebar.placesEntries.length }
+        // True once the Network group was rebuilt after a gio listing and a mountinfo read, so an empty networkEntries is an answer and not the unbuilt state.
+        function networkBuilt(): bool { var s = root.pane.sidebar; return s.railGate.showNetwork === true && s.service !== null && s.service._listedOnce === true && String(s.service._lastMountinfo).length > 0 }
 
+        // The eject chain's guard state beside the rail, so a failed eject names its guard.
+        function deviceEjectState(): string { return root.pane.sidebar.ejectChainState() }
         // One line per entry, "label|group|kind|mounted", the same shape networkEntries answers.
         function deviceEntries(): string {
             var out = []
@@ -814,5 +867,17 @@ QtObject {
             }
             return out.join("\n")
         }
+        function trashFocusEmpty(): bool { var view = root.pane.trash.item; if (!view) return false; view.emptyItem.forceActiveFocus(Qt.TabFocusReason); return view.emptyItem.activeFocus }
+        // open() leaves the keyboard on the view itself; forcing a focus scope alone returns it to its last child, so the button lets go first.
+        function trashFocusListing(): bool { var view = root.pane.trash.item; if (!view) return false; view.emptyItem.focus = false; view.forceActiveFocus(); return view.activeFocus && !view.emptyItem.activeFocus }
+        // "hovered|focused|pressed|available" read from the strip button's own handlers and properties, one word each.
+        function trashEmptyState(): string { var view = root.pane.trash.item; if (!view) return ""; var item = view.emptyItem; var hover = item.data.find(function(o) { return o.hovered !== undefined }); var tap = item.data.find(function(o) { return o.pressed !== undefined }); return [hover.hovered, item.focused, tap.pressed, item.available].join("|") }
+        function columnNames(slot: string): string { return root.columns ? root.columns.drawnNames(slot) : "" }
+        function columnPeekNames(path: string): string { return root.columns ? root.columns.peekNames(path) : "" }
+    }
+    function rowNameItem(i) {
+        var item = root.pane.rowFor(i) ? root.pane.visibleItemFor(i) : null
+        var label = item ? (item.captionItem || item.nameItem()) : null
+        return label && item.visible && label.visible ? label : null
     }
 }

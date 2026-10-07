@@ -4,8 +4,6 @@ use crate::oflags::O_NOFOLLOW;
 #[cfg(test)]
 use std::fs::Permissions as Mode;
 use std::fs::{File, Metadata, OpenOptions};
-#[cfg(test)]
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -64,6 +62,213 @@ fn group_name(gid: u32) -> String {
         }
     }
     String::new()
+}
+
+// A batch failure carries what stayed applied, or nothing when the batch rolled back whole.
+#[derive(Debug)]
+pub struct BatchError {
+    pub msg: String,
+    pub applied: Vec<crate::backend::undo::Step>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static FAIL_RESTORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// The k-th apply of the next batch fails without removing anything itself.
+#[cfg(test)]
+pub fn test_fail_at(index: Option<usize>) {
+    FAIL_AT.with(|v| v.set(index));
+}
+
+// Every rollback of the next batch fails without racing the filesystem.
+#[cfg(test)]
+pub fn test_fail_restore(fail: bool) {
+    FAIL_RESTORE.with(|v| v.set(fail));
+}
+
+fn fail_at(index: usize) -> bool {
+    #[cfg(test)]
+    {
+        FAIL_AT.with(|v| v.get()) == Some(index)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = index;
+        false
+    }
+}
+
+fn fail_restore() -> bool {
+    #[cfg(test)]
+    {
+        FAIL_RESTORE.with(|v| v.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+// Metadata::created carries birth time where the filesystem keeps one, and fails where it does not.
+pub(crate) fn born_of(meta: &Metadata) -> Option<(u64, u32)> {
+    meta.created().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| (d.as_secs(), d.subsec_nanos()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static SWAP_HOOK: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
+
+// The k-th test swap runs between the pathname checks and the open, nowhere else.
+#[cfg(test)]
+pub fn test_swap_hook(hook: Option<fn(&Path)>) {
+    SWAP_HOOK.with(|v| v.set(hook));
+}
+
+fn swap_hook(path: &Path) {
+    #[cfg(test)]
+    {
+        if let Some(hook) = SWAP_HOOK.with(|v| v.get()) {
+            hook(path);
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = path;
+    }
+}
+
+// Sample input: items [("/a.txt", "600"), ("/b dir/c.txt", "644")]. One Entry holds every change for one undo.
+// Every path is an absolute file or folder, never a link; a short failure rolls back what changed, newest first.
+pub fn apply_many(items: &[(PathBuf, String)]) -> Result<Vec<crate::backend::undo::Step>, BatchError> {
+    if items.is_empty() {
+        return Err(BatchError { msg: "Permissions needs at least one selected item.".into(), applied: Vec::new() });
+    }
+    let uid = unsafe { geteuid() };
+    let mut checked: Vec<(PathBuf, u32)> = Vec::with_capacity(items.len());
+    for (path, text) in items {
+        let requested = mode(text).map_err(|e| BatchError { msg: e, applied: Vec::new() })?;
+        if !path.is_absolute() {
+            return Err(BatchError { msg: "Permissions requires an absolute path and request identity.".into(), applied: Vec::new() });
+        }
+        let before = path.symlink_metadata()
+            .map_err(|e| BatchError { msg: format!("Could not inspect permissions: {}.", crate::error::io_message(&e)), applied: Vec::new() })?;
+        if !(before.is_file() || before.is_dir()) {
+            return Err(BatchError { msg: "Permissions takes one file or folder, not a link.".into(), applied: Vec::new() });
+        }
+        if before.mode() & SPECIAL_BITS != 0 {
+            return Err(BatchError { msg: "Special permissions cannot be edited.".into(), applied: Vec::new() });
+        }
+        if !reason(&before, uid).is_empty() {
+            return Err(BatchError { msg: reason(&before, uid), applied: Vec::new() });
+        }
+        checked.push((path.clone(), requested));
+    }
+    let mut steps = Vec::with_capacity(checked.len());
+    for (index, (path, requested)) in checked.iter().enumerate() {
+        let outcome: Result<crate::backend::undo::Step, String> = (|| {
+            if fail_at(index) {
+                return Err(format!("Could not inspect permissions: {}.",
+                    crate::error::io_message(&std::io::Error::from(std::io::ErrorKind::NotFound))));
+            }
+            let before = path.symlink_metadata()
+                .map_err(|e| format!("Could not inspect permissions: {}.", crate::error::io_message(&e)))?;
+            if !(before.is_file() || before.is_dir()) {
+                return Err("Permissions takes one file or folder, not a link.".into());
+            }
+            if before.mode() & SPECIAL_BITS != 0 {
+                return Err("Special permissions cannot be edited.".into());
+            }
+            let (dev, ino, before_bits) = (before.dev(), before.ino(), before.mode() & 0o777);
+            let born = born_of(&before);
+            chmod_pinned(path, dev, ino, born, before_bits, *requested)
+                .map_err(|e| format!("Could not change mode: {}.", e))?;
+            Ok(crate::backend::undo::Step::Mode { path: path.clone(), before: before_bits, after: *requested, dev, ino, born })
+        })();
+        match outcome {
+            Ok(step) => steps.push(step),
+            Err(failure) => {
+                let mut stuck = Vec::new();
+                for step in steps.iter().rev() {
+                    if let crate::backend::undo::Step::Mode { path, before, after, dev, ino, born } = step {
+                        if fail_restore() || crate::backend::undo::restore_mode(path, *dev, *ino, *born, *after, *before).is_err() {
+                            stuck.push(step.clone());
+                        }
+                    }
+                }
+                stuck.reverse();
+                if stuck.is_empty() {
+                    return Err(BatchError { msg: format!("{} No change was applied.", failure), applied: Vec::new() });
+                }
+                return Err(BatchError {
+                    msg: format!("{} {} of {} items were changed; undo restores them.", failure, stuck.len(), items.len()),
+                    applied: stuck,
+                });
+            }
+        }
+    }
+    Ok(steps)
+}
+
+// A fixed-mask filesystem answers success and keeps its mode; the held descriptor's mode is read so a swapped path is not.
+fn verify_applied_fd(file: &File, path: &Path, requested: u32) -> Result<(), String> {
+    let after = file.metadata().map(|m| m.mode() & 0o777).map_err(|e| crate::error::io_message(&e))?;
+    if after == requested & 0o777 {
+        return Ok(());
+    }
+    Err(refusal_for(path))
+}
+
+// The filesystem name comes from the path, which names the drive and never the verified object.
+fn refusal_for(path: &Path) -> String {
+    let fs = crate::backend::fsinfo::read(path).map(|info| info.name).unwrap_or_default();
+    if fs.is_empty() {
+        return "This drive ignores permission changes, so nothing was changed.".into();
+    }
+    format!("This {fs} drive ignores permission changes, so nothing was changed.")
+}
+
+// The held O_PATH descriptor is identity-checked and changed by fchmodat2, never by pathname.
+pub(crate) fn chmod_pinned(path: &Path, dev: u64, ino: u64, born: Option<(u64, u32)>, expected: u32, target: u32) -> Result<(), String> {
+    let current = path.symlink_metadata().map_err(|e| crate::error::io_message(&e))?;
+    if current.file_type().is_symlink() {
+        return Err("Permissions takes one file or folder, not a link.".into());
+    }
+    if current.dev() != dev || current.ino() != ino {
+        return Err("the item was replaced, so its mode was left in place.".into());
+    }
+    if current.mode() & 0o7777 != expected {
+        return Err("the mode changed since, so it was left in place.".into());
+    }
+    if let (Some(was), Some(now)) = (born, born_of(&current)) {
+        if was != now {
+            return Err("the item was replaced, so its mode was left in place.".into());
+        }
+    }
+    swap_hook(path);
+    let file = OpenOptions::new().read(true).custom_flags(O_NOFOLLOW | O_PATH)
+        .open(path).map_err(|e| crate::error::io_message(&e))?;
+    let meta = file.metadata().map_err(|e| crate::error::io_message(&e))?;
+    if meta.dev() != dev || meta.ino() != ino {
+        return Err("the item was replaced, so its mode was left in place.".into());
+    }
+    if meta.mode() & 0o7777 != expected {
+        return Err("the mode changed since, so it was left in place.".into());
+    }
+    if let (Some(was), Some(now)) = (born, born_of(&meta)) {
+        if was != now {
+            return Err("the item was replaced, so its mode was left in place.".into());
+        }
+    }
+    if unsafe { syscall(SYS_FCHMODAT2, file.as_raw_fd(), c"".as_ptr(), target, AT_EMPTY_PATH) } != 0 {
+        return Err(crate::error::io_message(&std::io::Error::last_os_error()));
+    }
+    // tests/fs-matrix.sh c_perms on vfat pins this readback with "refused mode stays put" after a successful no-op chmod.
+    verify_applied_fd(&file, path, target)?;
+    Ok(())
 }
 
 impl Permissions {
@@ -182,6 +387,10 @@ impl Permissions {
                 crate::error::io_message(&std::io::Error::last_os_error())
             ));
         }
+        // The syscall answers success on a fixed-mask filesystem too, so a mismatch refuses here.
+        if let Err(refusal) = verify_applied_fd(&held.file, &held.path, requested) {
+            return Err(format!("Could not change mode: {refusal} No change was applied."));
+        }
         Ok(format!(
             r#"{{"t":"permissions","id":{},"op":"apply","ok":true,"mode":"{:04o}"}}"#,
             id, requested
@@ -192,7 +401,34 @@ impl Permissions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use crate::backend::testdir::TestDir;
+    #[test]
+    fn a_mode_the_filesystem_ignored_is_refused_with_the_filesystem_named() {
+        let d = TestDir::new("permissions-verify");
+        let path = d.file("item", "a");
+        std::fs::set_permissions(&path, Mode::from_mode(0o644)).unwrap();
+        let file = OpenOptions::new().read(true).custom_flags(O_NOFOLLOW | O_PATH).open(&path).unwrap();
+        assert!(verify_applied_fd(&file, &path, 0o644).is_ok(), "a mode that landed verifies");
+        let err = verify_applied_fd(&file, &path, 0o600).expect_err("a mode that never landed must refuse");
+        assert!(err.contains("ignores permission changes"), "the refusal names the cause: {err}");
+        let fs = crate::backend::fsinfo::read(&path).map(|i| i.name).unwrap_or_default();
+        assert!(!fs.is_empty(), "the fixture sits on a named filesystem");
+        assert!(err.contains(&fs), "the refusal names the filesystem: {err}");
+    }
+    // Sample input: fd opened on a 0600 file, path naming a 0644 file elsewhere.
+    #[test]
+    fn a_verify_reads_the_mode_from_its_descriptor_not_its_path() {
+        let d = TestDir::new("permissions-fd-verify");
+        let held_path = d.file("held", "a");
+        let other = d.file("other", "b");
+        std::fs::set_permissions(&held_path, Mode::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&other, Mode::from_mode(0o644)).unwrap();
+        let file = OpenOptions::new().read(true).custom_flags(O_NOFOLLOW | O_PATH).open(&held_path).unwrap();
+        assert!(verify_applied_fd(&file, &other, 0o600).is_ok(), "the descriptor's mode verifies against another path's name");
+        let other_file = OpenOptions::new().read(true).custom_flags(O_NOFOLLOW | O_PATH).open(&other).unwrap();
+        assert!(verify_applied_fd(&other_file, &other, 0o600).is_err(), "the other file's own descriptor sees its mode and refuses");
+    }
     #[test]
     fn inspect_failures_report_plain_causes() {
         let d = TestDir::new("permissions-plain-error");
@@ -279,5 +515,205 @@ mod tests {
         std::fs::set_permissions(&path, Mode::from_mode(0o644)).unwrap();
         let meta = path.metadata().unwrap();
         assert!(reason(&meta, meta.uid().wrapping_add(1)).contains("not the owner"));
+    }
+    #[test]
+    fn a_swapped_symlink_is_refused_and_leaves_the_victim() {
+        let d = TestDir::new("permissions-swap");
+        let item = d.file("item", "a");
+        std::fs::set_permissions(&item, Mode::from_mode(0o644)).unwrap();
+        let victim = d.file("id_rsa", "secret");
+        std::fs::set_permissions(&victim, Mode::from_mode(0o640)).unwrap();
+        let before = item.symlink_metadata().unwrap();
+        let (dev, ino) = (before.dev(), before.ino());
+        let born = born_of(&before);
+        std::fs::remove_file(&item).unwrap();
+        std::os::unix::fs::symlink(&victim, &item).unwrap();
+        let refused = chmod_pinned(&item, dev, ino, born, 0o644, 0o600);
+        assert!(refused.is_err(), "a path swapped for a link is refused, got {:?}", refused);
+        assert!(item.symlink_metadata().unwrap().file_type().is_symlink(), "the swap is still a link");
+        assert_eq!(victim.metadata().unwrap().mode() & 0o777, 0o640, "the swap target keeps its mode");
+    }
+    // The seam swaps the path after the lstat checks, so the open and its rechecks face the new file.
+    fn swap_to_same_mode_file(path: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        let bits = path.symlink_metadata().map(|m| m.mode() & 0o777).unwrap_or(0o644);
+        std::fs::remove_file(path).unwrap();
+        std::fs::write(path, "replacement").unwrap();
+        std::fs::set_permissions(path, Mode::from_mode(bits)).unwrap();
+    }
+    // The victim shares the item's inode, so only the no-follow open tells the swapped link apart.
+    fn swap_to_link_of_hardlink(path: &Path) {
+        let victim = path.parent().unwrap().join("victim");
+        std::fs::remove_file(path).unwrap();
+        std::os::unix::fs::symlink(&victim, path).unwrap();
+    }
+    #[test]
+    fn a_file_swapped_after_the_checks_is_refused() {
+        let d = TestDir::new("permissions-swap-after-checks");
+        let item = d.file("item", "a");
+        std::fs::set_permissions(&item, Mode::from_mode(0o644)).unwrap();
+        let before = item.symlink_metadata().unwrap();
+        let (dev, ino) = (before.dev(), before.ino());
+        let born = born_of(&before);
+        // The old file stays open across the swap, so the swap cannot reuse its inode.
+        let held = File::open(&item).unwrap();
+        test_swap_hook(Some(swap_to_same_mode_file));
+        let refused = chmod_pinned(&item, dev, ino, born, 0o644, 0o600);
+        test_swap_hook(None);
+        drop(held);
+        assert!(refused.is_err(), "a file swapped after the checks is refused, got {:?}", refused);
+        assert_eq!(item.metadata().unwrap().mode() & 0o777, 0o644, "the replacement keeps its mode");
+    }
+    #[test]
+    fn a_symlink_swapped_after_the_checks_is_refused_at_open() {
+        let d = TestDir::new("permissions-swap-link-after-checks");
+        let item = d.file("item", "a");
+        std::fs::set_permissions(&item, Mode::from_mode(0o644)).unwrap();
+        let victim = d.path().join("victim");
+        std::fs::hard_link(&item, &victim).unwrap();
+        let before = item.symlink_metadata().unwrap();
+        let (dev, ino) = (before.dev(), before.ino());
+        let born = born_of(&before);
+        // The old file stays open across the swap, so the swap cannot reuse its inode.
+        let held = File::open(&item).unwrap();
+        test_swap_hook(Some(swap_to_link_of_hardlink));
+        let refused = chmod_pinned(&item, dev, ino, born, 0o644, 0o600);
+        test_swap_hook(None);
+        drop(held);
+        assert!(refused.is_err(), "a link swapped after the checks is refused, got {:?}", refused);
+        assert!(item.symlink_metadata().unwrap().file_type().is_symlink(), "the swap is still a link");
+        assert_eq!(victim.metadata().unwrap().mode() & 0o777, 0o644, "the swap target keeps its mode");
+    }
+    #[test]
+    fn a_different_birth_time_is_refused() {
+        let d = TestDir::new("permissions-birth");
+        let a = d.file("a.txt", "a");
+        std::fs::set_permissions(&a, Mode::from_mode(0o644)).unwrap();
+        let before = a.symlink_metadata().unwrap();
+        let born = match born_of(&before) { Some(b) => b, None => return };
+        let wrong = (born.0.wrapping_add(1), born.1);
+        let refused = chmod_pinned(&a, before.dev(), before.ino(), Some(wrong), 0o644, 0o600);
+        assert!(refused.is_err(), "a file with another birth time is refused, got {:?}", refused);
+        assert_eq!(a.metadata().unwrap().mode() & 0o777, 0o644, "the mode stays until the identity matches");
+    }
+    #[test]
+    fn apply_many_changes_every_file_and_undoes_once() {
+        let d = TestDir::new("permissions-many");
+        let a = d.file("a.txt", "a");
+        let b = d.file("b.txt", "b");
+        let c = d.file("c.txt", "c");
+        for p in [&a, &b, &c] {
+            std::fs::set_permissions(p, Mode::from_mode(0o644)).unwrap();
+        }
+        let steps = apply_many(&[(a.clone(), "600".to_string()), (b.clone(), "600".to_string()), (c.clone(), "600".to_string())]).expect("three ordinary files");
+        assert_eq!(steps.len(), 3);
+        for p in [&a, &b, &c] {
+            assert_eq!(p.metadata().unwrap().mode() & 0o777, 0o600);
+        }
+        let mut journal = crate::backend::undo::Journal::new();
+        journal.push(crate::backend::undo::Entry { op: "permissions".to_string(), steps });
+        assert_eq!(journal.undo().expect("one undo restores all three"), "permissions");
+        for p in [&a, &b, &c] {
+            assert_eq!(p.metadata().unwrap().mode() & 0o777, 0o644);
+        }
+    }
+    #[test]
+    fn a_mid_batch_failure_rolls_back_and_says_nothing_changed() {
+        let d = TestDir::new("permissions-rollback");
+        let a = d.file("a.txt", "a");
+        let b = d.file("b.txt", "b");
+        for p in [&a, &b] {
+            std::fs::set_permissions(p, Mode::from_mode(0o644)).unwrap();
+        }
+        test_fail_at(Some(1));
+        let result = apply_many(&[(a.clone(), "600".to_string()), (b.clone(), "600".to_string())]);
+        test_fail_at(None);
+        let err = result.unwrap_err();
+        assert!(err.msg.contains("No change was applied"), "unexpected message: {}", err.msg);
+        assert!(err.applied.is_empty(), "a batch that rolled back whole journals nothing");
+        assert_eq!(a.metadata().unwrap().mode() & 0o777, 0o644, "the first change was rolled back");
+        assert_eq!(b.metadata().unwrap().mode() & 0o777, 0o644, "the failed item was never changed");
+    }
+    #[test]
+    fn a_failed_rollback_journals_what_stayed_applied() {
+        let d = TestDir::new("permissions-stuck");
+        let a = d.file("a.txt", "a");
+        let b = d.file("b.txt", "b");
+        for p in [&a, &b] {
+            std::fs::set_permissions(p, Mode::from_mode(0o644)).unwrap();
+        }
+        test_fail_at(Some(1));
+        test_fail_restore(true);
+        let result = apply_many(&[(a.clone(), "600".to_string()), (b.clone(), "600".to_string())]);
+        test_fail_at(None);
+        test_fail_restore(false);
+        let err = result.unwrap_err();
+        assert!(err.msg.contains("1 of 2 items were changed"), "unexpected message: {}", err.msg);
+        assert_eq!(err.applied.len(), 1, "the step that would not go back stays journalled");
+        assert_eq!(a.metadata().unwrap().mode() & 0o777, 0o600, "the stuck change is still applied");
+        let mut journal = crate::backend::undo::Journal::new();
+        journal.push(crate::backend::undo::Entry { op: "permissions".to_string(), steps: err.applied });
+        assert_eq!(journal.undo().expect("one undo restores what stayed applied"), "permissions");
+        assert_eq!(a.metadata().unwrap().mode() & 0o777, 0o644);
+    }
+    #[test]
+    fn undo_leaves_a_file_put_at_the_name_since_in_place() {
+        let d = TestDir::new("permissions-replaced");
+        let a = d.file("a.txt", "old");
+        std::fs::set_permissions(&a, Mode::from_mode(0o644)).unwrap();
+        let steps = apply_many(&[(a.clone(), "600".to_string())]).expect("one ordinary file");
+        assert_eq!(a.metadata().unwrap().mode() & 0o777, 0o600);
+        // The old file stays open across the swap, so the replacement takes another inode on any filesystem.
+        let held = std::fs::File::open(&a).unwrap();
+        std::fs::remove_file(&a).unwrap();
+        std::fs::write(&a, "new secret").unwrap();
+        std::fs::set_permissions(&a, Mode::from_mode(0o600)).unwrap();
+        let mut journal = crate::backend::undo::Journal::new();
+        journal.push(crate::backend::undo::Entry { op: "permissions".to_string(), steps });
+        let err = journal.undo().expect_err("a replaced file keeps nothing to restore to");
+        assert!(err.msg.contains("left in place"), "{}", err.msg);
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&a).unwrap().mode() & 0o777, 0o600,
+            "undo widened a file it never changed");
+        drop(held);
+    }
+    #[test]
+    fn undo_refuses_a_mode_with_special_bits_added_since() {
+        let d = TestDir::new("permissions-setuid");
+        let a = d.file("a.txt", "old");
+        std::fs::set_permissions(&a, Mode::from_mode(0o644)).unwrap();
+        let steps = apply_many(&[(a.clone(), "600".to_string())]).expect("one ordinary file");
+        assert_eq!(a.metadata().unwrap().mode() & 0o777, 0o600);
+        std::fs::set_permissions(&a, Mode::from_mode(0o4600)).unwrap();
+        let mut journal = crate::backend::undo::Journal::new();
+        journal.push(crate::backend::undo::Entry { op: "permissions".to_string(), steps });
+        let err = journal.undo().expect_err("a setuid added since keeps nothing to restore to");
+        assert!(err.msg.contains("left in place"), "{}", err.msg);
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&a).unwrap().mode() & 0o7777, 0o4600, "undo cleared a setuid it never set");
+    }
+    #[test]
+    fn undo_restores_the_rest_when_one_of_several_was_replaced() {
+        let d = TestDir::new("permissions-skips-one");
+        let a = d.file("a.txt", "a");
+        let b = d.file("b.txt", "b");
+        for p in [&a, &b] {
+            std::fs::set_permissions(p, Mode::from_mode(0o644)).unwrap();
+        }
+        let steps = apply_many(&[(a.clone(), "600".to_string()), (b.clone(), "600".to_string())])
+            .expect("two ordinary files");
+        // The old file stays open across the swap, so the replacement takes another inode on any filesystem.
+        let held = std::fs::File::open(&a).unwrap();
+        std::fs::remove_file(&a).unwrap();
+        std::fs::write(&a, "replacement").unwrap();
+        std::fs::set_permissions(&a, Mode::from_mode(0o600)).unwrap();
+        let mut journal = crate::backend::undo::Journal::new();
+        journal.push(crate::backend::undo::Entry { op: "permissions".to_string(), steps });
+        let err = journal.undo().expect_err("one replaced path is skipped with a note");
+        assert!(err.msg.contains("left in place"), "{}", err.msg);
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&a).unwrap().mode() & 0o777, 0o600, "the replacement keeps its mode");
+        assert_eq!(b.metadata().unwrap().mode() & 0o777, 0o644, "the untouched file still restores");
+        drop(held);
     }
 }

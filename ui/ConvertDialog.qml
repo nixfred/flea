@@ -190,10 +190,11 @@ Item {
 
     Rectangle {
         id: card
-        anchors.centerIn: parent
-        width: Math.max(0, Math.min(Theme.space(root.dialogWidth) * Theme.dialogWidthRatio, root.width - 2 * root.clampMargin))
+        x: Theme.cardOrigin(root.width, width)
+        y: Theme.cardOrigin(root.height, height)
+        width: Theme.cardSpan(Theme.space(root.dialogWidth) * Theme.dialogWidthRatio, root.width - 2 * root.clampMargin)
         // Clamped to the window; the body scrolls whatever the clamp cut, see ui/CardScroll.qml.
-        height: Math.max(0, Math.min(body.wanted + 2 * Theme.spacing.rowPaddingX, root.height - 2 * root.clampMargin))
+        height: Theme.cardSpan(body.wanted + 2 * Theme.spacing.rowPaddingX, root.height - 2 * root.clampMargin)
         color: Theme.color.surface
         border.width: Theme.spacing.hairline
         border.color: Theme.color.muted
@@ -211,9 +212,10 @@ Item {
 
         Flea.CardScroll {
             id: body
+            bleedY: Theme.ringClearance
             anchors.fill: parent
-            anchors.topMargin: Theme.spacing.rowPaddingX
-            anchors.bottomMargin: Theme.spacing.rowPaddingX
+            anchors.topMargin: Theme.spacing.rowPaddingX - Theme.ringClearance
+            anchors.bottomMargin: Theme.spacing.rowPaddingX - Theme.ringClearance
 
         Column {
             width: parent.width
@@ -248,7 +250,7 @@ Item {
                 delegate: Flea.MenuRow {
                     required property string modelData
                     required property int index
-                    width: body.width
+                    width: body.holderWidth
                     enabled: root.editable
                     entry: ({ label: root.formatLabel(modelData), action: modelData, glyph: "image",
                         labelColor: Theme.color.foreground, disabled: !root.editable })
@@ -285,7 +287,7 @@ Item {
                 Keys.forwardTo: [keys]
                 Accessible.onPressAction: if (root.editable) root.strip = !root.strip
 
-                Rectangle {
+                Item {
                     id: box
                     anchors.left: parent.left
                     anchors.leftMargin: Theme.spacing.rowPaddingX

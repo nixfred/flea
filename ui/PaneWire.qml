@@ -1,13 +1,18 @@
 import QtQuick
 import "." as Flea
 import "js/DirSizes.js" as DirSizes
+import "js/DragOut.js" as DragOut
 import "js/Errors.js" as Errors
 import "js/Anchor.js" as Anchor
 import "js/Nav.js" as Nav
 import "js/Ops.js" as Ops
+import "js/Clipboard.js" as Clipboard
+import "js/Permissions.js" as Permissions
 import "js/Status.js" as Status
 import "js/Search.js" as Search
+import "js/SlowOp.js" as SlowOp
 import "js/Swap.js" as Swap
+import "js/Tabs.js" as Tabs
 import "js/Thumbs.js" as Thumbs
 import "js/ExtThumbs.js" as ExtThumbs
 import "js/Transfer.js" as Transfer
@@ -23,15 +28,18 @@ Item {
     // The listing's floor as a drop target, under the rows: a drop past the last row, or one a file
     // row refused, lands in the directory being shown. Declared first in ui/Pane.qml, so it sits below.
     // Columns owns its narrower active floor; a search listing's path is the walk scope, not a row's home.
+    // Recent stands on the root, so its floor takes no drop: a row's own folder still does.
     Flea.DropInto {
         x: root.pane ? root.pane.listSlot.x : 0
         y: root.pane ? root.pane.listSlot.y : 0
         width: root.pane ? root.pane.listSlot.width : 0
         height: root.pane ? root.pane.listSlot.height : 0
         enabled: root.pane !== null && !root.pane.trash.opened && root.pane.searchMode === ""
+                 && root.pane.recentMode === ""
                  && (root.pane.viewMode === "list" || root.pane.viewMode === "grid")
         pane: root.pane
         dest: root.pane ? root.pane.dropPath : ""
+        refuseLoading: DragOut.refuseLoading(root.pane && root.pane.listInFlight, false, false)
         // Unknown until the listed reply lands, because dirDev is still the directory being left.
         destDev: root.pane && root.pane.backend && !root.pane.listInFlight ? root.pane.backend.dirDev : 0
     }
@@ -50,8 +58,8 @@ Item {
     // One burst of writes is one re-read: the timer absorbs later notifications instead of being
     // restarted by them, so a directory under continuous change settles rather than never firing.
     readonly property int watchMs: 400
-    // What holds the owed re-read back, decided in ui/js/Anchor.js busy() so tests/js/collide.js can redden on it.
-    readonly property bool watchBusy: Anchor.busy(pane)
+    // Interactions and unfinished anchors hold the re-read; bare selections carry across by file identity.
+    readonly property bool watchBusy: Anchor.busy(pane, root.anchor)
     // ui/Pane.qml reaches the three through these: openCursor takes the opener, the menu reads the
     // Taildrop peers, and the two share actions call the other two.
     readonly property alias opener: opener
@@ -89,7 +97,7 @@ Item {
         if (root.watchBusy)
             return
         root.stale = false
-        root.anchor = Anchor.watched(pane)
+        root.anchor = Anchor.watched(pane, false, Theme.fileRowHeight)
     }
 
     // The owed re-read goes through the timer rather than straight out of this handler: reading
@@ -126,32 +134,47 @@ Item {
         pane.backend.send({c: "locate", paths: root.retryPaths, transferId: root.retryId})
     }
 
-    // Only arm an editor after the new folder's actual row arrives in the held window.
+    // Only arm an editor after the new folder's actual row arrives in the held window, matched
+    // by the name the backend lists so an NFC name on hfsplus finds its NFD row and editor.
     function openRenameOnArrival() {
         if (root.renameOnArrival.length === 0)
             return
         var target = root.renameOnArrival
         root.renameOnArrival = ""
-        var row = pane.rowFor(pane.cursorIndex)
-        if (row && pane.join(pane.path, row.n) === target)
+        var at = Anchor.matchListed(pane, target)
+        if (at >= 0) {
+            pane.setCursor(at)
             pane.act("rename")
+        }
     }
 
-    function refreshRename(request, selected) {
+    function refreshRename(request, selected, pointer) {
         if (pane.path !== request.folder) return
         if (pane.listInFlight || pane.searchMode.length > 0) { root.stale = true; return }
         root.stale = false
         watchSettle.stop()
-        pane.refresh(selected)
+        var anchor = Anchor.pointerRow(pane, request, pane.anchorRowHeight)
+        // A cursor a click or key moved off the renamed row while the write was pending is the operator's, so it wins at any scroll.
+        var keepsCursor = pointer || anchor.moved
+        // The re-list resets the view to its top, so every commit keeps the anchor: it puts the cursor row back at its screen y.
+        root.anchor = anchor
+        pane.refresh(keepsCursor ? "" : selected)
+        if (anchor.start > 0) pane.backend.window(anchor.start, pane.windowSize)
     }
 
     Connections {
         target: pane.backend
 
-        function onListed(total, readMs, sortMs, path) { swap.takeListed(total, readMs, sortMs, path) }
+        function onListed(total, readMs, sortMs, path, changed) { swap.takeListed(total, readMs, sortMs, path, changed) }
         function onRows(start, items, ms, kinds, listing) { swap.takeRows(start, items, kinds, listing) }
 
         function onLocated(message) {
+            Tabs.locatedCursor(pane, message)
+            var taken = Anchor.takeLocated(root.pane, root.anchor, message, Theme.fileRowHeight)
+            if (taken.handled) {
+                root.anchor = taken.anchor
+                return
+            }
             if (!root.retryId || message.transferId !== root.retryId) return
             root.retryId = 0
             root.retryPaths = []
@@ -199,6 +222,15 @@ Item {
             pane.listArea.restartSettle()
         }
 
+        // Sample input: {"t":"unmounted","path":"/media/stick","parent":"/media"}
+        // The open mount went away, so the pane moves to the nearest existing parent.
+        function onUnmounted(path, parent) {
+            if (path !== pane.path && !pane.path.startsWith(path + "/"))
+                return
+            pane.openWithoutHistory(parent)
+            pane.message("The mount went away, so this folder is no longer available.", false)
+        }
+
         // Sample input: {"t":"changed","path":"/home/gm/Downloads"}
         // Unsolicited, and the only line here that is: the listed directory changed under the pane.
         function onChanged(path) {
@@ -211,11 +243,23 @@ Item {
                 watchSettle.start()
         }
 
-        // A thumbed line for the previous listing is still in the pipe when open() clears the map.
+        // A thumbed line for the previous listing is still in the pipe when open() clears the map, so it is dropped.
+        // A cache-only miss on a generating class returns to unasked so the viewport asks it again instead of keeping the miss.
         function onThumbed(row, file) {
-            if (!pane.listInFlight)
+            if (pane.listInFlight)
+                return
+            if (file === "" && pane.thumbState.file[row] === Thumbs.CACHE_ASKED
+                    && (!pane.storageKnown || !ExtThumbs.cacheOnly(pane.storageClass, ViewState.preview))) {
+                pane.thumbState = Thumbs.miss(pane.thumbState, row, true, pane.thumbCap)
+                // A lost prefetch is visible work again, so the settled view re-plans it in full, never as a prefetch.
+                // The re-plan never prefetches, so this cannot ask twice in one rest.
+                if (pane.listArea) pane.listArea.restartSettle()
+            } else
                 pane.thumbState = Thumbs.remember(pane.thumbState, row, file, pane.thumbCap)
         }
+
+        // The Make executable row's own probe, answered off the loop; the pane keeps only its newest id.
+        function onShebang(path, hasShebang, id) { pane.noteShebang(path, hasShebang, id) }
 
         // A dirsized line for the previous listing is still in the pipe when open() clears the map.
         function onDirSized(row, bytes, partial) {
@@ -288,22 +332,28 @@ Item {
         // The listing is read again with the cursor left where the deleted rows were, and the row
         // that took their place selected, so the next delete needs no mouse. The whole selection is
         // gone from disk, so there is nothing to carry over but the position.
-        function onTrashed(ok, failed) {
+        function onTrashed(ok, failed, reason) {
+            if (ok === 0 && failed === 0) return
             pane.sticky("")
-            pane.message(Ops.trashed(ok, failed), ok === 0)
+            pane.message(Ops.trashed(ok, failed, reason), ok === 0)
             pane.clearSelection()
             root.anchor = Anchor.afterDelete(pane, ok > 0)
         }
 
         // The listing is re-read with the new name selected, so the row the operator was on stays
-        // under the cursor; a rename the pointer committed keeps the pointer's own row instead.
+        // under the cursor; a cursor a click or key moved meanwhile keeps its own row instead.
         function onRenamed(ok, path) {
             var request = pane.renameRequest
-            if (!request || path !== request.destination) return
+            if (!SlowOp.closesRename(request, path)) return
             pane.renameRequest = null
             pane.renamingIndex = -1
-            root.refreshRename(request, Nav.renameRefreshTarget(pane, path))
+            var target = Nav.renameRefreshTarget(pane, path)
+            root.refreshRename(request, target, target === "")
         }
+
+        // A remote write past its deadline: information only, so the request stays open
+        // for the late reply, which closes it exactly as an in-time reply would.
+        function onSlowOp(op, path, msg) { SlowOp.show(pane, msg) }
 
         // Sample input: {"t":"made","ok":true,"path":"/home/gm/Pictures/New Folder"}
         // The same refresh onRenamed does, which is also what puts the order back to name ascending
@@ -319,10 +369,46 @@ Item {
             pane.refresh(path)
         }
 
+        // MenuAdditions040: Paste as links answers one line per request, and
+        // one journal entry, so one undo removes every link it created.
+        function onLinked(ok, failed, skipped, note) {
+            // A stranded note is shown as an error, so a leftover link is never silent.
+            var stranded = String(note || "").length > 0
+            pane.message(Ops.linkedLine(ok, failed, skipped, note || ""), (failed > 0 && ok === 0) || stranded)
+            pane.refresh("")
+        }
+
+        // MenuAdditions040: Show original reveals the link's target in its own
+        // folder, the same path Show in folder uses.
+        function onLinkTarget(path, directory, name, id) {
+            // A stale or foreign id is ignored, so a late reply never yanks a navigation.
+            if (!pane.linkTargetPendingId || id !== pane.linkTargetPendingId) return
+            pane.linkTargetPendingId = 0
+            if (directory.length === 0 || (name.length === 0 && directory !== "/")) {
+                pane.message("That link points nowhere to reveal.", true)
+                return
+            }
+            pane.pendingSelect = name.length === 0 ? "" : directory === "/" ? "/" + name : directory + "/" + name
+            pane.open(directory)
+        }
+
         function onUndone(op, ok) {
             pane.sticky("")
             pane.message(Ops.undone(op), false)
-            pane.refresh("")
+            pane.refresh("", op === "permissions")
+        }
+
+        // MenuAdditions040 callout 10: Make executable reuses permissions batch; only this pane's pending id is answered here.
+        function onPermissionsResult(message) {
+            var pending = Permissions.MAKE_EXEC_ID + pane.makeExecPendingId
+            if (!pane.makeExecPendingId || !message || message.id !== pending || message.op !== "applyMany") return
+            pane.makeExecPendingId = 0
+            if (message.ok === true) {
+                pane.message("Made it executable." + Status.UNDO_HINT, false)
+                pane.refresh("")
+            } else {
+                pane.message(message.error && message.error.length > 0 ? message.error : "That file could not be made executable.", true)
+            }
         }
 
         function onRedoStarted(id, n, op) {
@@ -335,7 +421,7 @@ Item {
             pane.transfer = Ops.emptyTransfer()
             pane.sticky("")
             pane.message("Redid the " + op + Status.UNDO_HINT, false)
-            pane.refresh("")
+            pane.refresh("", op === "permissions")
         }
 
         // A success nobody could check must not read as one that was checked, so the unverified
@@ -359,8 +445,9 @@ Item {
         }
 
         // The backend statfs's its own base, which only moves when a listing succeeds, and Nav.js moves pane.path before one does: a failed hop's figures are of the directory we never left, while a failed refresh's are still of what is on screen.
+        // Recent spans mounts and asks for no figures of its own, so a late answer for its base is refused with the stale ones.
         function onFsInfo(fs, free, path, storageClass) {
-            var ours = path.length === 0 || path === pane.path
+            var ours = (path.length === 0 || path === pane.path) && pane.recentMode.length === 0
             pane.fsName = ours ? fs : ""; pane.fsFree = ours ? free : 0
             if (ours) {
                 pane.storageClass = storageClass || ""
@@ -372,10 +459,16 @@ Item {
             }
         }
 
-        // The answer to Ops.clip's askPaths; nothing reaches the clipboard until this lands.
+        // A paths reply reaches only the asker its tag names; the anchor's own is consumed above.
         function onPaths(list) {
+            if (Anchor.takesPaths(root.pane, root.anchor)) {
+                root.anchor = Anchor.fillPaths(root.pane, root.anchor, list)
+                return
+            }
             Ops.pathsResolved(pane, list)
         }
+
+        function onClipResult(message) { Clipboard.receive(pane, message) }
 
         function onFailed(where, input, message, mode) {
             if (pane.path.length === 0 && input.length > 0) pane.path = input
@@ -390,22 +483,24 @@ Item {
             var renamePath = request && (input === request.source || input === request.destination
                 || (where === "rename" && (input.length === 0 || input.indexOf(request.source + "/") === 0
                     || input.indexOf(request.destination + "/") === 0)))
-            if (request && (terminal || (renamePath && ["rename", "journal", "rename-kept"].indexOf(where) >= 0))) {
+            if (request && (terminal || (renamePath && ["rename", "journal", "rename-kept", "rename-stranded"].indexOf(where) >= 0))) {
+                var pointer = pane.renameKeepsPointerRow
                 pane.renameRequest = null
                 pane.renameKeepsPointerRow = false
                 if (terminal) {
                     text = "Backend stopped; rename outcome unknown."
-                } else if (where === "rename-kept" || (where === "journal" && input === request.destination)) {
+                } else if (where === "rename-kept" || where === "rename-stranded" || (where === "journal" && input === request.destination)) {
                     // A destination-side journal failure happens after the filesystem rename succeeded.
                     pane.renamingIndex = -1
                     if (where === "journal") text = Errors.capitalised("renamed, but Undo was not recorded: " + message)
                     pane.message(text, true)
-                    root.refreshRename(request, where === "journal" ? request.destination : "")
+                    root.refreshRename(request, pointer ? "" : (where === "journal" ? request.destination : ""), pointer)
                     return
                 } else {
                     var reason = Errors.exists(message) ? Ops.leaf(request.destination) + " already exists." : Errors.capitalised(message)
-                    if (pane.renamingIndex >= 0) pane.renameError = reason
-                    else pane.message(reason, true)
+                    // Grid closing review G1: with no live editor to show it, the
+                    // refusal goes to the status bar and the edit closes.
+                    Ops.refuseRename(pane, reason)
                     return
                 }
             }
@@ -417,8 +512,29 @@ Item {
                 return
             }
             // The rows a request named were another numbering's, so only that request ended, see src/backend/rowguard.rs.
-            if (!Swap.failListing(pane, where)) {
-                if (input === "paths") { pane.clipPending = null; pane.pathsPending = null }
+            // A paths failure clears its claim either way. Leaving it set blocks the next copy.
+            var listingEnded = Swap.failListing(pane, where)
+            if (input === "paths") {
+                var claim = pane.pathsPending
+                if (claim && claim.kind === "drag") {
+                    pane.pathsPending = null
+                    claim.deliver(null, claim)
+                    if (!listingEnded) return
+                } else if (claim && claim.kind === "anchor") {
+                    // A failed anchor ask ends the anchor on its clamped index instead of stranding it.
+                    if (root.anchor && root.anchor.needPaths)
+                        root.anchor = Anchor.failAnchor(root.pane, root.anchor, Theme.fileRowHeight)
+                    else
+                        root.pane.pathsPending = null
+                    if (!listingEnded) return
+                } else if (claim) pane.pathsPending = null
+                else Ops.clipFailed(pane)
+            }
+            if (!listingEnded) {
+                // A refused window ends its directory's anchor so the owed re-read can run.
+                if (where === "window" && root.anchor && input === root.anchor.path
+                        && root.anchor.path === root.pane.path)
+                    root.anchor = Anchor.failAnchor(root.pane, root.anchor, Theme.fileRowHeight)
                 pane.message(text, true)
                 return
             }
@@ -442,13 +558,15 @@ Item {
                 pane.transfer = Ops.emptyTransfer()
                 pane.sticky("")
             }
-            if (terminal || where === "scan" || pane.listingState === "loading") {
+            // A failure landing on the waiting state ends the wait the same way, so no
+            // stale "not responding" outlives the answer that replaced it.
+            if (terminal || where === "scan" || pane.listingState === "loading" || pane.listingState === "waiting") {
                 pane.listingState = Errors.listingState(where, message)
                 pane.lockedMode = mode; pane.stateMessage = text
             }
             pane.message(text, true)  // GM's ruling: the centre lane carries the refusal, both StatusBar lanes
-            // The copy is whole and only the name it came from is unknown, so re-read the listing and select nothing.
-            if (where === "rename-kept")
+            // The names on disk changed in a way no reply listed (a kept copy, or a twin left under its temp), so re-read the listing and select nothing.
+            if (where === "rename-kept" || where === "rename-stranded")
                 pane.refresh("")
         }
     }

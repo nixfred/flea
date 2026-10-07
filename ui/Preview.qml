@@ -3,8 +3,11 @@ import qs.Commons
 import "." as Flea
 import "js/Facts.js" as Facts
 import "js/Kinds.js" as Kinds
+import "js/Thumbs.js" as Thumbs
 import "js/ExtThumbs.js" as ExtThumbs
+import "js/MarkdownPrepared.js" as Prepared
 import "js/Motion.js" as Motion
+import "js/PreviewSettle.js" as PreviewSettle
 import "js/PreviewSwap.js" as PreviewSwap
 
 // The overlay lives inside the Flea window, Finder's Quick Look shape: a second window breaks omarchy-drive focus flea and every test that narrows on it.
@@ -27,6 +30,16 @@ Item {
     readonly property bool isPdf: root.kind === "pdf"
     readonly property bool isImage: root.kind === "image"
     readonly property bool isArchive: root.kind === "archive"
+    // RenderedPreviews: a Markdown file keeps the text kind and draws its own bar and pane.
+    readonly property bool isMarkdown: root.kind === "text" && Kinds.isMarkdown(root.path)
+    // r flips the open Markdown Quick Look to Source; close() forgets it, and a move to another file keeps it.
+    property bool markdownSource: false
+    // The file whose first Markdown read may block the key, decided from its listing row before the path moves; "" when none may.
+    property string inlineMarkdownPath: ""
+    // Tab put the keyboard on the Markdown bar's close mark; a move off Markdown or a close lets it go.
+    property bool markdownCloseFocus: false
+    readonly property bool markdownCloseFocused: root.active && root.isMarkdown && root.markdownCloseFocus
+    onIsMarkdownChanged: if (!root.isMarkdown) root.markdownCloseFocus = false
     // The backend's meta answer for the open archive, null until it lands; archiveRow is the row it was asked for.
     property var archiveMeta: null
     property int archiveRow: -1
@@ -40,11 +53,17 @@ Item {
         if (root.isMedia) return mediaLoader.item
         if (root.isPdf) return pdfLoader.item
         if (root.isArchive) return archivePane
-        if (root.kind === "text") return textPane.bodyItem
+        if (root.kind === "text") return root.isMarkdown
+            ? (markdownLoader.item ? markdownLoader.item.bodyItem : null) : textPane.bodyItem
         return null
     }
     function mediaLoaded() { return mediaLoader.item !== null }
-    function textShown() { return textPane.shownText() }
+    function textShown() { return root.isMarkdown
+        ? (markdownLoader.item ? markdownLoader.item.rawText : "") : textPane.shownText() }
+    function markdownView() { return root.active && root.isMarkdown && markdownLoader.item ? markdownLoader.item.shownView : "" }
+    function markdownCloseState() { return JSON.stringify(root.active && root.isMarkdown && markdownLoader.item ? markdownLoader.item.closeState() : {}) }
+    function markdownEndGap() { return root.active && root.isMarkdown && markdownLoader.item ? markdownLoader.item.endGap() : -1 }
+    function markdownScrollY() { return root.active && root.isMarkdown && markdownLoader.item ? Math.round(markdownLoader.item.scrollY) : -1 }
     function archiveNames() { return root.archiveMeta && root.archiveMeta.names ? root.archiveMeta.names.map(function (e) { return e.n }).join("|") : "" }
     readonly property bool pdfExpanded: root.isPdf && pdfLoader.item !== null && pdfLoader.item.expanded
     // The PDF surface, null with no document loaded: ui/Ipc.qml answers "" for that, so an unmeasured state never reads as a value.
@@ -58,16 +77,40 @@ Item {
     readonly property var seekSlider: mediaStrip.seekItem
     readonly property string status: {
         if (!root.active) return ""
-        if (root.isMedia) return mediaLoader.item ? mediaLoader.item.status : "loading"
+        // A fresh media item still carries its empty path until onLoaded binds it; its
+        // "stopped" there is not a whole preview, so the swap never releases on it.
+        if (root.isMedia) return (mediaLoader.item && mediaLoader.item.path === root.path) ? mediaLoader.item.status : "loading"
         if (root.isPdf) return (pdfLoader.item && pdfLoader.item.failed) ? "This file could not be read." : "pdf"
         if (root.isImage) return imageLoader.item ? imageLoader.item.status : "loading"
         if (root.isArchive) return root.archiveMeta === null ? "loading" : (root.archiveFailed ? "This archive could not be read." : "archive")
-        if (root.kind === "text") return textPane.status
+        if (root.kind === "text") return root.isMarkdown
+            ? (markdownLoader.item ? markdownLoader.item.status : "loading") : textPane.status
         return "This file cannot be previewed."
     }
     // The swap's answer: nothing loading, and a PDF with a page on screen or refused.
+    // An interim cache thumbnail shown counts as whole, never as a half-built frame.
     readonly property bool lookReady: !root.active || PreviewSwap.lookReady(root.status, root.isPdf,
-        root.pdfItem !== null && root.pdfItem.shownPage >= 0, root.pdfItem !== null && root.pdfItem.failed)
+        root.pdfItem !== null && root.pdfItem.shownPage >= 0, root.pdfItem !== null && root.pdfItem.failed,
+        root.interimShown, root.isMarkdown && markdownLoader.item !== null && markdownLoader.item.firstScreen)
+    // The cached thumbnail held at open, drawn under the full decode at the final rect; the stamp retires a stale one.
+    property string interimThumb: ""
+    property string interimStamp: ""
+    // The interim's rect off the upright original, null while its pixels are unknown: no
+    // interim until then. A cache file is already upright, so no box swap applies here.
+    readonly property var interimBox: PreviewSwap.interimRect(panes.width, panes.height,
+        root.imageW, root.imageH, root.imageOrient)
+    // True once the interim is on screen at the final's rect; lookReady releases on this.
+    readonly property bool interimVisible: root.isImage && root.interimThumb.length > 0
+        && root.path === root.interimStamp && root.interimBox !== null
+    readonly property bool interimShown: root.interimVisible && imageLoader.item !== null
+        && imageLoader.item.interimReady === true
+    // The original's pixels, off the shown row's meta reply; 0 until it lands.
+    property int imageW: 0
+    property int imageH: 0
+    property int imageOrient: 1
+    property int imageRow: -1
+    // One meta ask per show; onRowsChanged never re-asks behind it.
+    property bool imageAsked: false
     function swapState() {
         if (root.swap) return root.swap.describe()
         return { holding: false, capturing: false, fellBack: false, holds: 0, fallbacks: 0,
@@ -76,6 +119,8 @@ Item {
     // The 0.3.6 swap additions, null until the first open builds them below; every reader guards it.
     readonly property var swap: swapLoader.item
     readonly property bool swapBuilt: swapLoader.active
+    // The memory suite asserts both Markdown loader items are null without a Markdown file.
+    readonly property var markdownItem: markdownLoader.item
     // Exposes the eager panes for the live swap gate, so it can pin the wiring.
     readonly property var panesItem: panes
     // Synchronous: a local source: URL answers item on the same call that sets active.
@@ -89,6 +134,12 @@ Item {
     property string pendingIcon: ""
     property string pendingKind: ""
     property int pendingSize: 0
+    property string pendingThumb: ""
+    // The row open/follow captured, carried through load/show like the thumb.
+    property int pendingImageRow: -1
+    // Last distinct follow target, so a held key cannot reload mid-burst: only idleness loads at once.
+    property double lastMoveAt: 0
+    property string lastMoveKey: ""
     // The settle idiom Pane's own thumbnail request reuses: a held j/k costs zero reloads until the cursor rests.
     readonly property int followSettleMs: 120
     // The same dim ui/SettingsPanel.qml lays over the listing.
@@ -129,31 +180,77 @@ Item {
     function toggleExpand() { if (root.isPdf && pdfLoader.item) pdfLoader.item.toggleExpand() }
 
     // Space opens on the cursor row; this is immediate, follow() below is the held-key j/k path.
-    function open(newPath, newIcon, newSize, newKind) {
+    function open(newPath, newIcon, newSize, newKind, newThumb) {
         followSettle.stop()
-        root.load(newPath, newIcon, newSize, newKind)
+        root.lastMoveKey = newPath + "\n" + newIcon + "\n" + newSize + "\n" + newKind
+        root.lastMoveAt = Date.now()
+        root.load(newPath, newIcon, newSize, newKind, newThumb, root.pane ? root.pane.cursorIndex : -1)
+    }
+
+    // GM 2026-10-03: a Markdown Quick Look opens rendered, and r flips only the open one (no stored choice).
+    function toggleMarkdownView() {
+        if (root.isMarkdown) root.markdownSource = !root.markdownSource
+    }
+
+    function toggleMarkdownClose() {
+        if (root.isMarkdown) root.markdownCloseFocus = !root.markdownCloseFocus
     }
 
     // The picture is taken now, so the settled load below changes the panes under it.
-    function follow(newPath, newIcon, newSize, newKind) {
+    function follow(newPath, newIcon, newSize, newKind, newThumb) {
+        var key = newPath + "\n" + newIcon + "\n" + newSize + "\n" + newKind
+        // Pending covers a repeat; a settled revisit of the shown target stays put, anything else reloads.
+        if (key === root.lastMoveKey && followSettle.running) return
+        if (key === root.lastMoveKey && root.isShown(newPath, newIcon, newSize, newKind)) return
+        var now = Date.now()
+        var idle = PreviewSettle.due(now, root.lastMoveAt, root.followSettleMs)
+        root.lastMoveKey = key
+        root.lastMoveAt = now
         root.pendingPath = newPath
         root.pendingIcon = newIcon
         root.pendingSize = newSize
         root.pendingKind = newKind
+        root.pendingThumb = newThumb || ""
+        root.pendingImageRow = root.pane ? root.pane.cursorIndex : -1
         if (root.active) {
             var held = root.ensureSwap()
-            if (held) held.hold(null, newPath)
+            if (held)
+                held.hold(null, newPath)
         }
-        followSettle.restart()
+        if (idle) {
+            followSettle.stop()
+            root.load(newPath, newIcon, newSize, newKind, newThumb, root.pendingImageRow)
+        } else {
+            followSettle.restart()
+        }
+    }
+
+    // Whether the overlay already shows this target: the duplicate test the key clock cannot make.
+    function isShown(newPath, newIcon, newSize, newKind) {
+        return root.active && newPath === root.path && newIcon === root.iconName
+            && newSize === root.size && newKind === root.kindName
     }
 
     // Dropping the loader's source is what stops playback: media dies with the loader.
     function close() {
         if (root.swap) root.swap.cancel()
         followSettle.stop()
+        root.lastMoveKey = ""
+        root.pendingThumb = ""
+        root.pendingImageRow = -1
+        root.interimThumb = ""
+        root.interimStamp = ""
+        root.imageW = 0
+        root.imageH = 0
+        root.imageOrient = 1
+        root.imageRow = -1
+        root.imageAsked = false
         stripHideTimer.stop()
         root.active = false
         root.kind = ""
+        root.markdownSource = false
+        root.markdownCloseFocus = false
+        root.inlineMarkdownPath = ""
         mediaLoader.source = ""
         pdfLoader.source = ""
         imageLoader.source = ""
@@ -165,23 +262,39 @@ Item {
     }
 
     // Under the held picture when a move took one; Space's own open has none and draws as it builds.
-    function load(newPath, newIcon, newSize, newKind) {
-        var show = function () { root.show(newPath, newIcon, newSize, newKind) }
+    // The swap starts after its mutation: show runs at once or waits for the capture, start runs with it.
+    function load(newPath, newIcon, newSize, newKind, newThumb, newRow) {
+        var isPdf = Kinds.quickLookKind(newIcon, newPath) === Kinds.PDF
         var swapItem = root.ensureSwap()
+        var show = function () {
+            root.show(newPath, newIcon, newSize, newKind, newThumb, newRow)
+            if (swapItem) swapItem.start(isPdf)
+        }
         if (swapItem && (swapItem.holding || swapItem.capturing))
             swapItem.hold(show, newPath, true)
         else
             show()
-        if (swapItem) swapItem.start(Kinds.quickLookKind(newIcon, newPath) === Kinds.PDF)
     }
 
-    function show(newPath, newIcon, newSize, newKind) {
+    function show(newPath, newIcon, newSize, newKind, newThumb, newRow) {
+        var row = root.pane ? root.pane.rowFor(newRow) : null
+        var named = row && root.pane.join(root.pane.path, row.n) === newPath
+        root.inlineMarkdownPath = named && Prepared.readsInline(row, root.pane.storageClass, root.pane.storageKnown) ? newPath : ""
         root.kind = Kinds.quickLookKind(newIcon, newPath)
         // A pane of another kind goes before the path moves, or it tries to open a file it cannot draw: an image
         // pane handed a video logged "Unsupported image format" on every move from a picture to a clip.
         if (!root.isMedia) mediaLoader.source = ""
         if (!root.isPdf) pdfLoader.source = ""
         if (!root.isImage) imageLoader.source = ""
+        // The interim holds the path it was read for; a stale one never outlives a move.
+        root.interimThumb = newThumb || ""
+        root.interimStamp = newPath
+        // The meta row is the one captured at open/follow, never the cursor now.
+        root.imageRow = root.isImage && (newThumb || "").length > 0 && newRow !== undefined ? newRow : -1
+        root.imageW = 0
+        root.imageH = 0
+        root.imageOrient = 1
+        root.imageAsked = false
         root.path = newPath
         root.iconName = newIcon
         root.size = newSize
@@ -193,7 +306,23 @@ Item {
         imageLoader.source = root.isImage ? "PreviewImage.qml" : ""
         root.askArchive()
         root.askMedia()
+        root.askImage()
         root.revealStrip()
+        root.maybePrefetch()
+    }
+
+    // Bounded prefetch: the next row's cache entry only, once per rest, never a decode and never a meta.
+    function maybePrefetch() {
+        if (!root.active || !root.pane || followSettle.running) return
+        if (!ViewState.previewAutomatic || root.pane.listInFlight || !root.pane.storageKnown) return
+        if (ExtThumbs.manualHold(root.pane.storageClass, ViewState.preview)) return
+        var next = root.pane.cursorIndex + 1
+        if (root.pane.thumbState.file[next] !== undefined) return
+        var row = root.pane.rowFor(next)
+        if (!row || row.d || row.t !== true || !Thumbs.allowed(row, ViewState.thumbnailMode)) return
+        var work = { ask: [next], drop: [], cacheOnly: true }
+        root.pane.thumbState = Thumbs.applied(root.pane.thumbState, work)
+        root.pane.backend.thumb(work.ask, true)
     }
 
     // One row, only while an archive is the thing open: the same no-sweep rule the column follows.
@@ -212,6 +341,39 @@ Item {
             root.pane.backend.askMeta(root.mediaRow, false, true, false)
     }
 
+    // The original's pixels, which size the interim like the final; only with a thumb to draw,
+    // once per show, and never while a held key is still bursting.
+    function askImage() {
+        if (!root.isImage || root.interimThumb.length === 0 || !root.pane) return
+        if (root.imageRow < 0 || root.imageAsked || followSettle.running) return
+        // An insert or a re-sort between capture and ask moves another file to the index,
+        // so the row must still name the shown file before anything is asked for it.
+        root.resolveImageRow()
+        root.imageAsked = true
+        if (root.imageRow < 0) return
+        root.pane.backend.askMeta(root.imageRow, false, false, false)
+    }
+
+    // The row at imageRow still names the shown file: its name under the pane's path is
+    // the path this show opened, the way the rest of this file identifies a row.
+    function imageRowShown() {
+        if (!root.pane || root.imageRow < 0) return false
+        var row = root.pane.rowFor(root.imageRow)
+        return row !== null && root.pane.join(root.pane.path, row.n) === root.path
+    }
+
+    // The captured index drifted onto another file: take the cursor when it names the
+    // shown file instead, else drop the interim for this show with no ask.
+    function resolveImageRow() {
+        if (root.imageRowShown()) return
+        var at = root.pane ? root.pane.cursorIndex : -1
+        var row = root.pane && at >= 0 ? root.pane.rowFor(at) : null
+        if (row !== null && root.pane.join(root.pane.path, row.n) === root.path)
+            root.imageRow = at
+        else
+            root.imageRow = -1
+    }
+
     Connections {
         target: root.pane ? root.pane.backend : null
         function onMeta(row, w, h, orient, durationMs, sampleRate, entries, unpacked, archiveFailed, names, lines, partial, linesFailed, target, targetDir, owner) {
@@ -219,6 +381,11 @@ Item {
                 root.archiveMeta = { entries: entries, unpacked: unpacked, archiveFailed: archiveFailed, names: names }
             if (root.isMedia && row === root.mediaRow)
                 root.mediaRate = sampleRate
+            if (root.isImage && row === root.imageRow && root.imageRowShown()) {
+                root.imageW = w
+                root.imageH = h
+                root.imageOrient = orient
+            }
         }
     }
 
@@ -228,6 +395,7 @@ Item {
         function onRowsChanged() {
             if (root.active && root.isArchive && root.archiveMeta === null) root.askArchive()
             if (root.active && root.isMedia && root.mediaRate === 0) root.askMedia()
+            if (root.active && root.isImage && root.imageW === 0) root.askImage()
         }
     }
 
@@ -235,7 +403,7 @@ Item {
         id: followSettle
         interval: root.followSettleMs
         repeat: false
-        onTriggered: root.load(root.pendingPath, root.pendingIcon, root.pendingSize, root.pendingKind)
+        onTriggered: root.load(root.pendingPath, root.pendingIcon, root.pendingSize, root.pendingKind, root.pendingThumb, root.pendingImageRow)
     }
 
     Timer {
@@ -269,37 +437,37 @@ Item {
         opacity: root.active ? root.groundOpacity : 0
         Behavior on opacity {
             enabled: !Theme.reducedMotion
-            NumberAnimation { duration: root.active ? Motion.durMs.open : Motion.durMs.close }
+            NumberAnimation { duration: root.active ? Motion.durMs.open : Motion.durMs.close; easing.type: Easing.OutCubic }
         }
     }
 
     Rectangle {
         id: surface
-        anchors.centerIn: parent
+        x: Theme.cardOrigin(parent.width, width)
+        y: Theme.cardOrigin(parent.height, height) + surface.rise
         border.width: Theme.spacing.hairline
         border.color: Theme.color.muted
         // Open rises into place and close only fades, faster, because the translation is enabled: root.active.
-        anchors.verticalCenterOffset: root.active ? 0 : Motion.translateUpPx
+        property real rise: root.active ? 0 : Motion.translateUpPx
         opacity: root.active ? 1 : 0
         // Expand drops the Quick Look inset, which is the whole of the canvas's "expand fills the window".
         readonly property real inset: root.pdfExpanded ? 1 : Theme.preview.fraction
-        width: parent.width * surface.inset
-        height: parent.height * surface.inset
+        width: Theme.cardSpan(parent.width * surface.inset, parent.width)
+        height: Theme.cardSpan(parent.height * surface.inset, parent.height)
         color: Theme.color.surface
         // Mirrors hyprland decoration:rounding; media fills the surface and keeps square corners, a visible corner only shows on text and audio panes.
         radius: Style.cornerRadius
 
-        Behavior on anchors.verticalCenterOffset {
+        Behavior on rise {
             enabled: root.active && !Theme.reducedMotion
-            NumberAnimation { duration: Motion.durMs.open; easing.type: Easing.BezierSpline; easing.bezierCurve: Motion.bezierCurve }
+            NumberAnimation { duration: Motion.durMs.open; easing.type: Easing.OutCubic }
         }
 
         Behavior on opacity {
             enabled: !Theme.reducedMotion
             NumberAnimation {
                 duration: root.active ? Motion.durMs.open : Motion.durMs.close
-                easing.type: Easing.BezierSpline
-                easing.bezierCurve: Motion.bezierCurve
+                easing.type: Easing.OutCubic
             }
         }
 
@@ -313,12 +481,38 @@ Item {
                 id: textPane
                 anchors.fill: parent
                 anchors.margins: Theme.spacing.gap
-                active: root.kind === "text"
+                active: root.kind === "text" && !root.isMarkdown
                 path: root.path
                 size: root.size
                 // ExtThumbs: Quick Look reads at most the first 256 KiB on network and phone storage.
                 maxBytes: ExtThumbs.textLimit(root.pane ? root.pane.storageClass : "")
                 truncate: root.pane ? (root.pane.storageClass === "network" || root.pane.storageClass === "phone") : false
+            }
+
+            // A file-path Loader, never an inline Component, so a window that never shows Markdown never compiles it.
+            Loader {
+                id: markdownLoader
+                anchors.fill: parent
+                // The pane lies inside the surface's own frame, as the column's does; media fills it on purpose.
+                anchors.margins: Theme.spacing.hairline
+                active: root.isMarkdown
+                source: "MarkdownPane.qml"
+                onLoaded: {
+                    item.blockPath = Qt.binding(function () { return root.inlineMarkdownPath })
+                    item.path = Qt.binding(function () { return root.path })
+                    item.size = Qt.binding(function () { return root.size })
+                    item.view = Qt.binding(function () { return root.markdownSource ? "source" : "rendered" })
+                    item.maxBytes = Qt.binding(function () {
+                        return ExtThumbs.textLimit(root.pane ? root.pane.storageClass : "")
+                    })
+                    item.truncate = Qt.binding(function () {
+                        return root.pane ? (root.pane.storageClass === "network"
+                            || root.pane.storageClass === "phone") : false
+                    })
+                    item.active = Qt.binding(function () { return root.isMarkdown })
+                    item.closeFocused = Qt.binding(function () { return root.markdownCloseFocused })
+                    item.closeRequested.connect(root.close)
+                }
             }
 
             Loader {
@@ -337,7 +531,15 @@ Item {
             Loader {
                 id: imageLoader
                 anchors.fill: parent
-                onLoaded: item.path = Qt.binding(function () { return root.path })
+                onLoaded: {
+                    item.path = Qt.binding(function () { return root.path })
+                    item.interimThumb = Qt.binding(function () { return root.interimThumb })
+                    item.interimVisible = Qt.binding(function () { return root.interimVisible })
+                    item.interimX = Qt.binding(function () { return root.interimBox !== null ? root.interimBox.x : 0 })
+                    item.interimY = Qt.binding(function () { return root.interimBox !== null ? root.interimBox.y : 0 })
+                    item.interimWidth = Qt.binding(function () { return root.interimBox !== null ? root.interimBox.w : 0 })
+                    item.interimHeight = Qt.binding(function () { return root.interimBox !== null ? root.interimBox.h : 0 })
+                }
             }
 
             // The canvas's PdfViewer, source not sourceComponent, so QtQuick.Pdf loads on the first PDF and never for a folder without one.
@@ -347,6 +549,10 @@ Item {
                 onLoaded: {
                     item.path = Qt.binding(function () { return root.path })
                     item.active = true
+                    // A document on a hangable class loads from the backend's fetched copy.
+                    item.backend = Qt.binding(function () { return root.pane ? root.pane.backend : null })
+                    item.fetchFirst = Qt.binding(function () { return root.pane ? ExtThumbs.present(root.pane.storageClass) : false })
+                    item.viewerSlot = "quicklook"
                     item.forceActiveFocus()
                 }
             }

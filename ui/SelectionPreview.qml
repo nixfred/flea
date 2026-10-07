@@ -6,6 +6,7 @@ import "js/Thumbs.js" as Thumbs
 import "js/ExtThumbs.js" as ExtThumbs
 import "js/Keymap.js" as Keymap
 import "js/PreviewKeys.js" as PreviewKeys
+import "js/PreviewSettle.js" as PreviewSettle
 import "js/PreviewSwap.js" as PreviewSwap
 
 // Selection loading is independent of column visibility and the separate Quick Look overlay.
@@ -19,11 +20,19 @@ Flea.PreviewColumn {
     // ui/ColumnsArea.qml's third-column swap, which then drives the cursor moves; null leaves every change immediate.
     property var swap: null
     property string settleKey: ""
+    // A load queued under the swap's picture, so a duplicate replace queues no clear behind it.
+    property string loadQueuedKey: ""
+    // The multi-selection the loaded frame was built for; "" for a lone selection, which never keys on the version.
+    property string loadedSelection: ""
+    // Last distinct cursor move, so a held key cannot decode mid-burst: only idleness loads at once.
+    property double lastMoveAt: 0
+    property string lastMoveKey: ""
     signal thumbsApplied(var work)
     onExpandRequested: {
         if (!root.row || !root.pane) return
-        root.pane.preview.open(root.path, root.row.i, root.row.s, root.kindName)
-        root.pane.preview.pdfItem.expandFrom(root.pdfPage(), root.pdfZoom)
+        var look = root.pane.quickLook()
+        look.open(root.path, root.row.i, root.row.s, root.kindName)
+        look.pdfItem.expandFrom(root.pdfPage(), root.pdfZoom)
     }
 
     Keys.onPressed: function(event) {
@@ -36,7 +45,7 @@ Flea.PreviewColumn {
         else if (action === "preview") {
             var strip = root.mediaStripItem()
             if (strip) strip.toggled()
-            else if (root.row && !root.row.d) root.pane.preview.open(root.path, root.row.i, root.row.s, root.kindName)
+            else if (root.row && !root.row.d) root.pane.quickLook().open(root.path, root.row.i, root.row.s, root.kindName)
         } else if (action === "seekBack" || action === "seekForward") {
             var direction = action === "seekBack" ? -1 : 1
             if (root.rowState === Facts.PDF) root.turnPage(direction)
@@ -68,7 +77,7 @@ Flea.PreviewColumn {
             return false
         return PreviewSwap.columnReady({ state: root.previewState, thumb: root.thumb.length > 0,
             frame: root.frameStatus, noThumbComing: root.noThumbComing, pdfDrawn: root.pdfDrawn,
-            pdfFailed: root.pdfFailed, linesLoading: root.linesItem.loading, meta: root.meta !== null })
+            pdfFailed: root.pdfFailed, linesLoading: root.textLoading, meta: root.meta !== null })
     }
 
     // ExtThumbs: how much of a text file this frame may read; the column passes it on.
@@ -106,16 +115,52 @@ Flea.PreviewColumn {
     // A folder or null row keeps the old preview: ColumnsArea holds the old column by data until the peek lands.
     function replace() {
         if (!Columns.isFileRow(root.pane ? root.pane.rowFor(root.pane.cursorIndex) : null)) { settle.stop(); return }
+        var key = root.swapKey()
+        // A true duplicate preserves the frame and timer; a changed identity lets a same-key refresh proceed.
+        // A queued load stands for the same key: clearing behind it would wipe the load when it lands.
+        if (key === root.lastMoveKey && (root.isShown() || root.loadQueuedKey === key)) return
         if (root.swap && ViewState.previewAutomatic && root.canRead) {
-            root.armSettle()
-            root.swap.hold(root.clearForMove, root.swapKey())
+            // The picture first, the exact contract a deferred load keeps; the scheduler may load under it at once.
+            root.swap.hold(root.clearForMove, key)
+            root.settleFor(key)
             return
         }
+        if (!root.canRead) { root.clear(); return }
+        // No swap takes no picture, so the same scheduler decides after the same duplicate check above.
         root.clear()
-        if (root.canRead) root.armSettle()
+        root.settleFor(key)
+    }
+
+    // Whether the loaded frame already names the cursor row: the duplicate test the key clock cannot make.
+    function isShown() {
+        var current = root.pane.rowFor(root.pane.cursorIndex)
+        return root.loadedIndex === root.pane.cursorIndex && root.loadedDirectory === root.pane.path
+            && root.loadedIdentity === root.identity(current)
+            && root.loadedSelection === PreviewSettle.selectionKey(root.pane.selectionCount(), root.pane.selectionVersion)
+    }
+
+    // Refresh-or-new scheduler: a pending timer already covers this key, otherwise the move clock decides.
+    function settleFor(key) {
+        if (!ViewState.previewAutomatic || !root.pane) return
+        var now = Date.now()
+        var decision = PreviewSettle.plan(now, root.lastMoveAt, settle.interval, key, root.lastMoveKey,
+            settle.running && root.settleKey === key)
+        if (decision === "same") return
+        root.lastMoveKey = key
+        root.lastMoveAt = now
+        if (decision === "now") {
+            settle.stop()
+            root.settleKey = key
+            root.fireSettle()
+        } else {
+            root.settleKey = key
+            settle.restart()
+        }
     }
 
     function clearShown() {
+        root.loadQueuedKey = ""
+        root.loadedSelection = ""
         root.pending = false
         root.pendingToken = 0
         root.manualHold = false
@@ -162,6 +207,7 @@ Flea.PreviewColumn {
         root.path = root.pane.join(root.pane.path, candidate.n)
         root.kindName = root.pane.kindNames[candidate.k] || ""
         root.selectionCount = root.pane.selectionCount()
+        root.loadedSelection = PreviewSettle.selectionKey(root.pane.selectionCount(), root.pane.selectionVersion)
         root.selectedRows = root.pane.selectedIndices().map(function (index) { return root.pane.rowFor(index) }).filter(function (row) { return row !== null })
         if (root.swap) root.swap.start(false)
     }
@@ -170,7 +216,9 @@ Flea.PreviewColumn {
     function loadSelection() {
         if (!root.canRead) return
         if (!Columns.isFileRow(root.pane.rowFor(root.pane.cursorIndex))) { settle.stop(); return }
-        if (root.swap) root.swap.hold(root.load, root.swapKey(), true)
+        var key = root.swapKey()
+        root.loadQueuedKey = key
+        if (root.swap) root.swap.hold(root.load, key, true)
         else root.load()
     }
 
@@ -188,31 +236,46 @@ Flea.PreviewColumn {
         root.path = pane.join(pane.path, current.n)
         root.kindName = pane.kindNames[current.k] || ""
         root.selectionCount = pane.selectionCount()
+        root.loadedSelection = PreviewSettle.selectionKey(pane.selectionCount(), pane.selectionVersion)
         root.selectedRows = pane.selectedIndices().map(function (index) { return pane.rowFor(index) }).filter(function (row) { return row !== null })
         if (root.selectionCount > 1) { root.startSwap(false); return }
         var kind = Facts.state(current, 1, false, "", root.kindName)
         root.startSwap(kind === Facts.PDF)
         root.pendingToken = pane.backend.askMeta(root.loadedIndex, kind === Facts.TEXT || kind === Facts.CODE,
             kind === Facts.VIDEO || kind === Facts.AUDIO, kind === Facts.ARCHIVE)
-        if (current.t && pane.thumbState.file[root.loadedIndex] === undefined) {
-            var work = { ask: [root.loadedIndex], drop: [] }
-            root.thumbsApplied(work)
-            pane.backend.thumb(work.ask)
-        }
+        root.askThumb()
+    }
+
+    // The single-row ask, held until the storage class lands: unknown reads as generating,
+    // so asking early would thumbnail a NAS image in full over the network.
+    function askThumb() {
+        var pane = root.pane
+        if (!root.canRead || !pane || !pane.storageKnown || root.loadedIndex < 0 || root.selectionCount > 1) return
+        if (root.manualHold || !root.isShown()) return
+        var current = pane.rowFor(root.loadedIndex)
+        if (!current || !current.t || pane.thumbState.file[root.loadedIndex] !== undefined) return
+        var work = { ask: [root.loadedIndex], drop: [] }
+        work.cacheOnly = ExtThumbs.cacheOnly(pane.storageClass, ViewState.preview)
+        root.thumbsApplied(work)
+        pane.backend.thumb(work.ask, work.cacheOnly)
     }
 
     function startSwap(isPdf) { if (root.swap) root.swap.start(isPdf) }
+
+    // The settle's whole decision, shared by the timer and the idle fast path, so both spend the same gates.
+    function fireSettle() {
+        if (!ViewState.previewAutomatic) return
+        var hold = root.pane ? (!root.pane.storageKnown || ExtThumbs.manualHold(root.pane.storageClass, ViewState.preview)) : false
+        if (hold) root.followSelection()
+        else root.loadSelection()
+    }
 
     Timer {
         id: settle
         interval: root.pane ? root.pane.settleMs : 120
         // The automatic settle holds an off class; Ctrl+Space's direct loadSelection stays full.
         // Unknown waits through followSelection, so the first settle never spends the class fsinfo has not named yet.
-        onTriggered: if (ViewState.previewAutomatic) {
-            var hold = root.pane ? (!root.pane.storageKnown || ExtThumbs.manualHold(root.pane.storageClass, ViewState.preview)) : false
-            if (hold) root.followSelection()
-            else root.loadSelection()
-        }
+        onTriggered: root.fireSettle()
     }
     onCanReadChanged: {
         // A listing going out leaves the preview to Nav.forget's reset, which clears it when held rows go.
@@ -234,7 +297,8 @@ Flea.PreviewColumn {
         function onCursorIndexChanged() { if (!root.swap) root.followSelection() }
         // The class lands with fsinfo, after the rows; a settle fired in between spent local.
         function onStorageClassChanged() { root.followSelection() }
-        function onStorageKnownChanged() { root.followSelection() }
+        // A frame loaded before the class lands never asked; the ask runs here, once the gate names it.
+        function onStorageKnownChanged() { root.followSelection(); root.askThumb() }
         function onRowsChanged() {
             if (root.loadedIndex >= 0 && root.loadedIdentity !== root.identity(root.pane.rowFor(root.loadedIndex)))
                 root.replace()

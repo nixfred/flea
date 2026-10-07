@@ -8,10 +8,13 @@ import "js/Swap.js" as Swap
 Item {
     id: root
 
-    signal listed(int total, real readMs, real sortMs, string path)
+    signal listed(int total, real readMs, real sortMs, string path, var changed)
     // The listing directory's filesystem, straight off the listed line: a drag compares it against
     // the dropped-on folder's own to tell a move within one volume from a copy across two.
     property var dirDev: 0
+    // False when the listed directory cannot be written. A drag from it copies. Absent on an
+    // older reply stays true, which is the move that reply always described.
+    property bool dirWritable: true
     // listing is the numbering the rows are in, 0 from a backend that does not say; see docs/protocol.md "listing".
     signal rows(int start, var items, real ms, var kinds, real listing)
     // The numbering of the rows the pane holds, which every row-indexed request names back; ui/PaneSwap.qml writes it.
@@ -36,8 +39,17 @@ Item {
     signal transferDone(int id, int ok, int failed, int skipped, bool cancelled, var retryPaths, bool durable, string note)
     // The names a transfer would land on, asked first; ui/CollideHost.qml holds the transfer until it lands.
     signal collisions(int id, int total, var names)
-    signal trashed(int ok, int failed)
+    // MenuAdditions040: Paste as links answers one line per request.
+    signal linked(int ok, int failed, int skipped, string note)
+    // MenuAdditions040: Show original reveals the link's target in its own folder.
+    signal linkTarget(string path, string directory, string name, int id)
+    // Linktarget ids rise forever, so a late reply never matches a new request.
+    property int linkTargetSeq: 0
+    function nextLinkTargetId() { return root.linkTargetSeq += 1 }
+    signal trashed(int ok, int failed, string reason)
     signal renamed(bool ok, string path)
+    // A remote write past its deadline answers this first and its own reply later; see docs/protocol.md "slow".
+    signal slowOp(string op, string path, string msg)
     signal made(bool ok, string path)
     signal duplicated(bool ok, string path)
     signal undone(string op, bool ok)
@@ -51,12 +63,21 @@ Item {
     signal redone(string op, bool ok)
     signal redoStarted(int id, int n, string op)
     signal metaResult(var message)
+    // The system clipboard for files, one line for set, get and clear alike.
+    signal clipResult(var message)
     property int metaToken: 0
+    // One counter numbers every PDF fetch, so two viewers never share an id.
+    property int pdfCopySeq: 0
     signal meta(int row, int w, int h, int orient, real durationMs, int sampleRate, int entries, real unpacked, bool archiveFailed, var names, real lines, bool partial, bool linesFailed, string target, bool targetDir, string owner)
+    signal shebang(string path, bool hasShebang, int id)
+    // A PDF fetched into a session-private copy under a deadline; err names the wait or the refusal.
+    signal pdfCopied(int id, string path, string err)
     signal fsInfo(string fs, real free, string path, string storageClass)
     // The one line no request asked for: the directory the current listing came from changed under
     // it. path is that directory, so a pane that has since moved can ignore it; see docs/protocol.md.
     signal changed(string path)
+    // The open mount went away: parent is the nearest existing folder, so the pane moves there.
+    signal unmounted(string path, string parent)
     // readFailed tells an unreadable directory from an empty one (mode 0 when its stat failed too); hidden, hiddenLast and first echo the request, so each of the three peek clients knows its own reply.
     signal peeked(string path, bool hidden, int total, var rows, bool readFailed, int mode, bool hiddenLast, int first)
     // The path bar's folder jump, the existing folders of each source in its own order; see docs/protocol.md "jump".
@@ -159,16 +180,16 @@ Item {
     // One composition, two senders: the chooser adds the caller's filter to it and counts its own
     // replies, and issue 134 was the chooser building this by hand without the saved order in it.
     // A fresh scan is always name ascending, so a refresh after a write puts the header's mark back.
-    function listRequest(path, first, hidden) {
+    function listRequest(path, first, hidden, wantChanged) {
         root.listRequests += 1
         root.lastListedPath = path
         if (!root.preserveSort || !root.hasListed) root.resetSort(path)
         root.hasListed = true
-        return { c: "list", path: path, first: first, hidden: hidden, by: root.sortBy, desc: root.sortDesc,
+        return { c: "list", path: path, first: first, hidden: hidden, wantChanged: wantChanged === true, by: root.sortBy, desc: root.sortDesc,
                  foldersFirst: ViewState.state.foldersFirst !== false, groupByKind: ViewState.state.groupByKind === true,
                  hiddenLast: ViewState.state.hiddenLast === true }
     }
-    function list(path, first, hidden) { root.send(root.listRequest(path, first, hidden)) }
+    function list(path, first, hidden, wantChanged) { root.send(root.listRequest(path, first, hidden, wantChanged)) }
 
     // A listing built from the paths named here, in that order and never sorted; see
     // docs/protocol.md "listpaths". The header's sort mark is left where the caller set it, because
@@ -246,6 +267,14 @@ Item {
     // One row, only when a surface asks: the same no-sweep rule thumb and dirsize already follow.
     // media and archive each cost a subprocess in the backend, so each is only ever true for a row
     // whose kind actually names the facts it would answer.
+    // One document, only when a surface asks: the same no-sweep rule thumb and dirsize follow.
+    // The id is minted here and returned, so the viewer matches the answer it asked for.
+    function pdfCopy(path, slot) {
+        root.pdfCopySeq += 1
+        root.send({ c: "pdfcopy", id: root.pdfCopySeq, slot: slot || "", path: path })
+        return root.pdfCopySeq
+    }
+
     function askMeta(row, text, media, archive) {
         root.metaToken += 1
         root.send({ c: "meta", row: row, text: text, media: media, archive: archive, token: root.metaToken })
@@ -256,16 +285,19 @@ Item {
         root.send({ c: "fsinfo" })
     }
 
-    // A read-only look elsewhere; Tab passes hiddenLast false, other callers keep the listing order.
-    function peek(path, first, hidden, hiddenLast) {
+    // A read-only look elsewhere; Tab passes hiddenLast false, other callers keep the listing order, and only a column passes keep, the directories drawn.
+    function peek(path, first, hidden, hiddenLast, keep) {
         var last = hiddenLast === undefined ? ViewState.state.hiddenLast === true : hiddenLast === true
-        root.send({ c: "peek", path: path, first: first, hidden: hidden, hiddenLast: last })
+        root.send({ c: "peek", path: path, first: first, hidden: hidden, hiddenLast: last, watch: Array.isArray(keep), keep: keep })
     }
 
     // op is "peers" for the flyout's list and "send" for the transfer it chooses; both answer late.
     // Once per open of the path bar: the client's favourites and recent files, joined there with zoxide; id comes back on the answer.
-    function jump(id, favourites, recent) {
-        root.send({ c: "jump", id: id, favourites: favourites, recent: recent })
+    function jump(id, ranking, favourites, recent) {
+        var message = { c: "jump", id: id, favourites: favourites, recent: recent }
+        // A whole ask names its provisional ask so the backend runs zoxide once for the open; any other ask names none.
+        if (ranking !== 0) message.ranking = ranking
+        root.send(message)
     }
 
     function localSend(op, peer, paths) {
@@ -306,6 +338,12 @@ Item {
             return
         }
         root.send({ c: "thumbcancel", rows: rows })
+    }
+
+    // An eject releases the volume, so queued thumbnail and size work stops before the unmount.
+    function quiesce() {
+        root.send({ c: "thumbcancel", rows: [] })
+        root.send({ c: "dirsizecancel" })
     }
 
     function dirsize(rows) {
@@ -349,6 +387,7 @@ Item {
     // Sample input: {"t":"thumbed","row":2,"file":"/home/gm/.cache/thumbnails/large/b98fa4.png","ms":75.823}
     // Sample input: {"t":"dirsized","row":4,"bytes":1048576,"partial":false,"ms":12.500}
     // Sample input: {"t":"changed","path":"/home/gm/Downloads"}
+    // Sample input: {"t":"unmounted","path":"/media/stick","parent":"/media"}
     // Sample input: {"t":"searching","n":812,"scanned":41200,"ms":300.114}
     // Sample input: {"t":"transferstarted","id":12,"n":2,"moving":true}
     // Sample input: {"t":"transferstarted","id":12,"n":1,"moving":false,"extract":true}
@@ -357,6 +396,7 @@ Item {
     // Sample input: {"t":"transferitem","id":12,"index":1,"name":"photos","ok":false,"err":"permission denied"}
     // Sample input: {"t":"transferdone","id":12,"ok":1,"failed":1,"skipped":0,"cancelled":false,"note":"rclone uploads them in the background"}
     // Sample input: {"t":"collisions","id":7,"total":1,"names":[{"n":"screenshot.png","d":false,"i":"image-x-generic"}]}
+    // Sample input: {"t":"linked","ok":1,"failed":1,"skipped":0,"note":"the link left at /home/gm/b.txt could not be removed (stale)"}
     // Sample input: {"t":"trashed","ok":1,"failed":0}
     // Sample input: {"t":"made","ok":true,"path":"/home/gm/Pictures/New Folder"}
     // Sample input: {"t":"undone","op":"move","ok":true}
@@ -400,6 +440,7 @@ Item {
             root.queueing = false
             // Asked once per process: which formats exist cannot change while the backend runs.
             root.askFormats()
+            if (!root.pickerOnly) root.send({ c: "clipWatch" })
             for (var i = 0; i < root.pending.length; i++) {
                 child.write(root.pending[i])
             }

@@ -23,7 +23,7 @@ FocusScope {
     signal chosen(string choice)
     readonly property var cardItem: card
     readonly property bool titleTruncated: title.truncated
-    readonly property bool buttonsFit: buttons.width <= body.width
+    readonly property bool buttonsFit: buttons.width <= body.holderWidth
     readonly property int explainLines: explain.lineCount
     function buttonItem(name) { return ({cancel: cancelButton, skip: skipButton, keep: keepButton, replace: replaceButton})[name] || null }
     function open(heading, list, more) {
@@ -66,9 +66,10 @@ FocusScope {
     }
     Rectangle {
         id: card
-        anchors.centerIn: parent
-        width: Math.max(0, Math.min(root.contentWidth + 2 * root.cardPadding + 2 * Theme.spacing.hairline, root.width - 2 * Theme.spacing.gap))
-        height: Math.max(0, Math.min(body.wanted + root.cardPadding + root.cardBottomPadding + 2 * Theme.spacing.hairline, root.height - 2 * Theme.spacing.gap))
+        x: Theme.cardOrigin(root.width, width)
+        y: Theme.cardOrigin(root.height, height)
+        width: Theme.cardSpan(root.contentWidth + 2 * root.cardPadding + 2 * Theme.spacing.hairline, root.width - 2 * Theme.spacing.gap)
+        height: Theme.cardSpan(body.wanted + root.cardPadding + root.cardBottomPadding + 2 * Theme.spacing.hairline, root.height - 2 * Theme.spacing.gap)
         color: Theme.color.surface
         border.color: Theme.color.muted
         border.width: Theme.spacing.hairline
@@ -81,13 +82,14 @@ FocusScope {
         }
         Flea.CardScroll {
             id: body
+            bleed: Theme.ringClearance
             anchors.fill: parent
-            anchors.leftMargin: root.cardPadding + Theme.spacing.hairline
-            anchors.rightMargin: root.cardPadding + Theme.spacing.hairline
-            anchors.topMargin: root.cardPadding + Theme.spacing.hairline
-            anchors.bottomMargin: root.cardBottomPadding + Theme.spacing.hairline
+            anchors.leftMargin: root.cardPadding + Theme.spacing.hairline - Theme.ringClearance
+            anchors.rightMargin: root.cardPadding + Theme.spacing.hairline - Theme.ringClearance
+            anchors.topMargin: root.cardPadding + Theme.spacing.hairline - Theme.ringClearance
+            anchors.bottomMargin: root.cardBottomPadding + Theme.spacing.hairline - Theme.ringClearance
             Column {
-                width: body.width
+                width: body.holderWidth
                 spacing: Theme.spacing.gap
                 Text {
                     id: title

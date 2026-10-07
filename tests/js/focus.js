@@ -1,6 +1,8 @@
 .import "../../ui/js/Focus.js" as Focus
+.import "../../ui/js/Clipboard.js" as Clipboard
 .import "../../ui/js/Eject.js" as Eject
 .import "../../ui/js/Keymap.js" as Keymap
+.import "../../ui/js/Selection.js" as Selection
 .import "filterfixture.js" as Fixture
 .import "sourcefixture.js" as Source
 
@@ -13,6 +15,7 @@ function pane(preview, viewMode) {
         viewMode: viewMode ? viewMode : "list",
         chooseView: function (mode) { this.viewMode = mode },
         searchMode: "",
+        recentMode: "",
         preview: preview
     }
 }
@@ -65,7 +68,7 @@ function closed() {
 // answer from the rail as well as the list rather than being swallowed by whichever view has focus.
 function chromePane(view) {
     return {
-        focusView: view, viewMode: "list", searchMode: "", filterTyping: false,
+        focusView: view, viewMode: "list", searchMode: "", recentMode: "", filterTyping: false,
         inputAt: 0, rowsAt: 0, trashArmedAt: 0, asked: 0, copied: 0, said: "", shown: null,
         preview: closed(),
         message: function (text, isError) { this.said = text },
@@ -92,8 +95,21 @@ function key(code, text, modifiers) {
     return { key: code, text: text, modifiers: modifiers }
 }
 
-// Only the members the escape case reads. Search.cancel and Pane.escapePressed both record rather
-// than act, because what is being checked is the order they are reached in.
+// armHandle builds the handleKey members past the escape dispatch: listing view, recording dispatch.
+function armHandle(p) {
+    p.focusView = "list"
+    p.viewMode = "list"
+    p.shown = null
+    p.renameEditor = function () { return null }
+    p.keySequence = ""
+    p.keySequenceIdentity = ""
+    p.trashArmedAt = 0
+    p.message = function (text) { p.said = text }
+    p.acted = []
+    p.act = function (action) { p.acted.push(action); Focus.act(action, p) }
+    return p
+}
+// Escape-case members only: Search.cancel and Pane.escapePressed record rather than act to pin reach order.
 function escaper(query, retreated) {
     var p = pane(closed())
     p.filterQuery = query
@@ -103,10 +119,27 @@ function escaper(query, retreated) {
     p.searchRunning = false
     p.backend = { searchcancel: function () { p.cancelled += 1 } }
     p.escapePressed = function () { p.retreated += 1 }
+    // Issue 29's own members: the setting, the menu, the card, the marks and the listing in flight.
+    p.escapeUp = false
+    p.menuVisible = false
+    p.collide = { opened: false }
+    p.listInFlight = false
+    p.climbed = 0
+    p.openParent = function () { p.climbed += 1 }
+    p.selection = { count: function () { return 0 } }
+    p.selectionCount = function () { return 0 }
+    p.wire = { anchor: null, reloaded: 0 }
     return p
 }
 
 function run(check) {
+    check("DEL does not mask a cursor key as printable", Focus.leavesLine(key(Qt.Key_Down, "\u007f", Qt.NoModifier)), true)
+    check("a normal letter stays on the query line", Focus.leavesLine(key(Qt.Key_J, "j", Qt.NoModifier)), false)
+    var printablePane = chromePane("list")
+    Focus.handleKey(key(Qt.Key_unknown, "\u007f", Qt.NoModifier), printablePane, printablePane.sidebar)
+    check("DEL produces no type-ahead hint", printablePane.said, "")
+    Focus.handleKey(key(Qt.Key_unknown, "é", Qt.NoModifier), printablePane, printablePane.sidebar)
+    check("a normal unbound letter still produces the filter hint", printablePane.said, "Press / to filter this listing by name.")
     var none = Qt.NoModifier
     var shift = Qt.ShiftModifier
 
@@ -186,6 +219,49 @@ function run(check) {
     Focus.act("escape", typing)
     check("esc while the query line has the caret closes it", typing.filterTyping, false)
 
+    // A hop out of Recent while a listing is out is refused before the mode is touched.
+    var held = escaper("", 0)
+    held.focusView = "list"
+    held.recentMode = "results"
+    held.recentFrom = "/home/gm/Work"
+    held.recentPaths = ["/home/gm/a.txt"]
+    held.listInFlight = true
+    held.said = ""
+    held.message = function (text) { held.said = text }
+    held.opened = []
+    held.openWithoutHistory = function (next) { held.opened.push(next) }
+    held.backend = { sortBy: "name", sortDesc: false }
+    Focus.act("escape", held)
+    check("Escape refuses the hop out of Recent while a listing is out", held.said, "A directory is already loading.")
+    check("and keeps the mode standing", held.recentMode + "|" + held.recentFrom, "results|/home/gm/Work")
+    check("and asks for nothing", held.opened.length, 0)
+    var stuck = escaper("", 0)
+    stuck.recentMode = "results"
+    stuck.listInFlight = true
+    stuck.path = "/"
+    stuck.held = 0
+    stuck.cursorIndex = 0
+    stuck.rows = [{ n: "home/gm/Docs/a.txt", d: false }]
+    stuck.rowFor = function (i) { return stuck.rows[i] || null }
+    stuck.join = function (base, name) { return base === "/" ? "/" + name : base + "/" + name }
+    stuck.said = ""
+    stuck.message = function (text) { stuck.said = text }
+    stuck.opened = []
+    stuck.openWithoutHistory = function (next) { stuck.opened.push(next) }
+    Focus.act("reveal", stuck)
+    check("o refuses the reveal while a listing is out", stuck.said, "A directory is already loading.")
+    check("and keeps the mode standing", stuck.recentMode, "results")
+    check("and asks for nothing", stuck.opened.length, 0)
+
+    // Pane.qml's own Back, Up and re-list entries refuse the same hop before touching the mode.
+    var backLine = Source.slice(Source.source("ui/Pane.qml"), "function goBack()", "function goForward()")
+    check("goBack refuses before it closes", backLine.indexOf("root.listInFlight") >= 0, true)
+    var upLine = Source.slice(Source.source("ui/Pane.qml"), "function openParent()", "function openRecent(paths, visits)")
+    check("openParent refuses before it closes", upLine.indexOf("root.listInFlight") >= 0, true)
+    var relist = Source.slice(Source.source("ui/Pane.qml"), "function openWithoutHistory(newPath, options)", "function toggleHidden()")
+    check("a re-list refuses before it clears",
+          relist.indexOf("if (root.listInFlight)") >= 0 && relist.indexOf("if (root.listInFlight)") < relist.indexOf("RecentMode.leave(root)"), true)
+
     var activeStatus = escaper("needle", 0)
     var statusEscapes = 0
     activeStatus.statusBar = {escapePressed: function () { statusEscapes += 1; return true }}
@@ -201,6 +277,156 @@ function run(check) {
     activeStatus.statusBar.escapePressed = function () { return false }
     Focus.act("escape", activeStatus)
     check("idle status lets Escape clear marks", activeStatus.retreated, 1)
+
+    // Issue 29: Escape climbs while the setting is on, and stays put while off, which is 0.3.4.
+    var stays = escaper("", 0)
+    Focus.act("escape", stays)
+    check("Escape with the setting off clears marks instead of climbing",
+          stays.retreated + "|" + stays.climbed, "1|0")
+    var climbs = escaper("", 0)
+    climbs.escapeUp = true
+    Focus.act("escape", climbs)
+    check("Escape with the setting on climbs to the parent", climbs.climbed + "|" + climbs.retreated, "1|0")
+    var filtered = escaper("scr", 0)
+    filtered.escapeUp = true
+    Focus.act("escape", filtered)
+    check("a standing filter still goes first", filtered.filterQuery + "|" + filtered.climbed, "|0")
+    var marked = escaper("", 0)
+    marked.escapeUp = true
+    marked.selectionCount = function () { return 2 }
+    Focus.act("escape", marked)
+    check("a selection is cleared before any climb", marked.retreated + "|" + marked.climbed, "1|0")
+    var menued = escaper("", 0)
+    menued.escapeUp = true
+    menued.menuVisible = true
+    Focus.act("escape", menued)
+    check("an open menu keeps the key", menued.climbed + "|" + menued.retreated, "0|1")
+    var loading = escaper("", 0)
+    loading.escapeUp = true
+    loading.listInFlight = true
+    Focus.act("escape", loading)
+    check("a listing out keeps the key too", loading.climbed + "|" + loading.retreated, "0|1")
+    var carded = escaper("", 0)
+    carded.escapeUp = true
+    carded.collide = { opened: true }
+    Focus.act("escape", carded)
+    check("and so does the collision card", carded.climbed + "|" + carded.retreated, "0|1")
+
+    // A climb landing mark is Flea's, so it never blocks the next climb.
+    var landed = escaper("", 0)
+    landed.escapeUp = true
+    landed.selection = Selection.create()
+    landed.selection.only(4, true)
+    landed.selectionCount = function () { return landed.selection.count() }
+    Focus.act("escape", landed)
+    check("a climb's landing mark never blocks the next climb", landed.climbed + "|" + landed.retreated, "1|0")
+    var deliberate = escaper("", 0)
+    deliberate.escapeUp = true
+    deliberate.selection = Selection.create()
+    deliberate.selection.toggle(4)
+    deliberate.selectionCount = function () { return deliberate.selection.count() }
+    Focus.act("escape", deliberate)
+    check("a deliberate lone mark still unwinds first", deliberate.climbed + "|" + deliberate.retreated, "0|1")
+    var clicked = escaper("", 0)
+    clicked.escapeUp = true
+    clicked.selection = Selection.create()
+    clicked.selection.only(4)
+    clicked.selectionCount = function () { return clicked.selection.count() }
+    Focus.act("escape", clicked)
+    check("a plain click's lone mark still unwinds first", clicked.climbed + "|" + clicked.retreated, "0|1")
+
+    // Escape cancels an armed trash or vim pair and stops instead of climbing.
+    var armedKey = key(Qt.Key_Escape, "", none)
+    var armedTrash = escaper("", 0)
+    armedTrash.escapeUp = true
+    armHandle(armedTrash)
+    armedTrash.trashArmedAt = Date.now()
+    check("Escape with an armed trash is consumed", Focus.handleKey(armedKey, armedTrash, null), true)
+    check("and cancels the arm instead of climbing",
+          armedTrash.trashArmedAt + "|" + armedTrash.climbed + "|" + armedTrash.retreated, "0|0|0")
+    var armedOff = escaper("", 0)
+    armHandle(armedOff)
+    armedOff.trashArmedAt = Date.now()
+    check("Escape with an armed trash and the setting off is consumed", Focus.handleKey(armedKey, armedOff, null), true)
+    check("and retreats instead of standing in for a climb",
+          armedOff.trashArmedAt + "|" + armedOff.climbed + "|" + armedOff.retreated, "0|0|1")
+    var armedPair = escaper("", 0)
+    armedPair.escapeUp = true
+    armHandle(armedPair)
+    armedPair.path = "/d"
+    armedPair.cursorIndex = 3
+    armedPair.selectionVersion = 1
+    armedPair.keySequence = "copyArm"
+    armedPair.keySequenceIdentity = '["/d",3,1,"list"]'
+    check("Escape with an armed vim pair is consumed too", Focus.handleKey(armedKey, armedPair, null), true)
+    check("and drops the pair instead of climbing",
+          armedPair.keySequence + "|" + armedPair.climbed + "|" + armedPair.retreated, "|0|0")
+    var armedPairOff = escaper("", 0)
+    armHandle(armedPairOff)
+    armedPairOff.path = "/d"
+    armedPairOff.cursorIndex = 3
+    armedPairOff.selectionVersion = 1
+    armedPairOff.keySequence = "copyArm"
+    armedPairOff.keySequenceIdentity = '["/d",3,1,"list"]'
+    check("the off pair holds a live identity", armedPairOff.keySequenceIdentity, Focus.stampOf(armedPairOff))
+    check("Escape with an armed vim pair and the setting off is consumed too", Focus.handleKey(armedKey, armedPairOff, null), true)
+    check("and blanks the pair before running Escape's own action",
+          armedPairOff.keySequence + "|" + armedPairOff.climbed + "|" + armedPairOff.retreated, "|0|1")
+    var stalePair = escaper("", 0)
+    stalePair.escapeUp = true
+    armHandle(stalePair)
+    stalePair.path = "/d"
+    stalePair.cursorIndex = 7
+    stalePair.selectionVersion = 1
+    stalePair.keySequence = "copyArm"
+    stalePair.keySequenceIdentity = '["/d",3,1,"list"]'
+    check("Escape with a stale vim pair climbs instead", Focus.handleKey(armedKey, stalePair, null), true)
+    check("and leaves the climb to the parent",
+          stalePair.keySequence + "|" + stalePair.climbed + "|" + stalePair.retreated, "|1|0")
+    var unarmed = escaper("", 0)
+    unarmed.escapeUp = true
+    armHandle(unarmed)
+    check("an unarmed Escape still climbs", Focus.handleKey(armedKey, unarmed, null), true)
+    check("through the same climb", unarmed.climbed + "|" + unarmed.retreated, "1|0")
+
+    // Recent is a history, so Paste as and its leaves are refused like Paste.
+    var historyPaste = escaper("", 0)
+    historyPaste.recentMode = "results"
+    historyPaste.message = function (text) { historyPaste.said = text }
+    historyPaste.openPasteAs = function () { historyPaste.pasted = true }
+    historyPaste.pasteLink = function () { historyPaste.pasted = true }
+    historyPaste.pasted = false
+    Focus.act("pasteAs", historyPaste)
+    check("Paste as is refused in Recent", historyPaste.said + "|" + historyPaste.pasted,
+          "This listing is a history, and cannot take a paste.|false")
+    Focus.act("pasteLink", historyPaste)
+    check("and its relative leaf is refused there too", historyPaste.said + "|" + historyPaste.pasted,
+          "This listing is a history, and cannot take a paste.|false")
+    Focus.act("pasteAbsoluteLink", historyPaste)
+    Focus.act("pasteHardLink", historyPaste)
+    check("and so are the absolute and hard leaves", historyPaste.said + "|" + historyPaste.pasted,
+          "This listing is a history, and cannot take a paste.|false")
+
+    // F5 and Ctrl+R re-list the folder they are on through the reload key.
+    var f5 = key(Qt.Key_F5, "", none)
+    check("F5 resolves to reload while browsing", Focus.lookup(f5, pane(closed())), "reload")
+    var ctrlR = key(Qt.Key_R, "\u0012", Qt.ControlModifier)
+    check("ctrl r resolves to reload too", Focus.lookup(ctrlR, pane(closed())), "reload")
+    check("reload goes quiet over search results, the way the sort keys do",
+          Focus.lookup(f5, searching(closed())), "")
+    var reloading = escaper("", 0)
+    reloading.total = 10
+    reloading.held = 0
+    reloading.windowSize = 40
+    reloading.path = "/d"
+    reloading.cursorIndex = 0
+    reloading.rowFor = function () { return null }
+    reloading.openWithoutHistory = function (path) { reloading.listed = path }
+    reloading.backend.window = function () {}
+    reloading.wire = { anchor: null }
+    Focus.act("reload", reloading)
+    check("reload re-lists the folder it is on", reloading.listed, "/d")
+    check("and remembers the count its notice answers against", reloading.reloadFrom, 10)
 
     // The search strip covers the header whole, so its mark cannot be seen moving, and a sort ends
     // the walk in the backend. Both keys go silent while a search is up rather than cancelling one
@@ -360,18 +586,27 @@ function run(check) {
     var menu = listPane(true)
     var menuRequests = []
     menu.path = "/d"
+    menu.clipPending = null
+    menu.clipQueue = []
+    menu.clipSequence = 0
+    menu.clipboardState = Clipboard.state()
+    menu.clipboardWatchFailed = false
+    menu.listInFlight = false
     menu.cursorIndex = 0
     menu.rowFor = function () { return {n: "selected.txt"} }
     menu.selectedIndices = function () { return [] }
     menu.join = function (parent, name) { return parent + "/" + name }
     menu.sticky = function () {}
     menu.backend = {
+        heldListing: 1,
+        send: function (request) { menu.clipRequests.push(request) },
         duplicate: function (path, id) { menuRequests.push("duplicate:" + id) },
         trash: function (rows, id) { menuRequests.push("trash:" + id) },
         extract: function (path, dest, id) { menuRequests.push("extract:" + id) },
         compress: function (paths, dest, format, id) { menuRequests.push(paths.join(",") + ":" + id) }
     }
     menu.moveToDropbox = function (id) { menuRequests.push("dropbox:" + id) }
+    menu.clipRequests = []
     menu.openConvert = function (id) { menuRequests.push("convert:" + id) }
     var selectedPaths = ["/d/captured.txt", "/d/second.txt"]
     Focus.act("copy", menu, 42, selectedPaths)
@@ -453,4 +688,58 @@ function run(check) {
     calm.listArea = { focused: false, forceActiveFocus: function () { this.focused = true } }
     Focus.railHidden(calm)
     check("an already-list pane moves nothing on a hide", calm.focusView + "|" + calm.listArea.focused, "list|false")
+
+    // Recent is a history, not a directory: pasting or creating there would land in the root it stands on.
+    function recentPane() {
+        var p = listPane(true)
+        p.recentMode = "results"
+        p.path = "/"
+        p.clipboard = { paths: ["/a.txt"], moving: false }
+        p.collide = { asked: [], ask: function (req) { this.asked.push(req.op || req.c) } }
+        p.made = []
+        p.backend = { mkdir: function (path) { p.made.push(path) } }
+        return p
+    }
+    var recentPaste = recentPane()
+    Focus.act("paste", recentPaste)
+    check("paste over Recent says the history line", recentPaste.said, "This listing is a history, and cannot take a paste.")
+    check("and reaches neither Ops nor collide", recentPaste.collide.asked.length + "|" + recentPaste.made.length, "0|0")
+    var recentMove = recentPane()
+    Focus.act("movePaste", recentMove)
+    check("move-paste over Recent says the history line", recentMove.said, "This listing is a history, and cannot take a paste.")
+    check("and asks no transfer", recentMove.collide.asked.length, 0)
+    var recentFolder = recentPane()
+    Focus.act("newFolder", recentFolder)
+    check("new folder over Recent says the history line", recentFolder.said, "This listing is a history, and cannot take a new folder.")
+    check("and asks the backend for nothing", recentFolder.made.length, 0)
+    var recentReveal = recentPane()
+    recentReveal.cursorIndex = 0
+    recentReveal.rowFor = function () { return { n: "home/gm/Work/notes.txt" } }
+    recentReveal.join = function (base, name) { return base + name }
+    recentReveal.opened = ""
+    recentReveal.openWithoutHistory = function (path) { recentReveal.opened = path }
+    Focus.act("reveal", recentReveal)
+    check("o over Recent reveals the holding folder", recentReveal.opened + "|" + recentReveal.recentMode, "/home/gm/Work|")
+
+    // MenuAdditions040: one dispatch check each, so a key that loses its route goes red here.
+    var copyAsPane = listPane(true)
+    copyAsPane.openedCopyAs = 0
+    copyAsPane.openCopyAs = function () { copyAsPane.openedCopyAs += 1 }
+    Focus.act("copyAs", copyAsPane)
+    check("c opens Copy as at the cursor", copyAsPane.openedCopyAs, 1)
+    var pasteAsPane = listPane(true)
+    pasteAsPane.openedPasteAs = 0
+    pasteAsPane.openPasteAs = function () { pasteAsPane.openedPasteAs += 1 }
+    Focus.act("pasteAs", pasteAsPane)
+    check("P opens Paste as", pasteAsPane.openedPasteAs, 1)
+    var copyPathPane = listPane(true)
+    copyPathPane.copied = ""
+    copyPathPane.opener = { copyText: function (text) { copyPathPane.copied = text } }
+    Focus.act("copyPath", copyPathPane, 0, ["/d/a.txt"])
+    check("copy path copies at once", copyPathPane.copied, "/d/a.txt")
+    var pasteLinkPane = listPane(true)
+    pasteLinkPane.linked = []
+    pasteLinkPane.pasteLink = function (kind) { pasteLinkPane.linked.push(kind + ":" + arguments.length) }
+    Focus.act("pasteLink", pasteLinkPane, 0, ["/d/a.txt"])
+    check("paste link asks for a relative link without captured row paths", pasteLinkPane.linked.join("|"), "relative:1")
 }

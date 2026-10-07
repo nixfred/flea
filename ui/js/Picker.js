@@ -1,6 +1,7 @@
 .pragma library
 
 .import "Format.js" as Format
+.import "Thumbs.js" as Thumbs
 
 // The portal request tools/flea-portal puts in FLEA_PICKER, and the answer ui/picker.qml writes
 // back. Everything here is pure so tests/js/picker.js can drive it without a window.
@@ -103,7 +104,7 @@ function hints(req) {
     if (req.mode === "save") {
         return "Enter save · Esc cancel"
     }
-    var pick = req.directory ? "Enter open · Space mark folder" : "Space select · Enter open/send"
+    var pick = req.multiple ? (req.directory ? "Enter open · Space mark folder" : "Space select · Enter open/send") : "Enter open"
     return pick + " · Esc cancel"
 }
 
@@ -196,8 +197,8 @@ function validName(name) {
 // What both the strip and the status line say about a name validName() refuses, in ops.rs's words.
 var NAME_REFUSED = "a name cannot be empty, . or .. , or contain a separator"
 
-// A file double click marks the row when unmarked, then accepts; a multiple accept sends every mark.
 var DOUBLE_OPEN = "open"
+var DOUBLE_MARK = "mark"
 var DOUBLE_ACCEPT = "accept"
 var DOUBLE_MARK_ACCEPT = "markAccept"
 var DOUBLE_NONE = "none"
@@ -207,7 +208,7 @@ function sameTap(firstPath, rowPath) {
     return !!rowPath && rowPath === firstPath
 }
 
-// Sample input: doubleAction({mode:"open",multiple:false,directory:false}, {d:false}, "/a/b.txt", "/a/b.txt", []) answers "markAccept".
+// Sample input: doubleAction({mode:"open",multiple:false}, {d:false}, "/a/b.txt", "/a/b.txt", []) answers "markAccept"; multiple:true answers "mark" for either mark state.
 function doubleAction(req, row, rowPath, firstPath, marks) {
     if (!row) {
         return DOUBLE_NONE
@@ -219,11 +220,22 @@ function doubleAction(req, row, rowPath, firstPath, marks) {
     if (req.mode === "save" || req.directory || req.mode === "savefiles") {
         return DOUBLE_NONE
     }
-    // The row path names the file, so a list rebuilt between the taps never sends another row.
+    // The row path names the file, so a list rebuilt between the taps never marks or sends another row.
     if (!sameTap(firstPath, rowPath)) {
         return DOUBLE_NONE
     }
-    return marked(marks, rowPath) ? DOUBLE_ACCEPT : DOUBLE_MARK_ACCEPT
+    return req.multiple ? DOUBLE_MARK : marked(marks, rowPath) ? DOUBLE_ACCEPT : DOUBLE_MARK_ACCEPT
+}
+
+// The picker never renames, so Return/Enter still activates and other rename keys stay unhandled.
+function activates(action, key) {
+    if (action === "open" || action === "pageForward") {
+        return true
+    }
+    if (action !== "rename") {
+        return false
+    }
+    return key === Qt.Key_Return || key === Qt.Key_Enter
 }
 
 function join(dir, name) {
@@ -239,6 +251,50 @@ function rowPath(location, name) {
 
 function directory(row) {
     return !!row && (row.d === true || (Format.isSymlink(row.p) && row.i === "folder"))
+}
+
+// A launch opens only a view the picker draws; anything else opens the list.
+function rememberedView(stored) {
+    return stored === "grid" ? "grid" : "list"
+}
+
+// Only a switch that moves the view owes the state file a write.
+function viewSwitch(current, next) {
+    return (next === "list" || next === "grid") && next !== current ? next : ""
+}
+
+// Visible tiles as listing rows, the same multiplication GridArea.visibleRange does.
+function tileRange(contentY, cellH, tileRows, columns, total) {
+    var view = Thumbs.viewport(contentY, cellH, tileRows, Math.max(1, Math.ceil(total / Math.max(1, columns))))
+    return {
+        first: view.first * columns,
+        last: Math.min(total - 1, (view.last + 1) * columns - 1)
+    }
+}
+
+// One grid step keeps the main grid's edge rule: off its row or past an end stays.
+function gridTarget(index, delta, columns, total) {
+    var next = index + delta
+    if (next < 0 || next >= total) {
+        return Math.max(0, Math.min(total - 1, index))
+    }
+    if ((delta === -1 && index % columns === 0) || (delta === 1 && next % columns === 0)) {
+        return index
+    }
+    return next
+}
+
+// Page steps clamp to the nearer end; single steps refuse instead, see gridTarget.
+function pageTarget(index, delta, total) {
+    return Math.max(0, Math.min(total - 1, index + delta))
+}
+// Twice the wider view's screen plus slack, so the screen still fits after the quarter lead.
+var WINDOW_COVER = 2
+var WINDOW_SLACK = 60
+// Sample input: windowSize(10, 4, 5) is 100, windowSize(30, 2, 5) is 120.
+function windowSize(listRows, tileRows, columns) {
+    var tiles = Math.max(1, tileRows) * Math.max(1, columns)
+    return WINDOW_COVER * Math.max(listRows, tiles) + WINDOW_SLACK
 }
 
 function parentOf(path) {

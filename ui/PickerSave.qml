@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
 import "." as Flea
-import "js/Buttons.js" as Buttons
 import "js/Format.js" as Format
 import "js/Picker.js" as Picker
 
@@ -14,6 +13,7 @@ Item {
     readonly property alias fieldItem: field
     readonly property alias scrollItem: body
     readonly property alias uriItem: outputUri
+    readonly property alias statusItem: statusLine
     readonly property string outPath: Picker.join(root.picker.path, root.picker.saveName)
     readonly property string uri: Format.fileUri(root.outPath)
     readonly property string askedName: root.picker.saveName || root.picker.req.name
@@ -25,8 +25,9 @@ Item {
     Rectangle { anchors.fill: parent; color: Theme.color.surface }
     Flea.CardScroll {
         id: body
+        bleed: Theme.ringClearance
         anchors.fill: parent
-        anchors.margins: Theme.spacing.rowPaddingX
+        anchors.margins: Theme.spacing.rowPaddingX - Theme.ringClearance
         Column {
             id: column
             width: parent.width
@@ -48,16 +49,8 @@ Item {
                     implicitHeight: Math.max(Theme.hitMin, field.implicitHeight + 2 * Theme.spacing.rowPaddingY)
                     color: Theme.color.background
                     border.width: Theme.spacing.hairline
-                    // Focus is a ring outside the unchanged frame, never an accent frame.
-                    border.color: Theme.color.muted
-                    Rectangle {
-                        anchors.fill: parent
-                        anchors.margins: -Buttons.RING
-                        color: "transparent"
-                        border.width: Buttons.RING
-                        border.color: Theme.color.foreground
-                        visible: field.activeFocus
-                    }
+                    // Muted at rest, accent on focus: the frame DialogField, MenuActionDialog, OpenWithDialog and PermissionsDialog draw.
+                    border.color: field.activeFocus ? Theme.color.accent : Theme.color.muted
                     TextInput {
                         id: field
                         anchors.fill: parent
@@ -123,12 +116,13 @@ Item {
                 }
             }
             Text {
+                id: statusLine
                 width: parent.width
                 visible: text.length > 0
                 text: root.refused ? "Refused · " + root.askedName + " · " + Picker.NAME_REFUSED
                     : root.picker.saveError || (root.picker.saveCollision ? root.picker.saveName + " already exists here · review before continuing" : "")
                 textFormat: Text.PlainText
-                wrapMode: Text.WrapAnywhere
+                wrapMode: Text.Wrap
                 color: Theme.color.error
                 font { family: Theme.font.family; pixelSize: Theme.font.caption }
             }

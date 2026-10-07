@@ -6,7 +6,6 @@ import "js/Format.js" as Format
 import "js/Icons.js" as Icons
 import "js/Keymap.js" as Keymap
 import "js/Ops.js" as Ops
-import "js/Buttons.js" as Buttons
 import "js/Tap.js" as Tap
 import "js/TrashDates.js" as Trash
 import "js/Trash.js" as TrashKeys
@@ -52,6 +51,8 @@ FocusScope {
     readonly property var confirmationItem: confirmation
     readonly property var backItem: backButton
     readonly property var upItem: upButton
+    readonly property var emptyItem: emptyAction
+    readonly property var stripItem: strip
     readonly property string countText: countLabel.text
     readonly property var headerLabels: [nameTitle.text, locationTitle.text, deletedTitle.text]
     function rowItemFor(index) { return listing.itemAtIndex(index) }
@@ -80,13 +81,13 @@ FocusScope {
     }
     function open(action) {
         trashArmedAt = 0
-        if (operationActive) { opened = true; forceActiveFocus(); return }
+        if (operationActive) { opened = true; emptyAction.focus = false; forceActiveFocus(); return }
         opened = true; selected = ({}); selectionIdentities = ({}); allSelected = false; selectionToken = 0; selectionCount = 0; cursor = 0
         first = 0; rows = []; total = 0; errorText = ""; bytesReady = false
         confirming = false; confirmation.close(); refreshPending = false
         initialAction = action || ""
         send("list", {start: 0, count: windowRows, recover: true})
-        forceActiveFocus()
+        emptyAction.focus = false; forceActiveFocus() // Fresh open never keeps the strip button.
     }
     function close() {
         trashArmedAt = 0
@@ -294,8 +295,8 @@ FocusScope {
         else if (action === "trashArm") root.armDelete()
         else if (action === "deletePermanently" || action === "trash") root.prepare(false)
         else if (action === "focusNext") root.focusRailRequested()
-        else if (action === "settings" || action === "keymapSheet" || action === "quit") root.actionRequested(action)
-        else if (event.key === Qt.Key_F5 && unmodified) root.refresh()
+        else if (action === "quit" || TrashKeys.route(action) !== "trash") root.actionRequested(action)
+        else if (action === "reload" || event.key === Qt.Key_F5 && unmodified) root.refresh()
         else if (action === "menu") root.contextRequested(root.width / 2, Theme.chromeHeight, root.selectedCount > 0)
         // Trash owns this focus context; ordinary filesystem actions must never reach the covered pane.
         event.accepted = true
@@ -305,6 +306,7 @@ FocusScope {
         anchors.fill: parent
         spacing: 0
         Rectangle {
+            id: strip
             width: parent.width
             height: Theme.chromeHeight
             color: Theme.color.surface
@@ -313,30 +315,18 @@ FocusScope {
                 anchors.leftMargin: Theme.spacing.rowPaddingX
                 anchors.rightMargin: Theme.spacing.rowPaddingX
                 spacing: Theme.spacing.gap
-                Flea.Glyph {
+                Flea.ChromeButton {
                     id: backButton
-                    width: Theme.hitMin; height: parent.height; maxSize: Theme.chromeMarkSize
-                    name: "arrow-left"; color: Theme.color.foreground
-                    scale: backTap.pressed && !Theme.reducedMotion ? Buttons.PRESS_SCALE : 1
-                    Accessible.role: Accessible.Button
-                    Accessible.name: "Back"
-                    Accessible.onPressAction: root.close()
-                    Behavior on scale {
-                        enabled: !Theme.reducedMotion
-                        NumberAnimation { duration: Buttons.PRESS_MS; easing.type: Easing.OutQuad }
-                    }
-                    TapHandler { id: backTap; onTapped: root.close() }
+                    glyph: "arrow-left"
+                    onActivated: root.close()
                 }
-                Flea.Glyph {
+                Flea.ChromeButton {
                     id: upButton
-                    width: Theme.hitMin; height: parent.height; maxSize: Theme.chromeMarkSize
-                    name: "arrow-up"; color: Theme.color.muted
-                    // Dead by design: a history has no parent, so it dims like any disabled control.
-                    opacity: Theme.disabledOpacity
-                    Accessible.role: Accessible.Button
-                    Accessible.name: "Up unavailable in Trash"
-                    Accessible.ignored: false
+                    glyph: "arrow-up"
+                    accessName: "Up unavailable in Trash"
+                    // Dead by design: a history has no parent, so ChromeButton dims it like any disabled control.
                     enabled: false
+                    Accessible.ignored: false
                 }
                 Text {
                     id: trashTitle
@@ -359,11 +349,12 @@ FocusScope {
                     font { family: Theme.font.family; pixelSize: Theme.font.caption }
                 }
                 // Emptying the Trash was reachable only by right-clicking the rail row. It addresses the whole Trash, which is what the count beside it describes, so it belongs here. It opens the confirmation the menu row opens: the boundary is unchanged and no key is bound to it. Disabled exactly where ui/js/Menu.js disables the row.
-                Flea.ChromeAction {
+                Flea.DialogButton {
                     id: emptyAction
                     anchors.verticalCenter: parent.verticalCenter
                     label: "Empty Trash"
-                    role: "error"
+                    destructive: true
+                    inStrip: true
                     available: root.total > 0 && !root.busy
                     onActivated: root.prepare(true)
                 }

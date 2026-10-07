@@ -1,4 +1,5 @@
 .pragma library
+.import "Input.js" as Input
 
 .import "DirSizes.js" as DirSizes
 .import "Format.js" as Format
@@ -62,6 +63,12 @@ function run(root) {
     }
     root.path = scope
     root.searchMode = RESULTS
+    // A walk from Recent leaves it as a navigation does: the scope is a real directory, the history is not.
+    root.recentMode = ""
+    root.recentFrom = ""
+    root.recentPaths = []
+    // Through the pane: importing RecentMode.js here would close a Nav import cycle.
+    root.restoreRecentSort()
     root.searchRunning = true
     root.searchScanned = 0
     root.searchCancelled = false
@@ -142,7 +149,7 @@ function typeKey(event, root) {
         root.searchHere = !root.searchHere
         return true
     }
-    if (event.text.length === 1 && event.text >= " ") {
+    if (Input.isPrintable(event.text)) {
         typed(root, event.text)
         return true
     }

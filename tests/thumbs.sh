@@ -13,6 +13,8 @@ D=$FIXTURE_ROOT/flea-thumbs-test-$$
 # The cache this suite fills is its own, redirected inside that sandbox: src/backend/thumbcache.rs
 # honours XDG_CACHE_HOME, so nothing here reads or writes the operator's real cache at all.
 export XDG_CACHE_HOME="$D/cache"
+# A scratch runtime dir keeps this suite's backends off the operator's session journal.
+export XDG_RUNTIME_DIR="$D/runtime"
 CACHE="$D/cache/thumbnails"
 # The operator's own, read twice and never written, only to prove this run left it alone.
 REAL_CACHE="$HOME/.cache/thumbnails"
@@ -31,6 +33,8 @@ check() {
 
 [ -d "$FIXTURE" ] || { echo "thumbs.sh: the media fixture is missing at $FIXTURE"; exit 1; }
 [ -x "$BIN" ] || { echo "thumbs.sh: $BIN is missing, run cargo build --release"; exit 1; }
+# Before the sandbox exists: without qs the probe below cannot run, so refuse before making anything.
+if ! command -v qs >/dev/null; then echo "thumbs.sh: qs is not installed"; exit 1; fi
 
 sandbox_make "$D"
 mkdir -p "$D/files" "$D/gen" "$D/other"
@@ -261,6 +265,32 @@ exec_facts=$(png_facts "$exec_png")
 check "the exec entry's chunks were read" "1" "$(echo "$exec_facts" | grep -c '^[0-9a-f]\{64\} ')"
 check "the two publish the same image and keys" "$exec_facts" "$(png_facts "$worker_png")"
 chmod 600 "$D/worker/w3-unreadable.mp4"
+
+# Quick Look prefetch: one cache-only ask for the next row per settled rest, none mid-burst.
+prefetch_root="$D/qlprefetch"
+prefetch_log="$D/qlprefetch.log"
+mkdir -p "$prefetch_root/config" "$prefetch_root/runtime" || { sandbox_remove "$D"; exit 1; }
+chmod 700 "$prefetch_root/runtime" || { sandbox_remove "$D"; exit 1; }
+ln -s "$PWD/tests/thumbs-qlprefetch.qml" "$prefetch_root/config/shell.qml" || { sandbox_remove "$D"; exit 1; }
+# The probe plans with production Thumbs and ExtThumbs, so it reads ui/ as flea.
+ln -s "$PWD/ui" "$prefetch_root/config/flea" || { sandbox_remove "$D"; exit 1; }
+ln -s /usr/share/omarchy/shell/Commons "$prefetch_root/config/Commons" || { sandbox_remove "$D"; exit 1; }
+ln -s /usr/share/omarchy/shell/Ui "$prefetch_root/config/Ui" || { sandbox_remove "$D"; exit 1; }
+( env -u DISPLAY -u WAYLAND_DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE \
+    HOME="$D" XDG_RUNTIME_DIR="$prefetch_root/runtime" TMPDIR="$D" \
+    XDG_CONFIG_HOME="$D/.config" XDG_STATE_HOME="$D/.local/state" XDG_CACHE_HOME="$D/cache" \
+    QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=generic QT_FORCE_STDERR_LOGGING=1 \
+    PREVIEW_UI="$PWD/ui" \
+    timeout 60 qs -p "$prefetch_root/config" > "$prefetch_log" 2>&1 )
+prefetch_pass=$(grep -ac 'THUMBPREFETCH PASS' "$prefetch_log")
+prefetch_fail=$(grep -ac 'THUMBPREFETCH FAIL' "$prefetch_log")
+prefetch_done=$(grep -ac 'THUMBPREFETCH DONE failures=0$' "$prefetch_log")
+check "a rest asks once, nothing asks mid-burst, the trailing rest asks once more" "23" "$prefetch_pass"
+check "and the probe reports no failure" "0" "$prefetch_fail"
+check "with a clean DONE" "1" "$prefetch_done"
+if [ "$prefetch_done" != 1 ]; then
+    grep -a -E 'THUMBPREFETCH|TypeError|ReferenceError|ERROR' "$prefetch_log" | head -30
+fi
 
 # -A, never ls: the one kind of litter this subsystem leaves is a dotfile temp a bare ls cannot see.
 check "no temp file is left in the cache this run filled" "0" "$(ls -A "$CACHE/large" 2>/dev/null | grep -c '^\.flea-')"

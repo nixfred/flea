@@ -1,7 +1,7 @@
 // The ui.json merges with no disk in them: read a file onto the defaults, apply one caller patch,
 // and carry 0.1.3's view.json across.
 use crate::jsondoc::{self, Json};
-use crate::uischema::{defaults, Rule, COLUMN_KEYS, COLUMN_WIDTH_KEYS, COLUMN_WIDTH_MAX, COLUMN_WIDTH_MIN, OPTIONAL_COLUMNS, SCHEMA, TEXT_SIZE_STOPS, SIDEBAR_STOPS, SORT_KEYS, MAX_FOLDER_SORTS};
+use crate::uischema::{defaults, Rule, COLUMN_KEYS, COLUMN_WIDTH_KEYS, COLUMN_WIDTH_MAX, COLUMN_WIDTH_MIN, MAX_LAST_TABS, OPTIONAL_COLUMNS, SCHEMA, TEXT_SIZE_STOPS, SIDEBAR_STOPS, SORT_KEYS, MAX_FOLDER_SORTS};
 
 // Never fails: a file this cannot read is a file whose every key falls back to the shipped default.
 pub fn from_file(text: &str) -> Json {
@@ -190,6 +190,8 @@ fn fits(rule: &Rule, value: &Json) -> bool {
             None => false,
         },
         Rule::Ids => every_string(value, is_action_id),
+        // The whole remembered strip stands or falls together, like lastPath does.
+        Rule::LastTabs => is_last_tabs(value),
         Rule::FolderSorts => is_folder_sorts(value),
         Rule::ColumnWidths => is_column_widths(value),
         Rule::Count(low, high) => match value.as_f64() {
@@ -238,6 +240,32 @@ fn is_action_id(s: &str) -> bool {
 // A remembered pane is somewhere the restore can list: an absolute path, or a URI naming its root.
 fn is_a_place(s: &str) -> bool {
     s.starts_with('/') || s.contains("://")
+}
+
+// Every open tab's folder in order, with the current tab's index inside the list.
+// Sample input: {"paths": ["/a", "/b"], "index": 1}.
+fn is_last_tabs(value: &Json) -> bool {
+    let pairs = match value.as_object() {
+        Some(pairs) => pairs,
+        None => return false,
+    };
+    if pairs.len() != 2 {
+        return false;
+    }
+    let paths = match pairs.iter().find(|(k, _)| k == "paths").map(|(_, v)| v) {
+        Some(Json::Arr(items)) => items,
+        _ => return false,
+    };
+    if paths.len() > MAX_LAST_TABS || !paths.iter().all(|p| p.as_str().map(is_a_place).unwrap_or(false)) {
+        return false;
+    }
+    match pairs.iter().find(|(k, _)| k == "index").map(|(_, v)| v).and_then(Json::as_f64) {
+        Some(n) if n.fract() == 0.0 && n >= 0.0 => {
+            let at = n as usize;
+            if paths.is_empty() { at == 0 } else { at < paths.len() }
+        }
+        _ => false,
+    }
 }
 
 // ListColumns040's remembered widths: each entry a resizable column key to whole pixels.
@@ -335,6 +363,11 @@ mod tests {
         assert_eq!(merged.get("view").and_then(Json::as_str), Some("list"));
         assert_eq!(merged.get("density").and_then(Json::as_str), Some("comfortable"));
         assert_eq!(merged.get("hidden").and_then(Json::as_bool), Some(true));
+        // The picker's own view answers the same way: a word it cannot draw costs the default.
+        let remembered = from_file(r#"{"pickerView":"columns"}"#);
+        assert_eq!(remembered.get("pickerView").and_then(Json::as_str), Some("list"));
+        let kept = from_file(r#"{"pickerView":"grid"}"#);
+        assert_eq!(kept.get("pickerView").and_then(Json::as_str), Some("grid"));
     }
 
     // SettingsKeys.html: a missing or unrecognised preset falls back to Default, discarding nothing.
@@ -367,6 +400,21 @@ mod tests {
             "{\n  \"a\": [\n    1,\n    \"two\"\n  ]\n}\n"
         );
         assert_eq!(merged.get("places").and_then(|p| p.get("newLeaf")).and_then(Json::as_f64), Some(7.0));
+    }
+
+    // GM 2026-10-03: preview.markdownView never shipped in a release and is no stored choice; a file that carries it still loads.
+    #[test]
+    fn a_state_file_holding_the_retired_markdown_view_loads_and_a_patch_for_it_is_refused() {
+        let merged = from_file(r#"{"preview":{"markdownView":"source","thumbSize":"large"},"view":"columns"}"#);
+        assert_eq!(merged.get("view").and_then(Json::as_str), Some("columns"));
+        let preview = merged.get("preview").expect("preview");
+        assert_eq!(preview.get("thumbSize").and_then(Json::as_str), Some("large"));
+        assert_eq!(preview.get("markdownView").and_then(Json::as_str), Some("source"), "kept as an unknown key");
+        let shipped = crate::uischema::defaults();
+        assert!(shipped.get("preview").and_then(|p| p.get("markdownView")).is_none());
+        let patch = jsondoc::parse(r#"{"preview":{"markdownView":"source"}}"#).expect("patch parses");
+        let message = patched(&from_file("{}"), &patch).expect_err("the patch must be refused");
+        assert!(message.contains("markdownView"), "got {}", message);
     }
 
     #[test]
@@ -455,7 +503,8 @@ mod tests {
         let hidden: Vec<&str> = merged
             .get("menu").and_then(|m| m.get("hidden")).and_then(Json::as_array).expect("menu.hidden")
             .iter().filter_map(Json::as_str).collect();
-        assert_eq!(hidden, ["delete", "newFolder", "copy-path", "copy_path"]);
+        assert_eq!(hidden, ["delete", "newFolder", "copy-path", "copy_path", "pasteAs", "invertSelection"],
+            "the ids survive the read, and the 2.0 migration appends what the file never named");
         // Still bounded: anything that is not an id costs the key its own default, as it always did.
         let shipped = crate::uischema::defaults();
         let shipped = shipped

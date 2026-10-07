@@ -1,6 +1,7 @@
 import QtQuick
 import "js/Focus.js" as Focus
 import "js/Menu.js" as Menu
+import "js/Trash.js" as TrashKeys
 import "js/TrashDates.js" as TrashDates
 
 Loader {
@@ -14,6 +15,7 @@ Loader {
     readonly property bool confirming: item !== null && item.confirming
     readonly property int total: item ? item.total : 0
     readonly property int selectedCount: item ? item.selectedCount : 0
+    readonly property alias sheetPane: root.pane
 
     // The 30 day sweep, GM's ruling of 2026-09-11. It runs the same three requests the window runs,
     // in the same order, so prepare still reviews every item against the identity the listing
@@ -99,7 +101,7 @@ Loader {
         if (confirming) return
         root.sweepStop()
         if (opened) { root.action(action || "openTrash"); return }
-        pane.preview.close()
+        if (pane.preview) pane.preview.close()
         pane.shareBrowser.close()
         pane.clearSelection()
         pane.focusView = Focus.LIST
@@ -107,15 +109,31 @@ Loader {
         item.open(action || "")
     }
     function close() { if (opened && !confirming) item.close() }
-    function menuAt(point, selection) {
-        var entries = selection ? Menu.applyHidden([
+    function menuEntries(selection, hidden) {
+        return selection ? Menu.applyHidden([
             {label: "Restore", action: "restoreTrashSelection", glyph: "undo", disabled: item.busy},
             {separator: true},
             {id: "delete", label: "Delete permanently", action: "deletePermanently", glyph: "trash", danger: true, disabled: item.busy}
-        ], ViewState.menuHidden) : Menu.trashEntries(total, item.busy)
-        pane.contextMenu().openForRail("trash", entries, point)
+        ], hidden) : Menu.trashEntries(total, item.busy)
+    }
+    function menuAt(point, selection) {
+        pane.contextMenu().openForRail("trash", root.menuEntries(selection, ViewState.menuHidden), point)
         pane.contextMenu().focusHolder = item
     }
+    function sheetActionRows(rows) { return rows.filter(function (row) { return TrashKeys.route(row.action) !== "trash" || row.action === "quit" }) }
+    function sheetMenuModel() {
+        var rows = root.menuEntries(true, [])
+        if (root.selectedCount === 0) rows.forEach(function (row) { if (!row.separator) row.disabled = true })
+        return rows.concat(root.menuEntries(false, []))
+    }
+    function sheetMenuAction(action) { root.action(action) }
+    function sheetFocus() { if (root.item) root.item.forceActiveFocus() }
+    // The sheet keeps the Trash host; all other window actions share the key dispatcher.
+    function directWindowAction(action) {
+        if (action === "keymapSheet") root.pane.keymapSheet.open(root)
+        else Focus.dispatchAction(action, root.pane)
+    }
+    function sheetAction(action) { root.directWindowAction(action) }
     function action(name) {
         if (confirming) return
         if (!opened) { open(name); return }
@@ -139,7 +157,11 @@ Loader {
         function onRequested(message) { root.pane.backend.send(message) }
         function onBackRequested() { root.pane.focusView = Focus.LIST; root.pane.listArea.forceActiveFocus() }
         function onFocusRailRequested() { root.pane.focusView = Focus.RAIL }
-        function onActionRequested(action) { root.pane.act(action) }
+        function onActionRequested(action) {
+            if (root.confirming) return
+            if (TrashKeys.route(action) === "direct") { root.directWindowAction(action); return }
+            root.pane.act(action)
+        }
         function onStatusReported(message, error) { root.pane.message(message, error) }
         function onOperationResult(headline, detail, error) { root.pane.operationResult(headline, detail, error); if (root.pane.sidebar) root.pane.sidebar.refreshTrash() }
         function onContextRequested(x, y, selection) { root.menuAt(root.item.mapToItem(null, x, y), selection) }

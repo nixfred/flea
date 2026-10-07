@@ -5,7 +5,7 @@ use crate::json::{escape, field_bool, field_str, field_str_array, field_usize, f
 pub const TRANSFER_CANCEL: &str = "transfercancel";
 
 pub enum Request {
-    List { path: String, first: usize, hidden: bool },
+    List { path: String, first: usize, hidden: bool, want_changed: bool },
     // A listing built from paths the client names, in the order it named them; the picker's Recent.
     ListPaths { paths: Vec<String>, first: usize },
     Window { start: usize, count: usize },
@@ -42,23 +42,42 @@ pub enum Request {
     LocateMany { paths: Vec<String>, id: usize, menu_id: usize, transfer_id: usize },
     // The preview column's own extras for one row: pixels, line count, symlink target.
     Meta { row: usize, text: bool, media: bool, archive: bool, token: usize },
+    // The cursor row's two-byte shebang probe for the Make executable row; see docs/protocol.md "shebang".
+    Shebang { path: String, id: usize },
     // The status bar's filesystem line for the directory the pane is on.
     FsInfo,
     // A read-only look at a directory that is not the current listing; the columns view's ancestors.
-    Peek { path: String, first: usize, hidden: bool, hidden_last: bool, focus: String },
+    Peek { path: String, first: usize, hidden: bool, hidden_last: bool, focus: String, watch: bool, keep: Vec<String> },
+    // A PDF fetched into a session-private copy under a deadline, so a hung mount never freezes the window.
+    PdfCopy { id: usize, slot: String, path: String },
     // op is "compress" or "extract"; a compress names paths and a format, an extract names one path.
     Archive { op: String, paths: Vec<String>, path: String, dest: String, format: String, menu_id: usize },
     Convert { path: String, dest: String, strip: bool, menu_id: usize, request_id: usize, check: bool },
     // Which archive formats this box actually offers, and whether a converter is installed at all.
     Formats { id: usize },
     Permissions { line: String },
+    // Paste as links: one symlink or hard link per source inside dest; see docs/protocol.md "link".
+    Link { op: String, paths: Vec<String>, rows: Vec<usize>, dest: String,
+           collide: super::collide::Ask },
+    // Show original: where a symlink's target lives, the same path Show in
+    // folder uses; see docs/protocol.md "linktarget".
+    LinkTarget { path: String, id: usize },
+    // Permissions for the whole selection: one Entry holds every path the
+    // Apply changed, so one undo restores them all; see docs/protocol.md
+    // "permissionsBatch".
+    PermissionsBatch { paths: Vec<String>, modes: Vec<String>, id: usize },
     Picker { line: String },
     MenuAction { line: String, rows: Vec<usize> },
     // Directive 71: op is "peers" for the flyout's own list and "send" for the transfer it chooses.
     LocalSend { op: String, peer: String, paths: Vec<String>, id: usize },
     TrashBrowse { line: String },
     // The path bar's folder jump: the favourites and recent files the client read, joined with zoxide's ranking.
-    Jump { id: usize, favourites: Vec<String>, recent: Vec<String> },
+    Jump { id: usize, ranking: usize, favourites: Vec<String>, recent: Vec<String> },
+    // The system clipboard for files, owned across windows; see docs/protocol.md "clip".
+    ClipSet { op: String, paths: Vec<String> },
+    ClipGet,
+    ClipClear { token: String, cut: Vec<String> },
+    ClipWatch,
     Quit,
     Unknown,
 }
@@ -68,6 +87,20 @@ pub fn parse_request(line: &str) -> Request {
     match field_str(line, "c").as_deref() {
         Some("trashbrowse") => Request::TrashBrowse { line: line.to_string() },
         Some("permissions") => Request::Permissions { line: line.to_string() },
+        Some("permissionsBatch") => Request::PermissionsBatch {
+            paths: field_str_array(line, "paths"),
+            modes: field_str_array(line, "modes"),
+            id: field_usize(line, "id").unwrap_or(0),
+        },
+        Some("link") => Request::Link {
+            // Anything that is not "absolute" or "hard" is a relative link, never an absolute path by accident.
+            op: field_str(line, "op").unwrap_or_default(),
+            paths: field_str_array(line, "paths"),
+            rows: field_usize_array(line, "rows"),
+            dest: field_str(line, "dest").unwrap_or_default(),
+            collide: super::collide::Ask::parse(line),
+        },
+        Some("linktarget") => Request::LinkTarget { path: field_str(line, "path").unwrap_or_default(), id: field_usize(line, "id").unwrap_or(0) },
         Some("picker") => Request::Picker { line: line.to_string() },
         Some("menuaction") => Request::MenuAction { line: line.to_string(), rows: field_usize_array(line, "rows") },
         Some("localsend") => Request::LocalSend {
@@ -81,6 +114,8 @@ pub fn parse_request(line: &str) -> Request {
             first: field_usize(line, "first").unwrap_or(0),
             // A missing hidden is false, so an older client's request still lists dotfile-free.
             hidden: field_bool(line, "hidden"),
+            // Absent is today's silent re-read, so an older client never pays the count.
+            want_changed: field_bool(line, "wantChanged"),
         },
         Some("listpaths") => Request::ListPaths { paths: field_str_array(line, "paths"), first: field_usize(line, "first").unwrap_or(0) },
         Some("window") => Request::Window {
@@ -170,6 +205,12 @@ pub fn parse_request(line: &str) -> Request {
             strip: field_bool(line, "strip"),
         },
         Some("formats") => Request::Formats { id: field_usize(line, "id").unwrap_or(0) },
+        Some("pdfcopy") => Request::PdfCopy {
+            id: field_usize(line, "id").unwrap_or(0),
+            // Absent is one viewer, so an older client's fetch keeps the shared slot.
+            slot: field_str(line, "slot").unwrap_or_default(),
+            path: field_str(line, "path").unwrap_or_default(),
+        },
         Some("peek") => Request::Peek {
             path: field_str(line, "path").unwrap_or_default(),
             first: field_usize(line, "first").unwrap_or(0),
@@ -177,6 +218,10 @@ pub fn parse_request(line: &str) -> Request {
             // Absent is today's order, so an older client's peek still sorts dotfiles first.
             hidden_last: field_bool(line, "hiddenLast"),
             focus: field_str(line, "focus").unwrap_or_default(),
+            // Only the columns view asks to be told when this directory changes.
+            watch: field_bool(line, "watch"),
+            // Sample input: "keep":["/home","/home/gm"], every column directory the view draws; the rest stop being watched.
+            keep: field_str_array(line, "keep"),
         },
         Some("meta") => Request::Meta {
             token: field_usize(line, "token").unwrap_or(0),
@@ -185,7 +230,21 @@ pub fn parse_request(line: &str) -> Request {
             media: field_bool(line, "media"),
             archive: field_bool(line, "archive"),
         },
-        Some("jump") => Request::Jump { id: field_usize(line, "id").unwrap_or(0), favourites: field_str_array(line, "favourites"), recent: field_str_array(line, "recent") },
+        Some("shebang") => Request::Shebang {
+            path: field_str(line, "path").unwrap_or_default(),
+            id: field_usize(line, "id").unwrap_or(0),
+        },
+        Some("jump") => Request::Jump { id: field_usize(line, "id").unwrap_or(0), ranking: field_usize(line, "ranking").unwrap_or(0), favourites: field_str_array(line, "favourites"), recent: field_str_array(line, "recent") },
+        Some("clipSet") => Request::ClipSet {
+            op: field_str(line, "op").unwrap_or_default(),
+            paths: field_str_array(line, "paths"),
+        },
+        Some("clipGet") => Request::ClipGet,
+        Some("clipClear") => Request::ClipClear {
+            token: field_str(line, "token").unwrap_or_default(),
+            cut: field_str_array(line, "cut"),
+        },
+        Some("clipWatch") => Request::ClipWatch,
         Some("quit") => Request::Quit,
         _ => Request::Unknown,
     }
@@ -204,19 +263,29 @@ pub fn located_many_line(directory: &str, id: usize, transfer_id: usize, matches
         escape(directory), id, transfer_id, matches.join(","), error.is_none(), escape(error.unwrap_or_default()))
 }
 
-pub fn listed_line(n: usize, read_ms: f64, sort_ms: f64, dev: u64, path: &str) -> String {
+pub fn listed_line(n: usize, read_ms: f64, sort_ms: f64, dev: u64, path: &str, writable: bool) -> String {
+    say_listed(n, read_ms, sort_ms, dev, path, writable)
+}
+
+// `w` is whether this user can create or delete entries here; a drag from one that cannot copies.
+pub(crate) fn say_listed(n: usize, read_ms: f64, sort_ms: f64, dev: u64, path: &str, writable: bool) -> String {
     format!(
-        r#"{{"t":"listed","n":{},"read":{:.3},"sort":{:.3},"v":{},"path":"{}"}}"#,
-        n, read_ms, sort_ms, dev, escape(path)
+        r#"{{"t":"listed","n":{},"read":{:.3},"sort":{:.3},"v":{},"w":{},"path":"{}"}}"#,
+        n, read_ms, sort_ms, dev, writable, escape(path)
     )
 }
 
-// The anchor's index in the new order, or -1; the fields ride last, so an unanchored reply is the line above exactly.
-pub fn listed_line_anchor(n: usize, read_ms: f64, sort_ms: f64, dev: u64, path: &str, anchor: &str, anchor_index: isize) -> String {
-    format!(
-        r#"{{"t":"listed","n":{},"read":{:.3},"sort":{:.3},"v":{},"path":"{}","anchor":"{}","anchorIndex":{}}}"#,
-        n, read_ms, sort_ms, dev, escape(path), escape(anchor), anchor_index
-    )
+// A listed line with the anchor fields added before its closing brace.
+pub(crate) fn with_anchor(listed: &str, anchor: &str, anchor_index: isize) -> String {
+    let body = listed.strip_suffix('}').unwrap_or(listed);
+    format!(r#"{},"anchor":"{}","anchorIndex":{}}}"#, body, escape(anchor), anchor_index)
+}
+
+// Sample output: {"t":"listed","n":3,"read":0.000,"sort":0.000,"v":1,"w":true,"path":"/d","changed":2}
+// A same-path re-list names added plus removed rows, so a rename counts 2 against a net delta of 0.
+pub(crate) fn with_changed(listed: &str, changed: usize) -> String {
+    let body = listed.strip_suffix('}').unwrap_or(listed);
+    format!(r#"{},"changed":{}}}"#, body, changed)
 }
 
 // The streaming progress of a search: its own type rather than a listed line, because a mid-walk update is not a fresh listing and carries no read or sort timing.
@@ -255,6 +324,32 @@ pub fn paths_line(paths: &[String]) -> String {
     }
     out.push_str("]}");
     out
+}
+
+// Sample output: {"t":"slow","op":"rename","path":"/hung/a.txt","msg":"/hung is slow. The rename continues and will finish on its own."}
+pub fn slow_line(op: &str, path: &str, msg: &str) -> String {
+    format!(r#"{{"t":"slow","op":"{}","path":"{}","msg":"{}"}}"#, escape(op), escape(path), escape(msg))
+}
+
+// Sample output: {"t":"linked","ok":2,"failed":0,"skipped":1}
+// Sample output: {"t":"linked","ok":1,"failed":1,"skipped":0,"note":"the link left at /d/b.txt could not be removed (stale); the replaced item stays in the trash"}
+pub fn linked_line(ok: usize, failed: usize, skipped: usize, note: &str) -> String {
+    if note.is_empty() {
+        return format!(r#"{{"t":"linked","ok":{},"failed":{},"skipped":{}}}"#, ok, failed, skipped);
+    }
+    format!(r#"{{"t":"linked","ok":{},"failed":{},"skipped":{},"note":"{}"}}"#, ok, failed, skipped, escape(note))
+}
+
+// Sample output: {"t":"linktarget","path":"/a/link","directory":"/b","name":"f.txt","id":3}
+pub fn linktarget_line(path: &str, directory: &str, name: &str, id: usize) -> String {
+    format!(r#"{{"t":"linktarget","path":"{}","directory":"{}","name":"{}","id":{}}}"#,
+        escape(path), escape(directory), escape(name), id)
+}
+
+// Sample output: {"t":"permissions","id":7,"op":"applyMany","ok":true,"mode":"0600","error":""}
+pub fn permissions_batch_line(id: usize, ok: bool, mode: &str, error: &str) -> String {
+    format!(r#"{{"t":"permissions","id":{},"op":"applyMany","ok":{},"mode":"{}","error":"{}"}}"#,
+        id, ok, escape(mode), escape(error))
 }
 
 pub fn error_line(e: &FleaError) -> String {

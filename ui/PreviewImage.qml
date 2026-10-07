@@ -11,6 +11,16 @@ Item {
 
     property string path: ""
 
+    // The row's cache file, held by Quick Look while this decodes: drawn between the
+    // ground and the picture, so it is never hidden by one nor covers the other.
+    property string interimThumb: ""
+    property real interimX: 0
+    property real interimY: 0
+    property real interimWidth: 0
+    property real interimHeight: 0
+    property bool interimVisible: false
+    readonly property bool interimReady: interimPicture.status === Image.Ready
+
     // The same name the media and PDF panes give their unreadable state, so Preview.qml tests one property.
     readonly property bool failed: picture.status === Image.Error
     // Every state is terminal: a decode ends Ready or Error, and a vanished file ends Error too.
@@ -26,10 +36,29 @@ Item {
         color: Theme.color.background
     }
 
+    // The cached thumbnail at once, sized to the final's own rect by the caller: the
+    // cache file is already upright, so no turn applies, and Stretch meets that rect.
+    Image {
+        id: interimPicture
+        x: root.interimX
+        y: root.interimY
+        width: root.interimWidth
+        height: root.interimHeight
+        // Only while the decode runs: a final with transparent pixels would show it through.
+        visible: root.interimVisible && root.status === "loading"
+        source: root.interimThumb.length > 0 ? Format.fileUri(root.interimThumb) : ""
+        fillMode: Image.Stretch
+        asynchronous: true
+        cache: false
+    }
+
     // Stretch, in an item sized to the fit of what was decoded: Qt then decodes the exact fit and never enlarges
     // in the decode, where Fit decoded a covering size (2099x3149 for a portrait photo, 34680x1156 for a 3000x100
     // banner, measured). A small picture draws at its own size, centred; only an SVG keeps Fit, which Stretch would distort.
     readonly property bool vector: /\.svgz?$/i.test(root.path)
+    // The drawn picture itself, for ui/Ipc.qml's previewPictureRect: the item is sized to the
+    // fit of what was decoded, so its rect is the picture and not the surface it is centred on.
+    readonly property Item pictureItem: picture
     Image {
         id: picture
         readonly property real fit: Thumbs.fitScale(root.width, root.height, implicitWidth, implicitHeight, 1)

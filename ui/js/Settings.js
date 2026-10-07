@@ -1,6 +1,7 @@
 .pragma library
 .import "TextSize.js" as TextSize
 .import "Places.js" as Places
+.import "Format.js" as Format
 .import "Keymap.js" as Keymap
 .import "SettingsShelf.js" as Shelf
 .import "SettingsAbout.js" as About
@@ -34,9 +35,9 @@ var MENU_GROUPS = [
     { id: "basic", label: "Basic file actions", ids: BASIC },
     { id: "destructive", label: "Destructive", ids: ["delete"] },
     { id: "openInspect", label: "Open and inspect",
-      ids: ["openwith", "openTerminal", "moveto", "copyto", "properties", "permissions", "copypath"] },
+      ids: ["openwith", "openTerminal", "moveto", "copyto", "properties", "permissions", "makeExecutable", "copyAs", "showOriginal"] },
     { id: "extras", label: "Extras", features: ["placeMenu"],  // features gate a surface, not a row
-      ids: ["shelf", "compress", "extract", "convert", "taildrop", "localsend", "dropbox", "sharelink", "runScript", "placeMenu", "updateFlea", "extThumbs"] }
+      ids: ["shelf", "compress", "extract", "convert", "taildrop", "localsend", "dropbox", "sharelink", "runScript", "placeMenu", "updateFlea", "extThumbs", "pasteAs", "invertSelection"] }
 ]
 
 // Open and Show hidden files draw the lock mark instead of a box, and the board says why: a menu that cannot open the row under the cursor is not a menu, and the hidden toggle is the one background row with no keyboard-independent alternative.
@@ -44,7 +45,8 @@ var LOCKED = ["open", "toggleHidden"]
 
 var LABELS = {
     cut: "Cut", copy: "Copy", paste: "Paste", duplicate: "Duplicate", rename: "Rename",
-    trash: "Move to Trash", openTerminal: "Open in terminal", copypath: "Copy path", permissions: "Permissions",
+    trash: "Move to Trash", openTerminal: "Open in terminal", copyAs: "Copy as", showOriginal: "Show original",
+    pasteAs: "Paste as", invertSelection: "Invert selection", permissions: "Permissions", makeExecutable: "Make executable",
     delete: "Delete permanently", openwith: "Open with", moveto: "Move to", copyto: "Copy to", properties: "Properties",
     compress: "Compress", extract: "Extract", localsend: "Send with LocalSend",
     convert: "Convert", taildrop: "Send with Taildrop", dropbox: "Move to Dropbox",
@@ -59,7 +61,8 @@ var PRESET_LABELS = { "default": "Default", vim: "Vim", mac: "Mac", windows: "Wi
 // Every board row carries a left mark, and a switch wears the mark of the row it governs: these are ui/js/Menu.js's own glyphs by action id, which tests/js/settings.js asserts the two agree on.
 var GLYPHS = {
     cut: "scissors", copy: "copy", paste: "clipboard", duplicate: "file-plus", rename: "rename",
-    trash: "trash", openTerminal: "terminal", copypath: "file-text", permissions: "lock", compress: "archive",
+    trash: "trash", openTerminal: "terminal", copyAs: "file-text", showOriginal: "symlink",
+    pasteAs: "symlink", invertSelection: "contrast", permissions: "lock", makeExecutable: "play", compress: "archive",
     delete: "trash", openwith: "app-window", moveto: "folder-plus", copyto: "copy", properties: "info",
     extract: "archive-out",
     convert: "sliders", sharelink: "network", open: "folder-open", toggleHidden: "eye", placeMenu: "folder-open", runScript: "terminal",
@@ -310,7 +313,7 @@ function viewRows(state) {
     var data = state.data || {}
     var sort = data.sort || {}
     var columns = data.columns || ["name", "size", "date"]
-    return [
+    var out = [
         { kind: "group", label: "View" },
         choice("view", "Last-used view", undefined, ["list", "columns", "grid", "dual"],
                ["List", "Columns", "Grid", "Dual pane"], data.view || "list"),
@@ -340,6 +343,8 @@ function viewRows(state) {
           on: data.rememberSort !== false },
         { kind: "group", label: "Cursor" },
         { kind: "check", id: "wrapAtEnds", label: "Wrap at list ends", caption: "arrow-up at the top", glyph: "arrow-up", on: data.wrapAtEnds === true },
+        // Issue 29: Escape climbs to the parent while on, and stays put while off, which is 0.3.4.
+        { kind: "check", id: "escapeUp", label: "Escape goes up a folder", caption: "with nothing to close", on: data.escapeUp === true },
         { kind: "group", label: "Opening" },
         choice("startIn", "Flea opens in", "house", ["home", "last", "folder"],
                ["Home", "Last folder", "Chosen folder"], data.startIn || "home"),
@@ -348,9 +353,25 @@ function viewRows(state) {
           value: data.startFolder || "Use this folder" },
         choice("newTab", "New tabs open in", "columns", ["current", "home", "start"],
                ["Current folder", "Home", "Start folder"], data.newTab || "current"),
+        // ClickAndRefresh: one tap opens in single mode and selects with a modifier, so the
+        // slow-click rename below has nothing to answer and greys in place, the way hiddenLast does.
+        choice("openMode", "Open items with", "pointer", ["double", "single"],
+               ["Double click", "Single click"], data.openMode || "double"),
+        { kind: "check", id: "clickRename", label: "Click a selected name to rename",
+          on: data.clickRename !== false, available: data.openMode !== "single" },
         { kind: "hint", footer: true, label: state.saveStatus || "Saved · applied in this process",
           role: (state.saveStatus || "").indexOf("Could not") === 0 ? "error" : "accent" }
     ]
+    // Tabs040 callout 2, the board's own sentence, under the control it explains and only there.
+    if ((data.startIn || "home") === "last") {
+        for (var i = 0; i < out.length; i++) {
+            if (out[i].id === "startIn") {
+                out.splice(i + 1, 0, { kind: "hint", label: "Last folder reopens every tab you had." })
+                break
+            }
+        }
+    }
+    return out
 }
 
 function previewRows(state) {
@@ -408,12 +429,15 @@ function placesRows(state) {
     var rows = [{ kind: "group", label: "Favorites", id: "addFavourite", action: "addFavourite", value: "Add this folder" }]
     for (var i = 0; i < entries.length; i++) {
         rows.push({ kind: "favourite", id: "favourite:" + i, label: entries[i].label,
-            value: entries[i].storedPath, glyph: entries[i].glyph, error: entries[i].error || (state.favouriteStatuses || {})[i] || "", favouriteIndex: i })
+            value: entries[i].storedPath, display: Format.tilde(entries[i].storedPath, state.home || ""), glyph: entries[i].glyph, error: entries[i].error || (state.favouriteStatuses || {})[i] || "", favouriteIndex: i })
     }
     rows.push({ kind: "group", label: "Built in" })
-    var builtins = [["showHome", "Home", "house"], ["showNetwork", "Network", "network"],
-                    ["showDevices", "Devices", "drive"], ["showTrash", "Trash", "trash"]]
-    for (var b = 0; b < builtins.length; b++) rows.push({ kind: "check", id: "places." + builtins[b][0], label: builtins[b][1], glyph: builtins[b][2], on: data[builtins[b][0]] !== false })
+    // Sidebar040: Recent sits beside Home, Network, Devices and Trash, and ships off.
+    // The fourth field is what a key the file never stored reads as, the way the Rail group below reads its own.
+    var builtins = [["showHome", "Home", "house", true], ["showRecent", "Recent", "history", false],
+                    ["showNetwork", "Network", "network", true],
+                    ["showDevices", "Devices", "drive", true], ["showTrash", "Trash", "trash", true]]
+    for (var b = 0; b < builtins.length; b++) rows.push({ kind: "check", id: "places." + builtins[b][0], label: builtins[b][1], glyph: builtins[b][2], on: builtins[b][3] ? data[builtins[b][0]] !== false : data[builtins[b][0]] === true })
     rows.push({ kind: "group", label: "Rail" })
     // The fourth field is src/uischema.rs's shipped value, which is what a key the file never stored reads as.
     var rail = [["driveSize", "Show drive size", "drive", false], ["trashCount", "Show Trash count", "trash", false], ["showUnmounted", "Show unmounted drives", "drive", true], ["autoHide", "Auto-hide sidebar", "maximize", false]]

@@ -8,10 +8,13 @@
 
 function pane() {
     return { selection: Selection.create(), selectionVersion: 0, selectionAnchor: 0, cursorIndex: 0,
-        shown: null, shownTotal: 100,
+        shown: null, shownTotal: 100, contexts: [],
         selectedIndices: function () { return this.selection.indices() },
         showRow: function () {},
-        setCursor: function (index) { this.cursorIndex = index },
+        setCursor: function (index, context) {
+            this.cursorIndex = index
+            this.contexts.push(context)
+        },
         commitOpenRename: function () {},
         selectOnly: function (index) { this.selection.only(index); this.cursorIndex = index; this.selectionAnchor = index },
         toggleSelectAt: function (index) { this.selection.toggle(index); this.cursorIndex = index; this.selectionAnchor = index },
@@ -45,6 +48,7 @@ function run(check) {
     check("moving within the same cells emits no selection update", p.selectionVersion, version)
     Marquee.finish(p, state, false)
     check("release moves the cursor to the last entering row", p.cursorIndex, 1)
+    check("and the band release hands context 0", p.contexts.join(","), "0")
     check("release leaves marks for keyboard operations", p.selection.count(), 4)
 
     state = Marquee.begin(p, false)
@@ -128,7 +132,7 @@ function run(check) {
     Tap.tapped(5, 1, Qt.ControlModifier, p)
     check("Ctrl click removes an existing mark", p.selectedIndices().join(","), "2")
     Tap.tapped(7, 1, Qt.ShiftModifier, p)
-    check("Shift click uses the existing cursor anchor", p.selectedIndices().join(","), "5,6,7")
+    check("Shift click keeps the earlier mark and ranges from the cursor anchor", p.selectedIndices().join(","), "2,5,6,7")
 
     var preset = Keymap.preset
     for (var i = 0; i < Keymap.PRESETS.length; i++) {

@@ -57,7 +57,7 @@ var FORGOTTEN = "0|0|0|0|false|false|0|0|-1||false|loading||0|1"
 // Keys through Focus.handleKey and Focus.act over a recording backend; rows is what is still drawn, and F2 records as a rename.
 function keyPane(inFlight, rows) {
     var p = {
-        focusView: "list", viewMode: "list", searchMode: "", filterTyping: false, filterQuery: "", shown: null, path: "/home/gm/Work",
+        focusView: "list", viewMode: "list", searchMode: "", recentMode: "", filterTyping: false, filterQuery: "", shown: null, path: "/home/gm/Work",
         listInFlight: inFlight, listingState: inFlight && rows.length === 0 ? "loading" : "ready",
         total: rows.length, held: 0, rows: rows, cursorIndex: 0, selectionVersion: 0, selectionAnchor: 0,
         keySequence: "", keySequenceIdentity: "", inputAt: 0, rowsAt: 0, trashArmedAt: 0, trashedFirst: -1,
@@ -184,6 +184,9 @@ function run(check) {
     var refused = { listInFlight: true, listedSeen: true, swap: { drop: function () { refused.dropped = true } } }
     check("a stale refusal ended only its own request, so the listing out stays out and its rows stay held",
           Swap.failListing(refused, "stale") + "|" + (refused.dropped === true) + "|" + refused.listInFlight, "false|false|true")
+    var windowing = { listInFlight: true, listedSeen: true, swap: { drop: function () { windowing.dropped = true } } }
+    check("a window error ended only its own request, so the listing out stays out and its rows stay held",
+          Swap.failListing(windowing, "window") + "|" + (windowing.dropped === true) + "|" + windowing.listInFlight, "false|false|true")
 
     // What a pane answers while a listing is out, held or fallen back: nothing that acts on a row.
     var rowActions = ["cursorDown", "cursorFirst", "pageDown", "toggleSelect", "selectAll", "trashArm", "trash", "copy",
@@ -194,7 +197,7 @@ function run(check) {
     check("but lets through the navigations, which refuse themselves, escape, and the keys that change the window",
           Swap.ANSWERED_WHILE_LISTING.filter(function (a) { return Swap.swallows(true, a) }).join(",") + "|"
           + Swap.ANSWERED_WHILE_LISTING.join(","),
-          "|open,parent,historyBack,historyForward,escape,viewList,viewColumns,viewGrid,sidebar,windowNew,togglePreview")
+          "|open,parent,historyBack,historyForward,escape,viewList,viewColumns,viewGrid,sidebar,windowNew,togglePreview,reload")
     check("a pane with no listing out swallows nothing", Swap.swallows(false, "trash"), false)
     check("and an unbound key is left to the route that names the filter", Swap.swallows(true, ""), false)
 

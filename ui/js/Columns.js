@@ -37,6 +37,7 @@ function set(width, t, hidden) {
     var list = hidden || []
     for (var i = 0; i < list.length; i++) h[list[i]] = true
     return {
+        location: false,
         mode: width >= f.mode && !h["mode"],
         size: width >= f.size && !h["size"],
         date: width >= f.date && !h["date"],
@@ -50,7 +51,23 @@ function dualSet(width, t, hidden) {
     var showSize = (hidden || []).indexOf("size") < 0 && width >= base + t.size
     var showDate = (hidden || []).indexOf("date") < 0
         && width >= base + (showSize ? t.size : 0) + t.date
-    return {mode: false, kind: false, size: showSize, date: showDate}
+    return {mode: false, kind: false, location: false, size: showSize, date: showDate}
+}
+
+// Recent protects its pane's name floor and reserves every non-hidden metadata width for Location.
+function recentSet(width, t, hidden, dual) {
+    var base = 2 * t.rowPaddingX + t.iconSize + t.gap + t.nameMin
+    var metadataGap = dual ? 0 : t.gap
+    var h = hidden || []
+    var showSize = h.indexOf("size") < 0 && width >= base + t.size + metadataGap
+    var sizeSlot = showSize ? t.size + metadataGap : 0
+    var showDate = h.indexOf("date") < 0 && width >= base + sizeSlot + t.date + metadataGap
+    var locationFloor = base + (h.indexOf("size") < 0 ? t.size + metadataGap : 0)
+        + (h.indexOf("date") < 0 ? t.date + metadataGap : 0) + t.location + t.gap
+    return {mode: false, kind: false,
+        size: showSize,
+        date: showDate,
+        location: width >= locationFloor}
 }
 
 // A peeked reply is keyed by what ordered it, so a stale ancestor column never survives the hidden-last toggle: path plus hidden plus hiddenLast.
@@ -65,29 +82,32 @@ function sentKey(key, first) {
     return String(key) + "\n" + Math.floor(Number(first))
 }
 
-// An ask this view made and still awaits, keyed by sentKey (path, flags, row count), so another client's reply never lands in its column.
-// Sample input: trackAsk({}, "/a\n10\n35") holds that key.
+// An ask this view made and still awaits, counted per sentKey (path, flags, row count), so another client's reply never lands in its column and a column re-asked in flight lands both replies.
+// Sample input: trackAsk(trackAsk({}, "/a\n10\n35"), "/a\n10\n35") holds that key twice.
 function trackAsk(pending, key) {
     var next = {}
     var src = pending || {}
-    for (var k in src) next[k] = true
-    next[String(key)] = true
+    for (var k in src) next[k] = src[k]
+    next[String(key)] = (next[String(key)] || 0) + 1
     return next
 }
 
 // True only for a reply this view asked for; anything else is another client's.
 // Sample input: hasAsk(trackAsk({}, "/a\n10"), "/a\n10") is true.
 function hasAsk(pending, key) {
-    return !!((pending || {})[String(key)])
+    return ((pending || {})[String(key)] || 0) > 0
 }
 
 // One ask answered or superseded; a new listing drops them all.
-// Sample input: dropAsk(trackAsk({}, "/a\n10"), "/a\n10") holds nothing.
+// Sample input: dropAsk(trackAsk({}, "/a\n10"), "/a\n10") holds nothing, and dropAsk of a key asked twice holds it once.
 function dropAsk(pending, key) {
     var next = {}
     var want = String(key)
     var src = pending || {}
-    for (var k in src) if (k !== want) next[k] = true
+    for (var k in src) {
+        var left = k === want ? src[k] - 1 : src[k]
+        if (left > 0) next[k] = left
+    }
     return next
 }
 
@@ -185,6 +205,14 @@ function neighbourAsks(path, width, limit) {
     return ancestors(path, want)
 }
 
+// Sample input: keepAsks({ drawn: ["/a"] }, ["/a"], "/a/b") answers [{path "/a", again false}, {path "/a/b", again true}] and leaves drawn ["/a", "/a/b"]; again names a column not drawn last refresh.
+function keepAsks(keep, asks, child) {
+    var shown = child.length > 0 && asks.indexOf(child) < 0 ? asks.concat([child]) : asks.slice()
+    var plan = shown.map(function (path) { return { path: path, again: keep.drawn.indexOf(path) < 0 } })
+    keep.drawn = shown
+    return plan
+}
+
 // ui.json carries whatever a hand edit wrote, so only a finite number is a stored width; anything else keeps the measured one.
 // Sample input: storedNumber("120") is NaN, storedNumber(120.6) is 121.
 function storedNumber(raw) {
@@ -226,6 +254,7 @@ function autofitWidth(widths, fallback) {
 
 function names(s) {
     var out = ["name"]
+    if (s.location) out.push("location")
     for (var i = DROP_ORDER.length - 1; i >= 0; i--) {
         var key = DROP_ORDER[i]
         if (s[key])

@@ -302,8 +302,8 @@ SH
 }
 
 providers_cleanup() {
-    # The Dropbox move check makes the account folder read-only for a moment; the next fixture has to remove it.
-    [[ ! -d "$menu_box/Dropbox" ]] || chmod 0755 "$menu_box/Dropbox" || return 1
+    # The Dropbox move check makes the source folder unwritable for a moment; the next fixture has to remove it.
+    [[ ! -d "$menu_box/list" ]] || chmod 0755 "$menu_box/list" || return 1
     providers_release tailscale || return 1
     providers_release dropbox-cli || return 1
     kill_flea || return 1
@@ -327,6 +327,8 @@ providers_selection() {
     # the case had never waited for.
     providers_expect ".selected == [$marked] and .refreshing == false" \
         'the click marked the row, and nothing is refreshing, before the cursor moves'
+    # A lone selection follows plain cursor moves, so keep it as a deliberate mark before moving.
+    key v >/dev/null || fail 'providers: keeping the mark failed'
     key -k Down >/dev/null || fail 'providers: cursor movement failed'
     providers_expect ".cursor == $cursor and .selected == [$marked] and .cursorPath == \"$path/b-cursor.txt\" and .selectedPaths == [\"$path/a-marked.txt\"]" 'cursor remains outside the marked selection'
     key -k Menu >/dev/null || fail 'providers: native Menu delivery failed'
@@ -417,11 +419,12 @@ providers_sharelink_checks() {
 }
 
 providers_dropbox_move_checks() {
-    # A name that exists now asks first, so the real failure here is a read-only account folder.
+    local requests
+    # A name that exists now asks first, so the move fails on a source folder that cannot be written.
     menus_guard "$menu_box/Dropbox/a-marked.txt"
     menus_guard "$menu_box/retired/dropbox-collision.txt"
     mv -- "$menu_box/Dropbox/a-marked.txt" "$menu_box/retired/dropbox-collision.txt" || fail 'providers: cannot set the existing name aside'
-    chmod 0555 "$menu_box/Dropbox" || fail 'providers: cannot make the Dropbox folder read-only'
+    chmod 0555 "$menu_box/list" || fail 'providers: cannot make the source folder unwritable'
     providers_selection "$menu_dir"
     providers_choose dropbox
     menus_error 'Move failed: a-marked.txt · permission denied' 'Move to Dropbox reports the real refusal'
@@ -432,9 +435,12 @@ providers_dropbox_move_checks() {
     menus_equal 'Dropbox retry selects only the failed marked file' "$(row_index_of a-marked.txt)" "$(ipc selectedIndices)"
     menus_shot providers-dropbox-refused
 
-    chmod 0755 "$menu_box/Dropbox" || fail 'providers: cannot make the Dropbox folder writable again'
     menus_acknowledge
     menus_expect statusFooterState '.secondary.text | contains("a-marked.txt selected for retry")' 'acknowledged Dropbox failure names the identity-checked source for retry'
+    # The listed folder is watched, so its chmod drops the retry line and starts a re-read that would swallow Menu: wait for that re-read's own request and settle.
+    requests=$(ipc listRequests)
+    chmod 0755 "$menu_box/list" || fail 'providers: cannot make the source folder writable again'
+    menus_relisted "$requests" 'the chmod of the watched source folder is re-read and settled before the retry menu opens'
     key -k Menu >/dev/null || fail 'providers: retained-selection retry menu failed'
     menus_expect menuState '.opened and .snapshotReady' 'native retry captures the retained original selection'
     providers_expect '(.refreshing | not) and .menuFocus' 'Dropbox retry refresh settles'

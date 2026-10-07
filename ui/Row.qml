@@ -1,15 +1,19 @@
 import QtQuick
+import Quickshell
 import qs.Commons
+import "js/Columns.js" as Columns
 import "js/Drag.js" as DragOps
 import "js/Format.js" as Format
 import "js/Icons.js" as Icons
 import "js/Match.js" as Match
+import "js/Recent.js" as Recent
 import "." as Flea
 
 Item {
     id: root
 
     property var row: null
+    function dateStamp() { return root.row ? (root.row.used === undefined ? root.row.m : root.row.used) : null }
     property bool cursor: false
     property bool paneFocused: true
     property bool dualMode: false
@@ -31,6 +35,7 @@ Item {
     property bool dropTarget: false
     // Whether that drop would copy, so the label can say which; the status bar says the rest.
     property bool dropCopying: false
+    property bool dropLinking: false
     // A directory's recursive size, resolved by index in List.qml the same way thumb already is; null until it arrives.
     property var dirSize: null
     // The picker's rows start one slot further in for its check; the window's own leave this at zero.
@@ -45,14 +50,16 @@ Item {
     property string searchQuery: ""
     // Which of the two is narrowing. A filter keeps the ordinary columns, because its rows are this directory's own and their names are plain names, not paths.
     property bool filtering: false
-    // A search row's name is its path relative to the search root, so the name and location split here; see docs/protocol.md "search".
+    // Search and Recent split the path into a base name and location; see docs/protocol.md "search".
+    property bool recenting: false
     readonly property bool searching: !root.filtering && root.searchQuery.length > 0 && root.row !== null && root.row.n.length > 0
-    readonly property string displayName: root.row ? (root.searching ? Match.base(root.row.n) : root.row.n) : ""
+    readonly property bool locating: root.searching || root.recenting
+    readonly property string displayName: root.row ? (root.locating ? Match.base(root.row.n) : root.row.n) : ""
     // FleaWindow.html and ThemeRoles.html both spell it "shell -> /usr/share/omarchy".
     readonly property string linkMark: root.row && root.row.l ? " -> " + root.row.l : ""
     // The name, then a link's target; a folder carries no slash, its glyph and the folders-first order already say it.
     readonly property string decoratedName: root.displayName + root.linkMark
-    readonly property string locationText: root.searching ? Match.location(root.row.n) : ""
+    readonly property string locationText: root.locating && root.row ? (root.recenting ? Recent.locationUnder(root.row.n, Quickshell.env("HOME") || "") : Match.location(root.row.n)) : ""
     readonly property var nameRun: Match.run(root.displayName, root.searchQuery)
     // Assigned by List.qml's shared budgets; -2 keeps the local geometry default for PickerList and drop-target rows.
     property int assignedNameBudget: -2
@@ -70,12 +77,11 @@ Item {
 
     // The columns this row's width affords. A column that is not drawn takes neither its width nor its gap, so the chain collapses onto its right neighbour.
     property var assignedCols: null // Set by List.qml; null keeps the local default below.
-    readonly property var cols: root.assignedCols !== null ? root.assignedCols : (root.dualMode ? Theme.dualColumns(root.width, root.hiddenCols) : Theme.columns(root.width, root.hiddenCols, root.dateWidth))
-    readonly property bool modeShown: !root.searching && root.cols.mode
-    // The search column set keeps Size and drops the other three, so only this one ignores searching.
+    readonly property var cols: root.assignedCols !== null ? root.assignedCols : root.recenting ? Theme.columns(root.width, root.hiddenCols, root.dateWidth, true, root.dualMode) : root.dualMode ? Theme.dualColumns(root.width, root.hiddenCols) : Theme.columns(root.width, root.hiddenCols, root.dateWidth)
+    readonly property bool modeShown: !root.locating && root.cols.mode
     readonly property bool sizeShown: root.cols.size
-    readonly property bool dateShown: !root.searching && root.cols.date
-    readonly property bool kindShown: !root.searching && root.cols.kind
+    readonly property bool dateShown: (!root.searching || root.recenting) && root.cols.date
+    readonly property bool kindShown: !root.locating && root.cols.kind
 
     // A lifted row is the cursor, the pointer, or a selection member; all three take the same fill treatment, per qui Minimal.
     property bool lifted: root.cursor || root.hovered || root.selected || root.dropTarget
@@ -91,14 +97,14 @@ Item {
     // and the decode, and a row whose Image failed to load has to be marked by its kind instead.
     readonly property bool thumbDrawn: root.thumb.length > 0 && thumbImage.status !== Image.Error
 
-    implicitHeight: root.renaming && renameLoader.item
-                    ? Math.max(Theme.fileRowHeight, renameLoader.item.implicitHeight + 2 * Theme.spacing.rowPaddingY) : Theme.fileRowHeight
+    // The editor sits inside the row's own height at every density; only an error line below it adds to it.
+    implicitHeight: root.renaming && renameLoader.item ? Theme.fileRowHeight + renameLoader.item.errorHeight : Theme.fileRowHeight
     implicitWidth: parent ? parent.width : 0
 
     Accessible.role: Accessible.ListItem
     Accessible.name: root.displayName
     // The compact form drops the clock, so the picker's rows carry the whole stamp here instead; this tree has no tooltip.
-    Accessible.description: root.compactDate && root.row && root.row.m !== null ? Format.date(root.row.m) : ""
+    Accessible.description: root.compactDate && root.dateStamp() !== null ? Format.date(root.dateStamp()) : ""
 
     Rectangle {
         width: root.paintWidth > 0 ? root.paintWidth : parent.width
@@ -143,7 +149,7 @@ Item {
                 anchors.right: parent.right
                 anchors.rightMargin: Theme.spacing.rowPaddingX
                 anchors.verticalCenter: parent.verticalCenter
-                text: DragOps.label(root.dropCopying)
+                text: DragOps.label(root.dropCopying, root.dropLinking)
                 color: Theme.color.accent
                 font.family: Theme.font.family
                 font.pixelSize: Theme.font.caption
@@ -221,11 +227,10 @@ Item {
     Loader {
         id: renameLoader
         active: root.renaming
-        anchors.left: icon.right
-        anchors.leftMargin: Theme.spacing.gap
-        anchors.right: mode.left
-        anchors.rightMargin: root.modeShown ? Theme.spacing.gap : 0
-        anchors.verticalCenter: parent.verticalCenter
+        // The label slot on whole pixels: a dual pane's width and mark slot are fractional, and the frame is a hairline.
+        x: Math.round(icon.x + icon.width) + Theme.spacing.gap
+        y: Math.round((root.height - renameLoader.height) / 2)
+        width: Math.round(mode.x - (root.modeShown ? Theme.spacing.gap : 0)) - x
         sourceComponent: Flea.RenameField {
             height: implicitHeight
             pane: root.renamePane
@@ -239,7 +244,7 @@ Item {
     // corner: a filename is arbitrary text, so PlainText everywhere; MatchText draws its runs the same way.
     MatchText {
         id: name
-        visible: !root.searching && !root.renaming
+        visible: !root.locating && !root.renaming
         anchors.left: icon.right
         anchors.leftMargin: Theme.spacing.gap
         anchors.right: mode.left
@@ -253,10 +258,10 @@ Item {
         elideMiddle: true
     }
 
-    // The search column set: the name shrinks to its content so the location beside it has room.
-    // Both are built only while searching, over the same span the two drew in side by side.
+    // One lazy path split: Recent reserves Location; search keeps the inline name share.
     Loader {
-        active: root.searching
+        id: locatingLoader
+        active: root.locating
         anchors.left: icon.right
         anchors.leftMargin: Theme.spacing.gap
         anchors.right: size.left
@@ -264,11 +269,13 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         sourceComponent: Item {
+            readonly property var owner: parent.parent
+            property alias location: location
             MatchText {
                 id: searchName
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                width: Math.min(implicitWidth, root.searchSlot * root.nameShare)
+                width: root.recenting ? Math.max(0, parent.width - (parent.owner.cols.location ? Theme.column.location + Theme.spacing.gap : 0)) : Math.min(implicitWidth, root.searchSlot * parent.owner.nameShare)
                 text: root.decoratedName
                 matchStart: root.nameRun.start
                 matchLength: root.nameRun.length
@@ -279,8 +286,10 @@ Item {
             }
 
             Text {
+                id: location
+                visible: !parent.owner.recenting || parent.owner.cols.location
                 anchors.left: searchName.right
-                anchors.leftMargin: Theme.spacing.gap
+                anchors.leftMargin: parent.owner.recenting && !parent.owner.cols.location ? 0 : Theme.spacing.gap
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.locationText
@@ -332,7 +341,7 @@ Item {
         width: root.dateShown ? root.dateWidth : 0
         text: root.dateShown ? root.dateText() : ""
         // Short-circuit on the switch first, so with the switch off no row enters the library.
-        color: (ViewState.highlightToday && Format.isRecent(root.row ? root.row.m : null, ViewState.todayStart)) ? root.dimmed(Theme.color.foreground) : root.cellInk
+        color: (root.dateShown && ViewState.highlightToday && Format.isRecent(root.dateStamp(), ViewState.todayStart)) ? root.dimmed(Theme.color.foreground) : root.cellInk
         font.family: Theme.font.family
         font.pixelSize: Theme.font.caption
         horizontalAlignment: Text.AlignRight
@@ -401,11 +410,11 @@ Item {
         if (!root.row) {
             return ""
         }
-        // null marks a row with no real mtime yet (ui/ShareBrowser.qml's share rows).
-        if (root.row.m === null) {
+        var stamp = root.dateStamp()
+        if (stamp === null) {
             return "--"
         }
-        return root.compactDate ? Format.compactDate(root.row.m) : Format.date(root.row.m)
+        return root.compactDate ? Format.compactDate(stamp) : Format.date(stamp)
     }
 
     // row.k indexes root.kindNames; an index past its bounds (a row held over from an older listing) reads as empty, never a crash.
@@ -438,12 +447,11 @@ Item {
         return Theme.color.foreground
     }
 
-    // What this row is drawing right now, for the seam that reads it beside the header's.
-    function columnSet() { return Theme.columnNames(root.width, root.hiddenCols, root.dateWidth) }
-
-    // The same by-key idiom Header.cell uses, so the overflow reader can reach a specific cell.
+    // The drawn columns and cells, shared with Header's geometry seam.
+    function columnSet() { return Columns.names(root.cols) }
     function cell(key) {
         switch (key) {
+        case "location": return locatingLoader.item ? locatingLoader.item.location : null
         case "mode": return mode
         case "size": return size
         case "date": return modified

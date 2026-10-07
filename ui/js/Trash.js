@@ -21,3 +21,12 @@ function arm(pane) {
     pane.trashArmedAt = Date.now()
     pane.message("Press d again to trash, or Delete on its own.", false)
 }
+
+// Window-level keys the Trash view borrows: "direct" skips pane.act as Focus.handleKey does, "act" goes through it, "trash" stays here.
+function route(action) {
+    if (action === "keymapSheet" || action === "pathBar") return "direct"
+    if (action.indexOf("textSize") === 0) return "direct"
+    if (action === "settings" || action === "sidebar") return "act"
+    if (action.indexOf("tab") === 0) return "act"
+    return "trash"
+}

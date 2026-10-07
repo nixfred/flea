@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import "." as Flea
+import "js/Buttons.js" as Buttons
 import "js/Protocols.js" as Protocols
 
 // The Add-network-place form: a protocol picks the scheme, prefills the port and swaps the field set,
@@ -187,7 +188,7 @@ Column {
 
     Row {
         id: chips
-        spacing: Theme.spacing.hairline * 6
+        spacing: Theme.spacing.hairline * Buttons.SET_GAP
 
         Repeater {
             model: Protocols.PROTOCOLS
@@ -351,11 +352,16 @@ Column {
             clip: true
 
             Flickable {
+                id: sentenceFlick
                 anchors.fill: parent
                 contentWidth: sentence.implicitWidth
                 contentHeight: sentence.implicitHeight
                 flickableDirection: Flickable.HorizontalFlick
                 boundsBehavior: Flickable.StopAtBounds
+                Flea.FastScrollHandler {
+                    parent: sentenceFlick
+                    flickable: sentenceFlick
+                }
 
                 // Dialogs rule 3: one sentence rather than an eyebrow over a value, and it says the
                 // whole answer, because Protocols.uri() has one as soon as the host and port validate:

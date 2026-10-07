@@ -13,13 +13,21 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
+# Omarchy exports gtk3, whose platform theme opens a display even for offscreen Qt, so the headless suites take Qt's generic theme.
+export QT_QPA_PLATFORMTHEME=generic
+
 # Both profiles unconditionally, the debug binary for the suites that drive it and the release one for thumbs.sh: an `[ ! -x <path> ]` guard is satisfied by a stale binary from an older commit, and measured on 2026-09-05 the debug and release hashes were unchanged across a whole run-all over edited source.
 printf 'run-all: building target/debug/flea, the debug-binary suites need it\n'
 cargo build -q || { printf 'run-all: cargo build failed, nothing else was run\n' >&2; exit 1; }
 printf 'run-all: building target/release/flea, thumbs.sh needs it\n'
 cargo build -q --release || { printf 'run-all: release build failed, nothing else was run\n' >&2; exit 1; }
 
-headless="js keymap-gen charts budget aurpush signalarity empty-state sandbox capability-ownership gio-auth gvfs ops modes update protocol portal archive thumbs thumbs-exec network-open-share network-keyless mount-listing lazy-objects connections-style pdf-turn pdf-first preview-decode preview-swap uistate uiwriter media filemanager1 dragwire shellload settings-columns preview-frame jump-ui jump-gap picker-recent picker-stall grid-gap rowcost columnscost columnrow-geom columndividers columnsfolder columnspeekgate headercost headerhandles menu-settle menu-snapshot-retire lockedmenu arm-prompt acceptance-matrix counts listcost listnamebudget ui-fixture-home menu-scroll-width scroll-fill columnclip-empty listhidden gridhidden gridcaption statusbar-hint"
+headless="staticgates js keymap-gen charts budget aurpush aur-versions pkgrel-check signalarity empty-state sandbox capability-ownership gio-auth gvfs ops modes update protocol portal archive thumbs thumbs-exec network-open-share network-keyless mount-listing lazy-objects startup-objects connections-style pdf-turn pdf-first preview-decode preview-swap preview-colwork preview-settle-live preview-select preview-hunt uistate uiwriter xwsettings xwstate media filemanager1 dragwire tabcatcher runall-rule tabreceive sidebarcost shellload bootload xwtab-scan settings-columns preview-frame preview-geometry jump-ui jump-gap picker-recent picker-stall grid-gap rowcost columnscost columnrow-geom columndividers columnsfolder columnspeekgate headercost headerhandles menu-settle menu-snapshot-retire menus-evidence menu-shebang pane-states eject-verdict markdown-render markdown-figures markdown-figures-render figure-warm figure-store markdown-security markdown-spec markdown-html markdown-linearity markdown-lazy markdown-memory markdown-blockcost markdown-nest fencehosts preview-layout-loop lockedmenu arm-prompt acceptance-matrix counts listcost rowscroll listnamebudget clickedge-origin ui-fixture-home ui-captures-sheet ui-captures-permissions sheet-query menu-scroll-width button-system menu-card-sink scroll-fill columnclip-empty listhidden gridhidden gridcaption statusbar-hint xw-addr xw-harness touchpad fs-matrix-smoke scroll-lanes touchpad-tool touchpad-edge scroll-bounds picker-grid picker-header picker-hunt picker-selection permissions-adv permissions-skips permissions-focus scrolloff-view hyprdispatch sidebar-flows menu-clipboard-hunt menu-backend-hunt figure-package rename-scroll quicklook-firstframe qslog-crash watch-views markdown-tables"
+# capsweep-check runs capsweep-controls.py and capsweep-ipc.py; ring-bounds and rename-frame drive the real WindowBody offscreen and pin every focus ring and rename frame inside its host; chromering pins ChromeButton's own ring.
+# menu-fit sizes the real context menu to its widest row and reads its edge fades; settings-tail walks Settings > Menus to its last row.
+headless="$headless capsweep-check ring-bounds rename-frame menu-fit settings-tail dialog-board chromering colwatch-gate"
+# Sample input: "FAIL x", "suite: FAIL x" and "a FAIL: x" match, "ok FAILED" and "xFAIL x" do not; the flea-ci contract.
+fail_line='(^|[: ])FAIL[: ]'
 failed=0
 ran=0
 
@@ -32,7 +40,14 @@ for name in $headless; do
     # The suites do not share a summary format, so the last non-empty line is quoted as-is
     # rather than parsed into a number this script would then have to keep true.
     last=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)
-    if [ "$rc" -eq 0 ]; then
+    # Exit status and output must agree: a suite that exits 0 over a FAIL line still failed.
+    printed=""
+    # A here-string, not a pipe: grep -m1 closing a pipe early kills the writer, and pipefail then drops a line it found.
+    [ "$rc" -ne 0 ] || printed=$(grep -a -m1 -E "$fail_line" <<< "$out") || printed=""
+    if [ "$rc" -eq 0 ] && [ -n "$printed" ]; then
+        printf '  %-14s FAIL   rc=0 but its output holds a FAIL line: %s\n' "$name" "$printed"
+        failed=$((failed + 1))
+    elif [ "$rc" -eq 0 ]; then
         printf '  %-14s ok     %s\n' "$name" "$last"
     else
         printf '  %-14s FAIL   rc=%s  %s\n' "$name" "$rc" "$last"
@@ -43,16 +58,22 @@ done
 # Named, not run: each needs something this script cannot assume it has. One list, read twice: it
 # is printed here and it is what the audit below checks, so a suite cannot be quietly excluded.
 not_run="
+preview-040|exits 0 only on its known per-file scroll restoration failure and exits 1 on any other result, unexpected green included
 ui|needs the display, and refuses beside a Flea it did not start
 drag|needs the display and a real pointer through uinput
 cardsizes|needs the display, a real pointer through uinput, and Hyprland to resize the window
 bench|is a separate headless benchmark-contract suite
 package|needs a real makepkg archive in FLEA_PACKAGE_FILE
 picker|needs the display, a session bus, and Flea activatable as the FileChooser backend
+picker-040|is 0.3.10's acceptance suite and is red until the picker has path entry and collision review
 network-live|needs live share credentials and the approved runtime bundle, controller only
 hook-gate|standalone pinned-hk hook proof, verified separately in a marked Git fixture
 ui-tui|is a standalone native TUI proof that needs the display and owns the display lock
 themes|needs the display: it launches the candidate once per stock theme, and tests/js/themes.js is the half that runs here
+fs-matrix|needs root, loop devices and the mkfs tools for the loop-mount half; fs-matrix-smoke runs the rest
+fs-stick-images|needs root, loop devices, sfdisk and the mkfs tools to write the stick layouts
+mdspec-shots|draws every spec example for the contact sheets and judges nothing
+markdown-tables-assets|is the table assets library markdown-tables.sh and ui-captures-markdown.sh source, and judges nothing
 "
 
 printf '\nNot run here, and why:\n'

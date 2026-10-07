@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Drives the real Quickshell window with omarchy-drive and asserts through the read-only IPC seam.
-# Usage: ./tests/ui.sh [cursor|terminal|open|rows|click|ctrlclick|viewrestart|dd|sortrestart|dirsortstale|editplace|mute|placemenu|runscript|unmounted|sidebar|menu|hidden|selection|watch|optical|select|colour|lifted|icons|thumbs|hashcache|stale|nosweep|oem|header|overflow|focus|preview|network|netmark|networktimeout|networklive|gvfs|sharebrowser|unmount|phones|eject|rename|renamelife|taildrop|grid|columns|columnsbackground|reclick|colroot|operations|tabs|openterminal|renderer|settings|makedefault|scrolllane|noblank|previewswap ...]; networklive is opt-in.
+# Usage: ./tests/ui.sh [case ...]; with no args it runs the default wanted list below; every case_* here or in a sourced tests/ui-*.sh outside it runs only by name (touchpad, networklive and xwdrag among them).
 set -u
 set -o pipefail
 # Hard rule 9's guard, which owns FIXTURE_ROOT and every create and delete this suite makes.
@@ -10,6 +10,10 @@ fail() {
     printf 'FAIL: %s\n' "$*" >&2
     exit 1
 }
+
+. "$(dirname "$0")/lib/hypr-dispatch.sh"
+hypr_pointer_frame_offset=1
+hypr_center_divisor=2
 
 export PATH="$HOME/.local/bin:$PATH"
 eval "$(omarchy-drive env)"
@@ -38,6 +42,9 @@ fi
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 flea_ui="$repo/ui"
+# Every Flea this run launches announces its WorkerScript starts, so the log check below can match them to Qt's null connect lines.
+. "$repo/tests/qslog-gate.sh"
+export QT_LOGGING_RULES="$(qslog_rules "${QT_LOGGING_RULES:-}")"
 flea_bin="${FLEA_BIN:-$repo/target/release/flea}"
 # Sample input: let finished = Command::new("gio")
 # Every opener stub below is named from the product's own exec target, the same derivation
@@ -79,6 +86,8 @@ drain_wait_s=30
 run_root=$(mktemp -d /tmp/flea-ui-run.XXXXXXXX) || fail "cannot create native evidence sandbox"
 printf 'flea native evidence\n' > "$run_root/.flea-test-sandbox"
 export FLEA_TEST_RUN_ROOT="$run_root"
+# A surviving copied-UI window can prove abandonment only after this runner has gone.
+printf '%s\n' "$$" > "$run_root/runner.pid" || fail "cannot record the native evidence runner"
 evidence_dir="$run_root/evidence"
 # Quickshell truncates nothing, so each case gets a fresh log and every log lands in the run log.
 flea_log="$run_root/flea.log"
@@ -99,6 +108,11 @@ printf 'NATIVE_EVIDENCE_ROOT=%s\n' "$run_root"
 suite_state="$run_root/state"
 mkdir -p "$suite_state" || fail "the suite state home could not be created at $suite_state"
 export XDG_STATE_HOME="$suite_state"
+# One scratch journal dir for the run; only the backend reads it, qs keeps the session runtime dir.
+suite_undo="$run_root/undo-journal"
+mkdir -p "$suite_undo" || fail "the suite undo dir could not be created at $suite_undo"
+chmod 0700 "$suite_undo" || fail "the suite undo dir could not be locked down"
+export FLEA_UNDO_DIR="$suite_undo"
 
 # Ten bursts of twelve clicks moved the 100k viewport about eleven rows when measured.
 scroll_bursts=10
@@ -109,10 +123,61 @@ transient_clear_s=5
 rail_poll_wait_s=7
 # The window coalescer is 16 ms and a refill is a round trip, so injected input needs a moment.
 settle_s=0.4
+# Async backend answers land within 15 s, so every makeexec and touchpad poll shares this bound.
+async_wait_ms=15000
+# A virtual-touchpad stroke spans 40 mm in 120 ms; its rest is the value that holds 1 s, within 2 px.
+touchpad_dy_mm=40
+touchpad_ms=120
+touchpad_still_ms=1000
+touchpad_rest_px=2
+# A slow click waits past the double-click interval (Qt 400 ms) so the second tap renames.
+slow_click_gap_s=0.7
+# Column-resize checks: app-seen travel within 2 px, drawn width within 1 px of it.
+col_travel_tol_px=2
+col_grown_tol_px=1
+# omarchy-drive bounds one ipc call at 2 s and kills it 1 s later; a call that names a pid keeps the same bounds.
+ipc_call_timeout=2s
+ipc_call_kill_after=1s
 # Two pixels inside each edge of the strip: the rows a font-tall crumb box left dead, measured at y=2 and y=24 of 27.
 chrome_band_inset=2
 # Wide enough to hold the elided head's opaque fill and the hairline either side of it; that gap measured at x 80 to 86.
 chrome_edge_sample_width=200
+# The open field's frame is one hairline, and ui/js/Buttons.js RING is the button ring's width, which a field never draws.
+chrome_hairline=1
+chrome_ring_width=2
+# A drawn pixel sits within this many units per channel of its theme hex (the window composites over a translucent ground: 1 to 2 measured), and it must stay under half the smallest channel distance between accent, foreground and the bar's ground, which the band check asserts.
+chrome_ink_tolerance=3
+# Sample input: chrome_hex_distance d08840 c8ccd0 sets chrome_hex_gap to 144, the largest per-channel difference of two 6-digit hexes; a variable, so a per-pixel caller forks nothing.
+chrome_hex_distance() {
+    local a=$1 b=$2 i d
+    chrome_hex_gap=0
+    for i in 0 2 4; do
+        d=$(( 16#${a:i:2} - 16#${b:i:2} )); d=${d#-}
+        if (( d > chrome_hex_gap )); then chrome_hex_gap=$d; fi
+    done
+}
+# Sample input: chrome_ink click-chrome-band-2 1x1+300+3 c8ccd0 sets chrome_ink_count to how many of the crop's pixels have every channel within chrome_ink_tolerance of that hex; a variable, so its failures end the suite and not a caller's subshell.
+chrome_ink() {
+    local png="$evidence_dir/$1.png" geometry=$2 want=${3,,} cw ch cx cy iw="" ih="" txt line pixels=0
+    chrome_ink_count=0
+    [[ "$want" =~ ^[0-9a-f]{6}$ ]] || fail "chrome_ink: the ink $3 asked of $1.png is not a 6-digit hex"
+    # Sample input: "1x1+300+3" is a crop 1 wide and 1 tall at x 300, y 3.
+    [[ "$geometry" =~ ^([0-9]+)x([0-9]+)\+(-?[0-9]+)\+(-?[0-9]+)$ ]] || fail "chrome_ink: the crop $geometry of $1.png is not WxH+X+Y"
+    cw=${BASH_REMATCH[1]} ch=${BASH_REMATCH[2]} cx=${BASH_REMATCH[3]} cy=${BASH_REMATCH[4]}
+    # Sample input: "1280 720", the capture's width and height; the format ends in a newline, without which read returns 1 at end of input on a good answer.
+    read -r iw ih < <(magick identify -format '%w %h\n' "$png") || true
+    [[ "$iw" =~ ^[0-9]+$ && "$ih" =~ ^[0-9]+$ ]] || fail "chrome_ink: magick could not read the size of $png, got '$iw $ih'"
+    (( cx >= 0 && cy >= 0 && cx + cw <= iw && cy + ch <= ih )) || fail "chrome_ink: the crop $geometry of $1.png lies outside its ${iw}x${ih} capture"
+    txt=$(magick "$png" -crop "$geometry" +repage -depth 8 txt:-) || fail "chrome_ink: magick could not crop $1.png at $geometry"
+    # Sample input: one pixel line of magick's txt output, "300,3: (208,136,65)  #D08841  srgb(208,136,65)"; its first 6 hex digits are the 8-bit channels.
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[0-9]+,[0-9]+:.*#([0-9A-Fa-f]{6}) ]] || continue
+        pixels=$(( pixels + 1 ))
+        chrome_hex_distance "${BASH_REMATCH[1],,}" "$want"
+        if (( chrome_hex_gap <= chrome_ink_tolerance )); then chrome_ink_count=$(( chrome_ink_count + 1 )); fi
+    done <<< "$txt"
+    (( pixels == cw * ch )) || fail "chrome_ink: the crop $geometry of $1.png read $pixels pixels, not $(( cw * ch ))"
+}
 # The rule is the house hairline, foreground at 12 percent, so a crumb glyph under it shows through: measured 2 of 255 on this box, against 23 for the surface an opaque fill would expose in its place.
 chrome_edge_max_spread=8
 # The Hyprland corner arc shows wallpaper through the window's own top-left pixels, so start past it.
@@ -148,7 +213,8 @@ flea_pids() {
         process=$(flea_process_dir "$pid") || return 3
         [[ -r "$process/cmdline" ]] || continue
         # Redirections apply left to right, so the silencer has to precede the read it is silencing.
-        if tr '\0' ' ' 2>/dev/null < "$process/cmdline" | grep -Fq "$flea_ui"; then
+        if tr '\0' ' ' 2>/dev/null < "$process/cmdline" \
+            | grep -Fq -e "$flea_ui" -e "$fixture_root/xwsettings/ui-b/boot"; then
             printf '%s\n' "$pid"
         fi
     done
@@ -231,14 +297,27 @@ flea_pid() {
 }
 
 owned_trash_monitors() {
-    local pid pids process result=0
+    local pid pids process environment result=0
     pids=$(pgrep -x gio) || result=$?
     (( result <= 1 )) || return "$result"
     for pid in $pids; do
         process=$(flea_process_dir "$pid") || return 3
         if flea_process_owned "$pid"; then
-            if tr '\0' '\n' < "$process/environ" | grep -Fx "FLEA_BIN=$flea_bin" >/dev/null \
-                && tr '\0' '\n' < "$process/environ" | grep -F "FLEA_PATH=$fixture_root/" >/dev/null; then
+            # A monitor reaped after its ownership read is gone; silence the redirect before opening it.
+            if ! environment=$(tr '\0' '\n' 2>/dev/null < "$process/environ"); then
+                [[ -d "$process" ]] || continue
+                # Sample stat: "347 (gio) Z 1 347 ..."; a zombie has already exited and cannot survive.
+                [[ "$(sed 's/.*) //' "$process/stat" 2>/dev/null | cut -d' ' -f1)" == Z ]] && continue
+                if flea_process_owned "$pid"; then
+                    return 3
+                else
+                    result=$?
+                    (( result != 3 )) || return 3
+                    continue
+                fi
+            fi
+            if grep -Fx "FLEA_BIN=$flea_bin" <<< "$environment" >/dev/null \
+                && grep -F "FLEA_PATH=$fixture_root/" <<< "$environment" >/dev/null; then
                 printf '%s\n' "$pid"
             fi
         else
@@ -386,6 +465,9 @@ real_user_shell_toml="$HOME/.config/omarchy/shell.toml"
 # foreground        = "#c8ccd0"   # content ink
 real_foreground=$(grep -E '^foreground' "$real_state_dir/theme/colors.toml" | grep -oE '#[0-9A-Fa-f]{6}')
 [[ -n "$real_foreground" ]] || fail "no foreground in $real_state_dir/theme/colors.toml, so no shot could be checked against the live palette"
+# Sample input, one line of the live colors.toml: accent = "#d4a017"
+real_accent=$(grep -E '^accent' "$real_state_dir/theme/colors.toml" | grep -oE '#[0-9A-Fa-f]{6}')
+[[ -n "$real_accent" ]] || fail "no accent in $real_state_dir/theme/colors.toml, so no focused field could be checked against the live palette"
 
 # Theme.stateDir is built from $HOME, so a window under a fixture HOME paints Theme's own fallback
 # palette rather than the live theme, which is how two README shots shipped Catppuccin colours.
@@ -443,18 +525,18 @@ seed_ui_state() {
     export XDG_STATE_HOME="$state"
 }
 
-# The shipped menu.hidden set less Open in terminal, so a case can drive that row without changing
-# any other row of the menu; src/uischema.rs DEFAULTS is where the seven come from.
-terminal_shown='["delete","moveto","copyto","properties","permissions","copypath"]'
-# The shipped set whole, from the same DEFAULTS. A case asserting a menu's exact row list seeds this
-# rather than reading whatever the operator has switched off in the Menus section.
-menu_shipped='["delete","openTerminal","moveto","copyto","properties","permissions","copypath"]'
+# DEFAULTS' twelve less placeMenu, runScript, extThumbs and openTerminal, so a case drives that row alone.
+terminal_shown='["delete","moveto","copyto","properties","permissions","copyAs","pasteAs","invertSelection"]'
+# DEFAULTS' twelve less placeMenu, runScript and extThumbs; an exact-row-list case seeds this.
+menu_shipped='["delete","openTerminal","moveto","copyto","properties","permissions","copyAs","pasteAs","invertSelection"]'
 
 launch() {
     local start_path="$1"
     kill_flea
     cat "$flea_log" >> "$run_log" 2>/dev/null || true
     : > "$flea_log"
+    # Each case starts with an empty session journal, so one case never undoes another's operation.
+    rm -f "$FLEA_UNDO_DIR/undo-journal" "$FLEA_UNDO_DIR/undo-journal.lock"
     FLEA_UI="$flea_ui" FLEA_BIN="$flea_bin" \
         setsid nohup "$flea_bin" --gui "$start_path" >"$flea_log" 2>&1 </dev/null &
     omarchy-drive wait window flea --timeout 15 >/dev/null
@@ -465,7 +547,7 @@ launch() {
 
 wait_listing() {
     local want_total="$1"
-    local total row state
+    local total row=loading state shown
     for _attempt in $(seq 1 300); do
         total=$(ipc total 2>/dev/null || printf unavailable)
         if [[ "$want_total" == 0 ]]; then
@@ -475,6 +557,11 @@ wait_listing() {
             continue
         fi
         row=$(ipc rowAt 0 2>/dev/null || printf loading)
+        # rowAt reads the list delegate, unbuilt in grid and columns, so the shown view stands in.
+        if [[ "$row" == loading ]]; then
+            shown=$(ipc visibleRowName 0 2>/dev/null || true)
+            [[ -n "$shown" ]] && row="$shown|"
+        fi
         # The listing swap keeps the old rows and count up while the next listing is out, so the count alone can match early.
         if [[ "$total" == "$want_total" && "$row" != "loading" && "$(ipc listInFlight 2>/dev/null)" == false ]]; then
             return
@@ -621,12 +708,53 @@ window_box() {
 
 click_row() {
     local index="$1"; shift
-    local centre cx cy wx wy ww wh
+    local centre cx cy wx wy ww wh ax ay aw ah
     centre=$(ipc rowCentre "$index")
     [[ -n "$centre" ]] || fail "row $index has no on-screen centre"
     read -r cx cy <<< "$centre"
+    # Sample input: 0 54 1000 619 (listAreaRect x y width height); a centre outside it lands on the status bar or an overlay.
+    read -r ax ay aw ah <<< "$(ipc listAreaRect)"
+    [[ "$ax $ay $aw $ah" =~ ^-?[0-9]+(\ -?[0-9]+){3}$ ]] || fail "row $index: the list area has no rectangle to check its centre against"
+    (( cx >= ax && cx < ax + aw && cy >= ay && cy < ay + ah )) \
+        || fail "row $index's centre $cx,$cy lies outside the visible list area $ax,$ay,$aw,$ah, so a click there misses the row"
     read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
     # Everything after the index goes straight to omarchy-drive: the button, --double, --mods.
+    omarchy-drive click "$((cx + wx))" "$((cy + wy))" "$@" >/dev/null
+}
+
+click_row_name() {
+    local index="$1"; shift
+    local centre cx cy wx wy ww wh
+    centre=$(ipc rowNameCentre "$index")
+    [[ -n "$centre" ]] || fail "row $index has no on-screen name centre"
+    # Sample input: 412 237 (rowNameCentre x y, window-relative).
+    read -r cx cy <<< "$centre"
+    # Sample input: 40 80 1000 720 (window_box x y width height).
+    read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
+    omarchy-drive click "$((cx + wx))" "$((cy + wy))" "$@" >/dev/null
+}
+
+click_row_beside_name() {
+    local index="$1"; shift
+    local rx ry rw rh nx ny nw nh cx cy wx wy ww wh
+    # Sample input: 0 236 980 28 (rowRect x y width height).
+    read -r rx ry rw rh <<< "$(ipc rowRect "$index")"
+    # Sample input: 34 240 120 20 (rowNameRect x y width height).
+    read -r nx ny nw nh <<< "$(ipc rowNameRect "$index")"
+    [[ "$rx $ry $rw $rh $nx $ny $nw $nh" =~ ^-?[0-9]+(\ -?[0-9]+){7}$ ]] \
+        || fail "row $index has no row and name rectangles"
+    cx=$((rx + rw / 2))
+    cy=$((ry + rh / 2))
+    if (( nx + nw < rx + rw )); then cx=$(((nx + nw + rx + rw) / 2))
+    elif (( nx > rx )); then cx=$(((rx + nx) / 2))
+    elif (( ny > ry )); then cy=$(((ry + ny) / 2))
+    elif (( ny + nh < ry + rh )); then cy=$(((ny + nh + ry + rh) / 2))
+    else fail "row $index has no point outside its name"; fi
+    (( cx > rx && cx < rx + rw && cy > ry && cy < ry + rh \
+        && (cx < nx || cx >= nx + nw || cy < ny || cy >= ny + nh) )) \
+        || fail "row $index's non-name point $cx,$cy is outside the row or inside the name"
+    # Sample input: 40 80 1000 720 (window_box x y width height).
+    read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
     omarchy-drive click "$((cx + wx))" "$((cy + wy))" "$@" >/dev/null
 }
 
@@ -648,7 +776,8 @@ menu_seek() {
     for ((step = 0; step <= steps; step++)); do
         cursor=$(ipc contextMenuCursor)
         [[ "$cursor" == "$target" ]] && return 0
-        key -k Down >/dev/null
+        # A row above the cursor is reached with Up, since Down stops at the last row.
+        if (( cursor > target )); then key -k Up >/dev/null; else key -k Down >/dev/null; fi
         settle
     done
     fail "menu_seek: could not reach $want, cursor stalled at $(ipc contextMenuCursor)"
@@ -734,14 +863,17 @@ fact_labels() {
     printf '%s' "$1" | tr '|' '\n' | cut -d= -f1 | paste -sd'|' -
 }
 
-# Walks the cursor to a row by name, from the top, so no case depends on an index the sort could move.
+# Walks the cursor to a row by name from the top, sort-proof; the shown view stands in for the unbuilt list delegate.
 seek_row_named() {
-    local want="$1" i n
+    local want="$1" i n cur got
     n=$(ipc total)
     [[ "$n" =~ ^[0-9]+$ ]] && (( n > 40 )) || n=40
     key g >/dev/null
     for i in $(seq 1 "$n"); do
-        [[ "$(ipc rowAt "$(ipc cursor)")" == "$want|"* ]] && return 0
+        cur=$(ipc cursor)
+        got=$(ipc rowAt "$cur")
+        [[ "$got" == "$want|"* ]] && return 0
+        [[ "$got" == loading && "$(ipc visibleRowName "$cur")" == "$want" ]] && return 0
         key j >/dev/null
     done
     fail "could not put the cursor on $want"
@@ -905,6 +1037,7 @@ wait_terminal() {
 # 5000 ms poll, so a sentence that lands after a poll has to be caught as it lands, never slept for.
 wait_message() {
     local want="$1" seen="" deadline=$(( $(date +%s%3N) + 25000 ))
+    local diag="${2:-}"
     while (( $(date +%s%3N) < deadline )); do
         # 3 s, not 1: one ipc round trip costs hundreds of ms and grows under load, and a call that
         # times out returns nothing, which spends a sample of a sentence that stands for only 4 s.
@@ -913,7 +1046,10 @@ wait_message() {
             return 0
         fi
     done
-    fail "the status bar never said: $want (the last thing it said was: $seen)"
+    # A phase diagnosing its own failure passes its reader, which runs only here, never while waiting.
+    local detail=""
+    [[ -n "$diag" ]] && detail=" ($(eval "$diag"))"
+    fail "the status bar never said: $want (the last thing it said was: $seen)$detail"
 }
 
 # Durable mount state does not disappear with the status bar, so live network checks wait on it.
@@ -1048,10 +1184,13 @@ icon_crop() {
 
 # Same lookup as icon_of, but the row's own index, for a case that needs to seek to it by keyboard.
 row_index_of() {
-    local want="$1" i total
+    local want="$1" i total row
     total=$(ipc total)
     for (( i = 0; i < total; i++ )); do
-        [[ "$(ipc rowAt "$i")" == "$want|"* ]] && { printf '%s' "$i"; return; }
+        row=$(ipc rowAt "$i")
+        [[ "$row" == "$want|"* ]] && { printf '%s' "$i"; return; }
+        # Grid and columns leave the list view's delegate unbuilt; read the row the shown view draws.
+        [[ "$row" == loading && "$(ipc visibleRowName "$i")" == "$want" ]] && { printf '%s' "$i"; return; }
     done
     fail "no row named $want in a listing of $total"
 }
@@ -1115,7 +1254,7 @@ case_scroll() {
     read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
     read -r cx cy <<< "$(ipc rowCentre 5)"
     # omarchy-drive scroll takes no point: warp there, then one uinput pixel so Qt sees a pointer frame.
-    hyprctl dispatch "hl.dsp.cursor.move({x = $((wx + cx - 1)), y = $((wy + cy))})" >/dev/null
+    hypr_cursor_move "$((wx + cx - hypr_pointer_frame_offset))" "$((wy + cy))" || fail "scroll: pointer motion failed"
     YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 1 -y 0 >/dev/null 2>&1
     settle
     before=$(ipc listContentY)
@@ -1133,6 +1272,109 @@ case_scroll() {
     [[ "$after" == "864" ]] || fail "scroll: two more notches moved contentY to $after, not 864"
     printf 'SCROLL one notch 288, three notches 864, top held at 0\n'
     shot scroll-three-notches
+}
+
+# The stroke lands where a finger would: over a row, with a pointer frame for Qt to route it.
+touchpad_focus_row() {
+    local wx wy ww wh cx cy
+    read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
+    read -r cx cy <<< "$(ipc rowCentre 5)"
+    hypr_cursor_move "$((wx + cx - hypr_pointer_frame_offset))" "$((wy + cy))" || fail "touchpad: pointer motion failed"
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 1 -y 0 >/dev/null 2>&1
+    settle
+}
+
+# A real two-finger stroke through tools/flea-touchpad: a flick coasts past its lift on Finder's
+# tail while the same stroke with a pause before the lift stops dead. A flick past the top
+# rubber-bands past the bound and returns to it. Controller-only: needs /dev/uinput writable
+# beside the display, so anywhere else it refuses rather than failing.
+case_touchpad() {
+    [[ -w /dev/uinput ]] || { printf 'REFUSED: /dev/uinput is not writable, so no touchpad stroke can be played.\n'; exit 1; }
+    [[ -d "$bench_dir" ]] || fail "touchpad: the 100,000-file fixture is missing at $bench_dir"
+    launch "$bench_dir"
+    wait_listing 100000
+    settle
+    touchpad_focus_row
+    [[ "$(ipc listContentY)" == "0" ]] || fail "touchpad: the list did not start at the top"
+    touchpad_run flick 0
+    touchpad_run paused 200
+    launch "$bench_dir"
+    wait_listing 100000
+    settle
+    touchpad_focus_row
+    [[ "$(ipc listContentY)" == "0" ]] || fail "touchpad: the edge flick did not start at the top"
+    touchpad_edge
+}
+
+# One virtual-touchpad stroke: lift is the first sample after exit, rest is the 1 s still value.
+touchpad_run() {
+    local name=$1 hold=$2 stroke lift rest cur stable_start now_ms start_ms
+    stroke=$(ipc listContentY)
+    start_ms=$(date +%s%3N)
+    "$repo/tools/flea-touchpad" swipe --dy-mm "$touchpad_dy_mm" --ms "$touchpad_ms" --hold-ms "$hold" >/dev/null \
+        || fail "touchpad: flea-touchpad refused the $name stroke"
+    lift=$(ipc listContentY)
+    [[ "$lift" -gt "$stroke" ]] || fail "touchpad: the $name stroke never moved the list, lift $lift"
+    rest=$lift
+    stable_start=$(date +%s%3N)
+    while true; do
+        sleep 0.1
+        cur=$(ipc listContentY)
+        now_ms=$(date +%s%3N)
+        if [[ "$cur" != "$rest" ]]; then
+            rest=$cur
+            stable_start=$now_ms
+        elif (( now_ms - stable_start > touchpad_still_ms )); then
+            break
+        fi
+        (( now_ms - start_ms < async_wait_ms )) || fail "touchpad: the $name stroke never settled"
+    done
+    now_ms=$(date +%s%3N)
+    if [[ "$name" == flick ]]; then
+        [[ "$rest" -gt "$lift" ]] || fail "touchpad: the flick stopped at its lift $lift, rest $rest"
+    else
+        (( rest - lift <= touchpad_rest_px && lift - rest <= touchpad_rest_px )) \
+            || fail "touchpad: the paused stroke coasted past its lift $lift, rest $rest"
+    fi
+    printf 'TOUCHPAD stroke=%s lift=%s rest=%s ms=%s\n' "$stroke" "$lift" "$rest" "$((now_ms - start_ms))"
+}
+
+# A flick past the top rubber-bands past the bound and returns to it: the peak is sampled
+# while the tool plays (the return would otherwise finish before the lift is read), and the
+# rest must equal the bound it started from.
+touchpad_edge() {
+    local stroke peak rest cur tool_pid stable_start now_ms start_ms
+    stroke=$(ipc listContentY)
+    peak=$stroke
+    start_ms=$(date +%s%3N)
+    "$repo/tools/flea-touchpad" swipe --dy-mm -40 --ms 120 --hold-ms 0 >/dev/null &
+    tool_pid=$!
+    while kill -0 "$tool_pid" 2>/dev/null; do
+        cur=$(ipc listContentY)
+        [[ "$cur" -lt "$peak" ]] && peak=$cur
+        sleep 0.05
+    done
+    wait "$tool_pid" || fail "touchpad: flea-touchpad refused the edge flick"
+    rest=$(ipc listContentY)
+    [[ "$rest" -lt "$peak" ]] && peak=$rest
+    stable_start=$(date +%s%3N)
+    while true; do
+        sleep 0.1
+        cur=$(ipc listContentY)
+        now_ms=$(date +%s%3N)
+        if [[ "$cur" != "$rest" ]]; then
+            rest=$cur
+            [[ "$rest" -lt "$peak" ]] && peak=$rest
+            stable_start=$now_ms
+        elif (( now_ms - stable_start > 1000 )); then
+            break
+        fi
+        (( now_ms - start_ms < 15000 )) || fail "touchpad: the edge flick never settled"
+    done
+    now_ms=$(date +%s%3N)
+    [[ "$peak" -lt "$stroke" ]] || fail "touchpad: the edge flick never left the bound, peak $peak"
+    [[ "$rest" == "$stroke" ]] || fail "touchpad: the edge flick rested at $rest, want the bound $stroke"
+    printf 'TOUCHPAD edge peak=%s rest=%s ms=%s\n' "$peak" "$rest" "$((now_ms - start_ms))"
 }
 
 # The scrollbar is a viewport control over the integer model, not a second model: a short listing
@@ -1163,7 +1405,7 @@ case_scrollbar() {
         || fail "scrollbar: no scrollbar rect, ipc answered [$sx $sy $sw $sh]"
     read -r wx wy ww wh < <(window_box) || fail "scrollbar: native window coordinates unavailable"
     # Finder's overlay scroller hides at rest: once the load settles, nothing is drawn with the pointer away.
-    hyprctl dispatch "hl.dsp.cursor.move({x = $((wx + ww / 2)), y = $((wy + wh / 2))})" >/dev/null
+    hypr_cursor_move "$((wx + ww / hypr_center_divisor))" "$((wy + wh / hypr_center_divisor))" || fail "scrollbar: pointer motion out of the lane failed"
     wait_scrollbar_shown false "the scroller stayed drawn at rest"
     omarchy-drive click "$((wx + sx + sw / 2))" "$((wy + sy + sh - 2))" left >/dev/null
     settle
@@ -1175,7 +1417,7 @@ case_scrollbar() {
     (( after > $(jq -r '.viewport * 2 | ceil' <<< "$state") )) || fail "scrollbar: a track press moved the list only to $after, a page at most"
     jq -e '.knob > 6' <<< "$state" >/dev/null || fail "scrollbar: the knob did not widen with the pointer in the lane: $state"
     # The warp alone sends Qt no motion (see hover_row), so the lane would never learn the pointer left.
-    hyprctl dispatch "hl.dsp.cursor.move({x = $((wx + ww / 2)), y = $((wy + wh / 2))})" >/dev/null
+    hypr_cursor_move "$((wx + ww / hypr_center_divisor))" "$((wy + wh / hypr_center_divisor))" || fail "scrollbar: pointer motion out of the lane failed"
     YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 1 -y 0 >/dev/null 2>&1 \
         || fail "scrollbar: pointer motion out of the lane failed"
     wait_scrollbar_shown false "the scroller stayed drawn after the pointer left and the view stopped"
@@ -1186,7 +1428,7 @@ case_scrollbar() {
     state=$(ipc scrollbarState)
     handle=$(jq -r '.handle | floor' <<< "$state")
     travel=$(( (sh - handle) / 2 ))
-    hyprctl dispatch "hl.dsp.cursor.move({x = $((wx + sx + sw / 2 - 1)), y = $((wy + sy + handle / 2))})" >/dev/null
+    hypr_cursor_move "$((wx + sx + sw / hypr_center_divisor - hypr_pointer_frame_offset))" "$((wy + sy + handle / hypr_center_divisor))" || fail "scrollbar: pointer motion to the handle failed"
     YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 1 -y 0 >/dev/null 2>&1
     # libinput accelerates relative motion about 2x, so halve the rest until it lands; hyprctl cursorpos prints e.g. `1214, 735`.
     local target_y cursor_y cursor_now step
@@ -1520,6 +1762,8 @@ case_rows() {
         || fail "rows: the real directory draws $(ipc rowGlyph "$dir_row"), not a folder"
 
     # Menus.html's hint slot: a key on every bound row, nothing on Duplicate, which nothing binds.
+    key -k y >/dev/null
+    settle
     seek_row_named target.txt
     key m >/dev/null
     settle
@@ -2017,6 +2261,17 @@ case_click() {
     band_crumb=$(( $(ipc crumbCount) - 1 ))
     read -r band_x _band_y <<< "$(ipc crumbCentre "$band_crumb")"
     [[ -n "$band_x" ]] || fail "click: crumb $band_crumb has no on-screen centre, so no band of the strip can be pressed over one"
+    # Accent, foreground and the bar's ground must be told apart by more than twice the tolerance, or a low-chroma theme would match everything.
+    local ground_hex pair pair_a pair_an pair_b pair_bn pair_gap
+    ground_hex=$(grep -E '^background[[:space:]]*=' "$real_state_dir/theme/colors.toml" | grep -oE '#[0-9A-Fa-f]{6}')
+    [[ -n "$ground_hex" ]] || fail "click: no background in $real_state_dir/theme/colors.toml, so the strip's ground cannot be told from the accent"
+    for pair in "${real_accent#\#} accent ${real_foreground#\#} foreground" "${real_accent#\#} accent ${ground_hex#\#} ground" "${real_foreground#\#} foreground ${ground_hex#\#} ground"; do
+        read -r pair_a pair_an pair_b pair_bn <<< "$pair"
+        chrome_hex_distance "$pair_a" "$pair_b"
+        pair_gap=$chrome_hex_gap
+        (( pair_gap > 2 * chrome_ink_tolerance )) \
+            || fail "click: the $pair_an $pair_a and the $pair_bn $pair_b differ by $pair_gap per channel at most, within twice the ink tolerance $chrome_ink_tolerance, so this theme cannot be checked by colour"
+    done
     for band in "$chrome_band_inset" "$(( chrome_h - 1 - chrome_band_inset ))"; do
         omarchy-drive click "$((band_x + wx))" "$((band + wy))" --double >/dev/null \
             || fail "click: omarchy-drive refused the double click at y $band of the strip"
@@ -2027,6 +2282,44 @@ case_click() {
         [[ "$(ipc pathBarOpen)" == "true" ]] \
             || fail "click: a double click at y $band of the ${chrome_h}px strip did not open the path bar"
         [[ "$(ipc path)" == "$deep" ]] || fail "click: the double click at y $band navigated to $(ipc path)"
+        # Sample input: "74 3 592 20", the open field's frame, one hairline in the accent with no ring around it.
+        local fx fy fw fh span ink accent
+        read -r fx fy fw fh <<< "$(ipc pathFrameRect)"
+        span=$(( fw + 2 * chrome_ring_width ))
+        ink=${real_foreground#\#}
+        accent=${real_accent#\#}
+        # Neither the accent nor the foreground (a ring's ink) lies on the window's first row or on the strip's rule row.
+        local edge_row edge_ink
+        for edge_row in 0 $(( chrome_h - 1 )); do
+            for edge_ink in "$accent" "$ink"; do
+                chrome_ink "click-chrome-band-$band" "${span}x1+$(( fx - chrome_ring_width ))+$edge_row" "$edge_ink"
+                [[ "$chrome_ink_count" == 0 ]] \
+                    || fail "click: ink $edge_ink lies on row $edge_row of the strip beside the open path field (band y $band)"
+            done
+        done
+        # Each side is one accent pixel at its middle, where the corner radius cannot soften it, with none just outside or inside it.
+        local cx cy side sides sx sy ox oy ix iy step
+        cx=$(( fx + fw / 2 )); cy=$(( fy + fh / 2 ))
+        # Sample input: "300 3 0 -1 0 1", the top side's pixel, then the step outward and the step inward.
+        sides=("$cx $fy 0 -1 0 1" "$cx $(( fy + fh - chrome_hairline )) 0 1 0 -1"
+               "$fx $cy -1 0 1 0" "$(( fx + fw - chrome_hairline )) $cy 1 0 -1 0")
+        for side in "${sides[@]}"; do
+            read -r sx sy ox oy ix iy <<< "$side"
+            chrome_ink "click-chrome-band-$band" "1x1+$sx+$sy" "$accent"
+            [[ "$chrome_ink_count" == 1 ]] \
+                || fail "click: the open path field's frame is not the accent at $sx,$sy (band y $band)"
+            # A restored ring is 2 px of foreground just outside the frame, so it puts that ink on both pixels beside a side, where the bar's ground carries neither ink.
+            for (( step = 1; step <= chrome_ring_width; step++ )); do
+                for edge_ink in "$accent" "$ink"; do
+                    chrome_ink "click-chrome-band-$band" "1x1+$(( sx + ox * step ))+$(( sy + oy * step ))" "$edge_ink"
+                    [[ "$chrome_ink_count" == 0 ]] \
+                        || fail "click: ink $edge_ink lies $step px outside the open path field at $sx,$sy, a ring or a wider frame (band y $band)"
+                done
+            done
+            chrome_ink "click-chrome-band-$band" "1x1+$(( sx + ix ))+$(( sy + iy ))" "$accent"
+            [[ "$chrome_ink_count" == 0 ]] \
+                || fail "click: the open path field's accent is wider than one hairline inside $sx,$sy (band y $band)"
+        done
         key -k Escape >/dev/null
         settle
         [[ "$(ipc pathBarOpen)" == "false" ]] || fail "click: Escape did not close the path bar opened at y $band"
@@ -2082,6 +2375,16 @@ case_click() {
     printf 'CLICK back path=%q\n' "$(ipc path)"
     shot click-back
     [[ "$(ipc path)" == "$deep" ]] || fail "click: the back button went to $(ipc path), not back to $deep"
+    # 0xC4 is BTN_EXTRA, Qt.ForwardButton: it retraces that back, and a second back restores the history the climb below spends.
+    ydotool click 0xC4 >/dev/null 2>&1 || fail "click: ydotool refused the mouse forward button"
+    settle
+    settle
+    printf 'CLICK forward path=%q\n' "$(ipc path)"
+    [[ "$(ipc path)" == "$up" ]] || fail "click: the forward button went to $(ipc path), not forward to $up"
+    ydotool click 0xC3 >/dev/null 2>&1 || fail "click: ydotool refused the back button after forward"
+    settle
+    settle
+    [[ "$(ipc path)" == "$deep" ]] || fail "click: back after forward went to $(ipc path), not $deep"
     # The same button's other half: with the history spent it climbs, which is the whole of
     # ui/js/Nav.js mouseBack and the half a stub calling mouseBack directly cannot prove is bound.
     ydotool click 0xC3 >/dev/null 2>&1 || fail "click: ydotool refused the second back button press"
@@ -2124,6 +2427,289 @@ case_click() {
     kill_flea
 }
 
+# Prints the last whole row index, so the three clickedge scans share one rule.
+last_whole_row() {
+    local visible="$1" ay="$2" ah="$3" ci crx cry crw crh last probe
+    # Two rows past the count, so a cut bottom row never hides a whole one.
+    probe=2
+    last=-1
+    for (( ci = 0; ci < visible + probe; ci++ )); do
+        [[ -n "$(ipc rowRect "$ci")" ]] || break
+        read -r crx cry crw crh <<< "$(ipc rowRect "$ci")"
+        (( cry + crh <= ay + ah )) || break
+        last=$ci
+    done
+    printf '%s\n' "$last"
+}
+
+# A click never scrolls the list under the pointer: every cursor move keeps three
+# rows of context while scrolling, so a click within three rows of the edge used to
+# move the row away from the pointer and the second tap of a double click landed on
+# another row. Pointer moves carry context 0 through showCursor; keyboard keeps 3.
+# In List and in Columns, with a listing taller than the window, double click a file
+# on the second-to-last fully visible row (it opens, and the first click moves no
+# contentY), then right click the last fully visible row (the menu opens, same).
+case_clickedge() {
+    local dir="$fixture_root/clickedge" mode
+    local bindir="$fixture_root/clickedge-bin"
+    # The band block drives the pointer through tests/ui-marquee.sh, whose helpers read these; a fail must not leave the button down.
+    local marquee_checks=0 marquee_button_down=false marquee_ctrl_down=false before_band after_band
+    local band_rows=4 end_polls=100 end_poll_s=0.05 band_tail_min=3 band_glide_px=0 band_tail band_end band_end_tol=1
+    export YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-$XDG_RUNTIME_DIR/.ydotool_socket}"
+    [[ -S "$YDOTOOL_SOCKET" ]] || fail "clickedge: no ydotoold socket at $YDOTOOL_SOCKET"
+    trap '( marquee_release ) >/dev/null 2>&1 || true' EXIT
+    sandbox_scratch "$dir"
+    sandbox_scratch "$bindir"
+    local i
+    for i in $(seq -w 1 150); do printf 'body\n' > "$dir/f$i.txt"; done
+    # Outside the listed folder: the stub appends on every open, and a write inside it re-reads under the clicks.
+    local opened="$fixture_root/clickedge-opened.log"
+    : > "$opened"
+    {
+      printf '#!/bin/sh\n'
+      printf '[ "$1" = open ] || exec /usr/bin/gio "$@"\n'
+      printf 'printf "OPENED %%s\\n" "$2" >> %q\n' "$opened"
+    } > "$bindir/$open_handoff"
+    chmod +x "$bindir/$open_handoff"
+
+    local saved_path="$PATH"
+    export PATH="$bindir:$PATH"
+    launch "$dir"
+    export PATH="$saved_path"
+    wait_listing 150
+    clickedge_slow_name() {
+        local ax ay aw ah whole_last slow slow_name before_slow after_blank after_slow
+        key -k Home >/dev/null || fail "clickedge: key Home was rejected"
+        settle
+        read -r ax ay aw ah <<< "$(ipc listAreaRect)"
+        whole_last=$(last_whole_row "$(ipc total)" "$ay" "$ah")
+        (( whole_last >= 1 )) || fail "clickedge: $mode found no whole rows, last $whole_last"
+        slow=$((whole_last - 1))
+        slow_name=$(ipc visibleRowName "$slow")
+        [[ -n "$slow_name" ]] || fail "clickedge: $mode slow row $slow names nothing"
+        before_slow=$(ipc viewContentY)
+        click_row_name "$slow" left
+        settle
+        [[ "$(ipc selectedIndices)" == "$slow" ]] || fail "clickedge: $mode row $slow is not the sole selection"
+        sleep "$slow_click_gap_s"
+        click_row_beside_name "$slow" left
+        settle
+        sleep "$slow_click_gap_s"
+        after_blank=$(ipc viewContentY)
+        printf 'CLICKEDGE %s non-name row=%s before=%s after=%s live=%s\n' "$mode" "$slow" "$before_slow" "$after_blank" "$(ipc renameEditorLive)"
+        [[ "$(ipc renameEditorLive)" == "false" ]] || fail "clickedge: $mode a slow non-name click opened rename on row $slow"
+        [[ "$(ipc renamingIndex)" == "-1" ]] || fail "clickedge: $mode a slow non-name click armed rename on row $slow"
+        [[ "$(ipc selectedIndices)" == "$slow" ]] || fail "clickedge: $mode the non-name click changed the sole selection"
+        [[ "$after_blank" == "$before_slow" ]] || fail "clickedge: $mode the non-name click scrolled $before_slow to $after_blank"
+        click_row_name "$slow" left
+        settle
+        sleep "$slow_click_gap_s"
+        click_row_name "$slow" left
+        for _attempt in $(seq 1 100); do
+            [[ "$(ipc renameEditorLive)" == "true" ]] && break
+            sleep 0.05
+        done
+        after_slow=$(ipc viewContentY)
+        printf 'CLICKEDGE %s rename row=%s before=%s after=%s live=%s\n' "$mode" "$slow" "$before_slow" "$after_slow" "$(ipc renameEditorLive)"
+        [[ "$(ipc renameEditorLive)" == "true" ]] || fail "clickedge: $mode the slow click never opened rename on row $slow"
+        [[ "$(ipc renamingIndex)" == "$slow" ]] || fail "clickedge: $mode the slow click renamed another row"
+        [[ "$after_slow" == "$before_slow" ]] || fail "clickedge: $mode the slow click scrolled $before_slow to $after_slow"
+    }
+    for mode in list columns; do
+        if [[ "$mode" != list ]]; then
+            click_chrome "$mode"
+            settle
+            [[ "$(ipc viewMode)" == "$mode" ]] || fail "clickedge: the chrome drew '$(ipc viewMode)', not $mode"
+        fi
+        key -k Home >/dev/null || fail "clickedge: key Home was rejected"
+        settle
+        [[ "$(ipc viewContentY)" == "0" ]] || fail "clickedge: $mode did not start at the top, contentY $(ipc viewContentY)"
+        local visible target last before after_first after_double target_name want
+        visible=$(ipc visibleRows)
+        [[ "$visible" =~ ^[1-9][0-9]*$ ]] || fail "clickedge: $mode has no visible row count, got [$visible]"
+        # visibleRows counts the cut bottom row too, so last is the last whole row, never the cut one.
+        local ex ey ew eh
+        read -r ex ey ew eh <<< "$(ipc listAreaRect)"
+        [[ "$ex $ey $ew $eh" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]] || fail "clickedge: $mode has no listing area, got [$ex $ey $ew $eh]"
+        last=$(last_whole_row "$visible" "$ey" "$eh")
+        (( last >= 1 )) || fail "clickedge: $mode found no whole rows, last $last"
+        target=$((last - 1))
+        # A cut row's centre can lie outside the list, so click inside its drawn part.
+        click_drawn() {
+            local index="$1"; shift
+            local qrx qry qrw qrh qax qay qaw qah qcx qwx qwy qww qwh bottom y
+            read -r qrx qry qrw qrh <<< "$(ipc rowRect "$index")"
+            [[ -n "$qrx" ]] || fail "clickedge: $mode row $index has no rect"
+            read -r qax qay qaw qah <<< "$(ipc listAreaRect)"
+            bottom=$((qay + qah))
+            y=$(((qry + bottom) / 2))
+            (( y > qry && y < bottom )) || fail "clickedge: $mode row $index has no drawn part, top $qry bottom $bottom"
+            qcx=$((qrx + qrw / 2))
+            read -r qwx qwy qww qwh < <(window_box) || fail "clickedge: native window coordinates unavailable"
+            omarchy-drive click "$((qcx + qwx))" "$((y + qwy))" "$@" >/dev/null
+        }
+        [[ -n "$(ipc rowCentre "$target")" ]] || fail "clickedge: $mode row $target has no centre, visible $visible"
+        [[ -n "$(ipc rowCentre "$last")" ]] || fail "clickedge: $mode row $last has no centre, visible $visible"
+        target_name=$(ipc visibleRowName "$target")
+        [[ -n "$target_name" ]] || fail "clickedge: $mode row $target names nothing"
+        before=$(ipc viewContentY)
+        click_row "$target" left
+        settle
+        after_first=$(ipc viewContentY)
+        printf 'CLICKEDGE %s first before=%s after=%s cursor=%s\n' "$mode" "$before" "$after_first" "$(ipc cursor)"
+        [[ "$(ipc cursor)" == "$target" ]] || fail "clickedge: $mode a left click did not move the cursor to $target, it is $(ipc cursor)"
+        [[ "$after_first" == "$before" ]] || fail "clickedge: $mode the first click scrolled $before to $after_first"
+        : > "$opened"
+        click_row "$target" left --double
+        for _attempt in $(seq 1 100); do
+            grep -q "^OPENED $dir/$target_name$" "$opened" && break
+            sleep 0.05
+        done
+        after_double=$(ipc viewContentY)
+        printf 'CLICKEDGE %s double opened=%q before=%s after=%s\n' "$mode" "$(cat "$opened")" "$before" "$after_double"
+        grep -q "^OPENED $dir/$target_name$" "$opened" || fail "clickedge: $mode a double click did not open $target_name, log $(cat "$opened")"
+        [[ "$after_double" == "$before" ]] || fail "clickedge: $mode the double click scrolled $before to $after_double"
+        local before_menu after_menu
+        before_menu=$(ipc viewContentY)
+        click_row "$last" right
+        settle
+        after_menu=$(ipc viewContentY)
+        printf 'CLICKEDGE %s menu before=%s after=%s visible=%s cursor=%s\n' "$mode" "$before_menu" "$after_menu" "$(ipc contextMenuVisible)" "$(ipc cursor)"
+        [[ "$(ipc contextMenuVisible)" == "true" ]] || fail "clickedge: $mode a right click opened no menu"
+        [[ "$after_menu" == "$before_menu" ]] || fail "clickedge: $mode a right click scrolled $before_menu to $after_menu"
+        key -k Escape >/dev/null || fail "clickedge: key Escape was rejected"
+        settle
+        [[ "$(ipc contextMenuVisible)" == "false" ]] || fail "clickedge: $mode Escape left the menu open"
+        # A click on the cut row scrolls by exactly the cut pixels, so the double click's second tap still lands on it.
+        key -k Home >/dev/null || fail "clickedge: key Home was rejected"
+        settle
+        [[ "$(ipc viewContentY)" == "0" ]] || fail "clickedge: $mode Home did not return to the top, contentY $(ipc viewContentY)"
+        local ax ay aw ah
+        read -r ax ay aw ah <<< "$(ipc listAreaRect)"
+        [[ "$ax $ay $aw $ah" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]] || fail "clickedge: $mode has no listing area, got [$ax $ay $aw $ah]"
+        local cut=-1 crx cry crw crh ci
+        for (( ci = 0; ci < visible + 2; ci++ )); do
+            [[ -n "$(ipc rowRect "$ci")" ]] || break
+            read -r crx cry crw crh <<< "$(ipc rowRect "$ci")"
+            if (( cry + crh > ay + ah && cry < ay + ah )); then cut=$ci; break; fi
+        done
+        if (( cut < 0 )); then
+            printf 'CLICKEDGE %s cut skipped, every row is whole\n' "$mode"
+        else
+            local cut_amount=$((cry + crh - ay - ah)) cut_name before_cut after_cut drift
+            cut_name=$(ipc visibleRowName "$cut")
+            [[ -n "$cut_name" ]] || fail "clickedge: $mode cut row $cut names nothing"
+            before_cut=$(ipc viewContentY)
+            click_drawn "$cut" left
+            settle
+            after_cut=$(ipc viewContentY)
+            printf 'CLICKEDGE %s cut click row=%s before=%s after=%s want=%s\n' "$mode" "$cut" "$before_cut" "$after_cut" "$((before_cut + cut_amount))"
+            [[ "$(ipc cursor)" == "$cut" ]] || fail "clickedge: $mode a click on the cut row did not move the cursor to $cut"
+            drift=$((after_cut - before_cut - cut_amount))
+            (( drift >= -1 && drift <= 1 )) || fail "clickedge: $mode the cut click scrolled $before_cut to $after_cut, want $((before_cut + cut_amount))"
+            : > "$opened"
+            click_drawn "$cut" left --double
+            for _attempt in $(seq 1 100); do
+                grep -q "^OPENED $dir/$cut_name$" "$opened" && break
+                sleep 0.05
+            done
+            printf 'CLICKEDGE %s cut double opened=%q contentY=%s\n' "$mode" "$(cat "$opened")" "$(ipc viewContentY)"
+            grep -q "^OPENED $dir/$cut_name$" "$opened" || fail "clickedge: $mode a double click on the cut row did not open $cut_name, log $(cat "$opened")"
+        fi
+        # A slow click renames only on the name, and neither target scrolls.
+        clickedge_slow_name
+        # An in-place error expands the editor, and the reveal carries context 0 so it stays under the pointer.
+        key -M ctrl -k a -m ctrl -k BackSpace >/dev/null || fail "clickedge: $mode clearing the rename draft failed"
+        key "bad/name" >/dev/null || fail "clickedge: $mode typing the slash name failed"
+        local before_error after_error rename_err
+        before_error=$(ipc viewContentY)
+        key -k Return >/dev/null || fail "clickedge: $mode submitting the slash name failed"
+        settle
+        rename_err=$(ipc renameState | jq -er .error)
+        [[ "$rename_err" == *"A name cannot"* ]] || fail "clickedge: $mode the slash name did not raise the in-place error, got $rename_err"
+        after_error=$(ipc viewContentY)
+        printf 'CLICKEDGE %s rename-error before=%s after=%s err=%q\n' "$mode" "$before_error" "$after_error" "$rename_err"
+        [[ "$after_error" == "$before_error" ]] || fail "clickedge: $mode the in-place error scrolled $before_error to $after_error"
+        key -k Escape >/dev/null || fail "clickedge: key Escape was rejected"
+        settle
+        [[ "$(ipc renameEditorLive)" == "false" ]] || fail "clickedge: $mode Escape left the rename open"
+        printf 'CLICKEDGE %s rename cancelled row=%s contentY=%s\n' "$mode" "$(ipc cursor)" "$(ipc viewContentY)"
+        # A band release never scrolls: the band starts on the bare ground below the last row, where marquee_begin_below checks the pointer landed.
+        key -k End >/dev/null || fail "clickedge: key End was rejected"
+        local band_last band_top band_want band_prev=-1 band_now band_settled=false band_held band_cx band_cy
+        local brx bry brw brh bay
+        band_last=$(( $(ipc total) - 1 ))
+        band_top=$((band_last - band_rows + 1))
+        (( band_top >= 1 )) || fail "clickedge: $mode holds too few rows for a $band_rows-row band, last $band_last"
+        for _attempt in $(seq 1 "$end_polls"); do
+            band_now=$(ipc viewContentY)
+            if [[ -n "$(ipc rowRect "$band_last")" && "$band_now" != 0 && "$band_now" == "$band_prev" ]]; then band_settled=true; break; fi
+            band_prev=$band_now
+            sleep "$end_poll_s"
+        done
+        [[ "$band_settled" == true ]] || fail "clickedge: $mode End never settled on row $band_last, contentY $band_now"
+        # End parks the last row flush; one wheel notch over it goes on to the true end of travel, where the footer is the bare ground the band starts from.
+        local band_flush=$band_now band_wx band_wy band_wcx band_wcy
+        read -r band_wx band_wy _ _ < <(window_box) || fail "clickedge: $mode owned window is unavailable"
+        read -r band_wcx band_wcy <<< "$(ipc rowCentre "$band_last")"
+        [[ "$band_wcx $band_wcy" =~ ^[0-9]+\ [0-9]+$ ]] || fail "clickedge: $mode row $band_last has no centre for the wheel, got [$band_wcx $band_wcy]"
+        omarchy-drive move "$((band_wx + band_wcx))" "$((band_wy + band_wcy))" >/dev/null || fail "clickedge: $mode the pointer could not move onto row $band_last"
+        omarchy-drive scroll down 1 >/dev/null || fail "clickedge: $mode the wheel notch was rejected"
+        band_settled=false
+        for _attempt in $(seq 1 "$end_polls"); do
+            band_now=$(ipc viewContentY)
+            if [[ "$band_now" =~ ^[0-9]+$ ]] && (( band_now > band_flush )) && [[ "$band_now" == "$band_prev" ]]; then band_settled=true; break; fi
+            band_prev=$band_now
+            sleep "$end_poll_s"
+        done
+        [[ "$band_settled" == true ]] || fail "clickedge: $mode the wheel never settled past the flush end $band_flush, contentY $band_now"
+        # The notch must reach the true end of travel, not stop part way into the footer or clamp short of it.
+        band_end=$(ipc viewEndY)
+        [[ "$band_end" =~ ^-?[0-9]+$ ]] || fail "clickedge: $mode the view's end of travel is unreadable, got [$band_end]"
+        (( band_now - band_end <= band_end_tol && band_end - band_now <= band_end_tol )) || fail "clickedge: $mode the wheel settled at contentY $band_now, not the end of travel $band_end"
+        read -r ax ay aw ah <<< "$(ipc listAreaRect)"
+        read -r brx bry brw brh <<< "$(ipc rowRect "$band_last")"
+        [[ "$ax $ay $aw $ah $brx $bry $brw $brh" =~ ^[0-9]+(\ [0-9]+){7}$ ]] || fail "clickedge: $mode band geometry unavailable"
+        band_tail=$((ay + ah - (bry + brh)))
+        (( brh > 0 && band_tail >= band_tail_min )) || fail "clickedge: $mode the tail below row $band_last is $band_tail px, under the $band_tail_min an exact glide needs"
+        read -r _ bry _ _ <<< "$(ipc rowRect "$band_top")"
+        [[ "$bry" =~ ^[0-9]+$ ]] && (( bry >= ay )) || fail "clickedge: $mode band top row $band_top is not drawn whole, top [$bry] view top $ay"
+        read -r band_cx band_cy <<< "$(ipc rowCentre "$band_top")"
+        [[ "$band_cx $band_cy" =~ ^[0-9]+\ [0-9]+$ ]] || fail "clickedge: $mode row $band_top has no centre, got [$band_cx $band_cy]"
+        band_want=$(seq -s, "$band_top" "$band_last")
+        before_band=$(ipc viewContentY)
+        marquee_begin_below "$band_last" false false "$band_glide_px"
+        marquee_to "$band_cx" "$band_cy"
+        marquee_state '.active and .tracking' "clickedge $mode has a live rubber band"
+        marquee_expect selectedIndices "$band_want" "clickedge $mode band marks rows $band_top to $band_last while held"
+        band_held=$(ipc viewContentY)
+        [[ "$band_held" == "$before_band" ]] || fail "clickedge: $mode the held band scrolled $before_band to $band_held"
+        marquee_release
+        settle
+        marquee_expect selectedIndices "$band_want" "clickedge $mode release keeps the banded rows"
+        marquee_expect cursor "$band_top" "clickedge $mode release moves the cursor to the row the band ended on"
+        after_band=$(ipc viewContentY)
+        printf 'CLICKEDGE %s band from=%s to=%s tail=%s before=%s after=%s selected=%s\n' "$mode" "$band_last" "$band_top" "$band_tail" "$before_band" "$after_band" "$(ipc selectedIndices)"
+        [[ "$after_band" == "$before_band" ]] || fail "clickedge: $mode the band release scrolled $before_band to $after_band"
+        # The next mode and the grid part assume the top of the listing with nothing marked and the cursor on row 0.
+        key -k Escape >/dev/null || fail "clickedge: key Escape was rejected"
+        key -k Home >/dev/null || fail "clickedge: key Home was rejected"
+        marquee_expect selectionCount 0 "clickedge $mode band marks are cleared for the next step"
+        marquee_expect cursor 0 "clickedge $mode cursor is back on row 0 for the next step"
+        marquee_expect viewContentY 0 "clickedge $mode view is back at the top for the next step"
+        printf 'CLICKEDGE %s ok target=%s last=%s\n' "$mode" "$target" "$last"
+    done
+    mode=grid
+    click_chrome "$mode"
+    settle
+    [[ "$(ipc viewMode)" == "$mode" ]] || fail "clickedge: the chrome did not reach $mode"
+    clickedge_slow_name
+    key -k Escape >/dev/null || fail "clickedge: key Escape was rejected"
+    settle
+    [[ "$(ipc renameEditorLive)" == "false" ]] || fail "clickedge: $mode Escape left the rename open"
+    kill_flea
+}
+
 # Ctrl+click after a plain click, in all three views. The plain click leaves the set empty with the
 # cursor on its row, which every write operation and shift+click read as "that row is the selection";
 # the ctrl+click used to replace it and now adds to it, keys.toml [[pointer]] "add the row to the
@@ -2160,11 +2746,11 @@ case_ctrlclick() {
         [[ "$(ipc selectedIndices)" == "1,3" ]] \
             || fail "ctrlclick: in the $view ctrl+click selected '$(ipc selectedIndices)', not 1,3"
         [[ "$(ipc cursor)" == "3" ]] || fail "ctrlclick: in the $view the cursor is $(ipc cursor), not 3"
-        # The anchor is the ctrl+clicked row, so a shift+click from it runs 2,3 and never back to 1.
+        # Issue 209 additive-range ruling: a shift range adds to a ctrl selection, so from 1,3 it keeps 1 and adds 2,3.
         click_row 2 left --mods shift
         settle
-        [[ "$(ipc selectedIndices)" == "2,3" ]] \
-            || fail "ctrlclick: in the $view shift+click selected '$(ipc selectedIndices)', not 2,3"
+        [[ "$(ipc selectedIndices)" == "1,2,3" ]] \
+            || fail "ctrlclick: in the $view shift+click selected '$(ipc selectedIndices)', not 1,2,3"
         # PR 106's own case: a cursor row with nothing marked is that row selected to every write
         # operation, so the ctrl+click adds to it rather than replacing it.
         key -k Escape >/dev/null
@@ -2367,10 +2953,8 @@ case_placemenu() {
     : > "$dir/Work/one.txt"
     : > "$dir/plain.txt"
     local state="$fixture_root/placemenu-state"
-    # The switch on, and one favourite to open the menu over. Everything else is the shipped set.
-    # The switch on, and Open in terminal and Copy path on too, because a row switched off in Settings
-    # is off on this menu as well: with the shipped set those two are absent and the menu is shorter.
-    seed_ui_state "$state" "$(printf '{"menu":{"hidden":["delete","moveto","copyto","properties","permissions"]},"places":{"favourites":[{"label":"Work","path":"%s/Work"}]}}' "$dir")"
+    # The place menu on over one favourite, with Open in terminal and Copy path (the Copy as switch) on: a row switched off in Settings is off on this menu too.
+    seed_ui_state "$state" "$(printf '{"menu":{"hidden":["delete","moveto","copyto","properties","permissions","runScript","pasteAs","invertSelection","extThumbs"]},"places":{"favourites":[{"label":"Work","path":"%s/Work"}]}}' "$dir")"
 
     launch "$dir"
     wait_listing 2
@@ -2457,7 +3041,7 @@ case_runscript() {
     printf '#!/bin/sh\nexit 0\n' > "$config/flea/scripts/not-executable.sh"
     chmod +x "$config/flea/scripts/stamp.sh" "$config/flea/scripts/ocr.sh"
     # The switch on: everything else in the shipped set stays as it is.
-    seed_ui_state "$fixture_root/runscript-state" '{"menu":{"hidden":["delete","openTerminal","placeMenu","moveto","copyto","properties","permissions","copypath"]}}'
+    seed_ui_state "$fixture_root/runscript-state" '{"menu":{"hidden":["delete","openTerminal","placeMenu","moveto","copyto","properties","permissions","copyAs","pasteAs","invertSelection","extThumbs"]}}'
 
     launch "$dir"
     wait_listing 2
@@ -2651,6 +3235,8 @@ case_background() {
     seed_ui_state "$fixture_root/background-state" "{\"menu\":{\"hidden\":$menu_shipped}}"
     launch "$dir"
     wait_listing 4
+    key -k y >/dev/null
+    settle
 
     click_background
     settle
@@ -2664,9 +3250,9 @@ case_background() {
     [[ "$(ipc contextMenuVisible)" == "true" ]] \
         || fail "background: a right click on empty space opened no menu"
     # Menus.html's background column: New Folder and New File lead it, and GM ruled Add to Favorites stays.
-    [[ "$(ipc contextMenuEntries)" == "New Folder|New File|-|Paste|Select all|-|Add to Favorites|-|Sort by|Show hidden files|-|Settings" ]] \
+    [[ "$(ipc contextMenuEntries)" == "New Folder|New File|-|Paste|Select all|-|Open in terminal|Add to Favorites|-|Sort by|Show hidden files|-|Settings" ]] \
         || fail "background: the menu is not the board's column, it is $(ipc contextMenuEntries)"
-    [[ "$(ipc contextMenuGlyphs)" == "folder-plus|file-plus|-|clipboard|check|-|star|-|sort|eye|-|sliders" ]] \
+    [[ "$(ipc contextMenuGlyphs)" == "folder-plus|file-plus|-|clipboard|check|-|terminal|star|-|sort|eye|-|sliders" ]] \
         || fail "background: a row lost its mark, the set is $(ipc contextMenuGlyphs)"
     # A right click ON a row still gets that row's own menu: the two entrances share one instance,
     # so a hasRow left standing from the last open would be the defect this asserts against.
@@ -2755,7 +3341,7 @@ case_background() {
     # The empty listing is also the strongest case for this menu, and it has no row to aim from.
     click_background
     settle
-    [[ "$(ipc contextMenuEntries)" == "New Folder|New File|-|Paste|Select all|-|Add to Favorites|-|Sort by|Show hidden files|-|Settings" ]] \
+    [[ "$(ipc contextMenuEntries)" == "New Folder|New File|-|Paste|Select all|-|Open in terminal|Add to Favorites|-|Sort by|Show hidden files|-|Settings" ]] \
         || fail "background: an empty directory drew $(ipc contextMenuEntries)"
     # Its own name: the empty-mark poll above already owns background-empty.png.
     shot background-empty-menu
@@ -2796,7 +3382,7 @@ case_background() {
         settle
         printf 'BACKGROUND %s entries=%s\n' "$view" "$(ipc contextMenuEntries)"
         shot "background-$view"
-        [[ "$(ipc contextMenuEntries)" == "New Folder|New File|-|Paste|Select all|-|Add to Favorites|-|Sort by|Show hidden files|-|Settings" ]] \
+        [[ "$(ipc contextMenuEntries)" == "New Folder|New File|-|Paste|Select all|-|Open in terminal|Add to Favorites|-|Sort by|Show hidden files|-|Settings" ]] \
             || fail "background: the $view view drew $(ipc contextMenuEntries)"
         key -k Escape >/dev/null
         settle
@@ -2828,6 +3414,94 @@ case_background() {
         settle
     done
     if [[ -n "$real_state" ]]; then export XDG_STATE_HOME="$real_state"; else unset XDG_STATE_HOME; fi
+}
+
+# MenuAdditions040 callout 10 and Permissions040 callout 3: Make executable shows only on a script
+# missing its bit, adds the owner bit, and one undo restores it. The fixture holds build.sh (a
+# shebang script at 0644) beside notes.txt (0644, no shebang), at defaults, so Permissions stays hidden.
+case_makeexec() {
+    local dir="$fixture_root/makeexec"
+    sandbox_scratch "$dir"
+    printf '#!/bin/sh\necho built\n' > "$dir/build.sh"
+    printf 'plain notes\n' > "$dir/notes.txt"
+    chmod 644 "$dir/build.sh" "$dir/notes.txt"
+    local real_state="${XDG_STATE_HOME-}"
+    seed_ui_state "$fixture_root/makeexec-state" '{"view":"list","keys":"default"}'
+    launch "$dir"
+    wait_listing 2
+
+    # build.sh: the row is present after Move to Trash's group, in the board's specimen g order.
+    seek_row_named "build.sh"
+    click_row "$(ipc cursor)" right
+    local entries="" deadline=$(( $(date +%s%3N) + async_wait_ms ))
+    while (( $(date +%s%3N) < deadline )); do
+        entries=$(ipc contextMenuEntries)
+        [[ "$entries" == *"Make executable"* ]] && break
+        sleep 0.1
+    done
+    printf 'MAKEEXEC build entries=%s\n' "$entries"
+    [[ "$entries" == *"Make executable"* ]] \
+        || fail "makeexec: build.sh offers no Make executable row, got $entries"
+    [[ "${entries%%Make executable*}" == *"Move to Trash"* ]] \
+        || fail "makeexec: Make executable is not after Move to Trash's group in $entries"
+    [[ "${entries##*Make executable}" == "|Add to Favorites"* ]] \
+        || fail "makeexec: Make executable is not before Add to Favorites in $entries"
+    menu_seek "Make executable"
+    key -k Return >/dev/null
+    local mode="" deadline2=$(( $(date +%s%3N) + async_wait_ms ))
+    while (( $(date +%s%3N) < deadline2 )); do
+        mode=$(stat -c '%a' "$dir/build.sh")
+        [[ "$mode" == "744" ]] && break
+        sleep 0.1
+    done
+    [[ "$(stat -c '%a' "$dir/build.sh")" == "744" ]] \
+        || fail "makeexec: build.sh stayed $(stat -c '%a' "$dir/build.sh"), not 744"
+    wait_message "Made it executable. · z undoes"
+    key z >/dev/null
+    local back="" deadline3=$(( $(date +%s%3N) + async_wait_ms ))
+    while (( $(date +%s%3N) < deadline3 )); do
+        back=$(stat -c '%a' "$dir/build.sh")
+        [[ "$back" == "644" ]] && break
+        sleep 0.1
+    done
+    [[ "$(stat -c '%a' "$dir/build.sh")" == "644" ]] \
+        || fail "makeexec: undo left $(stat -c '%a' "$dir/build.sh"), not 644"
+    wait_message "Undid the permissions."
+
+    # notes.txt: the same menu with no shebang offers no such row.
+    key -k Escape >/dev/null
+    settle
+    seek_row_named "notes.txt"
+    local before_probe
+    before_probe=$(ipc menuState | jq -er '.shebangId') || fail "makeexec: could not read the probe id"
+    click_row "$(ipc cursor)" right
+    makeexec_wait_shebang "$dir/notes.txt" "$before_probe"
+    local plain=""
+    plain=$(ipc contextMenuEntries)
+    printf 'MAKEEXEC notes entries=%s\n' "$plain"
+    [[ "$plain" != *"Make executable"* ]] \
+        || fail "makeexec: notes.txt offers Make executable in $plain"
+    key -k Escape >/dev/null
+    settle
+    if [[ -n "$real_state" ]]; then export XDG_STATE_HOME="$real_state"; else unset XDG_STATE_HOME; fi
+}
+
+# Wait for this menu's negative reply, not the retained request path or an earlier menu's receipt.
+makeexec_wait_shebang() {
+    local path="$1" before="$2" observed="ipc-broken" deadline=$(( $(date +%s%3N) + async_wait_ms ))
+    while (( $(date +%s%3N) < deadline )); do
+        observed=$(ipc menuState 2>/dev/null) || observed="ipc-broken"
+        # Sample input: {"pane":"pane-B","opened":true,"hasRow":true,"shebangAsked":"/fixture/notes.txt","shebangId":3,"shebangReply":{"pane":"pane-B","path":"/fixture/notes.txt","id":3,"hasShebang":false},"shebangHas":false}
+        if jq -e --arg path "$path" --argjson before "$before" '
+            .opened == true and .hasRow == true and .shebangAsked == $path and .shebangId > $before
+            and .pane != null and .shebangReply.pane == .pane
+            and .shebangReply.path == $path and .shebangReply.id == .shebangId
+            and .shebangReply.hasShebang == false and .shebangHas == false' <<< "$observed" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    fail "makeexec: the plain-file probe never settled, expected=$path after=$before state=$observed"
 }
 
 # Opens the background menu and clicks one of its rows by label, optionally stepping into that row's
@@ -2900,6 +3574,289 @@ case_hidden() {
     [[ "$(ipc rowAt 0)" == "visible.txt|"* ]] || fail "hidden: toggling back off left the dotfile visible, row 0 is $(ipc rowAt 0)"
 
     printf 'HIDDEN default=ok toggle-on=ok menu-label=ok toggle-off=ok\n'
+    kill_flea
+}
+
+# Both UI paths have read-only IPC targets; a cursor step proves addressed keys reach A alone.
+xwsettings_route_snapshot() {
+    hyprctl activewindow -j 2>/dev/null | jq -c '{class: .class, address: .address}' || true
+    printf 'XWSETTINGS route A address=%s cursor=%s path=%s focus=%s keys=%s\n' \
+        "$addrA" "$("${ipcA[@]}" cursor 2>/dev/null)" "$("${ipcA[@]}" path 2>/dev/null)" \
+        "$("${ipcA[@]}" focusView 2>/dev/null)" "$("${ipcA[@]}" keyDeliveryState 2>/dev/null)"
+    printf 'XWSETTINGS route B address=%s cursor=%s path=%s\n' \
+        "$addrB" "$("${ipcB[@]}" cursor 2>/dev/null)" "$("${ipcB[@]}" path 2>/dev/null)"
+}
+
+# The qs pid is the window's client pid; sample hyprctl clients -j: [{"address":"0x62e8374307c0","pid":2072895}].
+xwsettings_pid() {
+    local address="$1" tree="$2" pid
+    pid=$(hyprctl clients -j | jq -er --arg a "$address" \
+        '[.[] | select(.address == $a) | .pid] | select(length == 1) | .[0] | select(type == "number" and . > 0)') \
+        || fail "xwsettings: window $address has no single client pid"
+    flea_process_owned "$pid" || fail "xwsettings: pid $pid of window $address is not owned by this run"
+    tr '\0' ' ' < "$(flea_process_dir "$pid")/cmdline" | grep -Fq -- "$tree/boot" \
+        || fail "xwsettings: pid $pid of window $address does not run $tree"
+    printf '%s\n' "$pid"
+}
+
+# xw4: one window's Settings change applies live in every other open window, the way Finder's
+# Show hidden files reaches every Finder window at once, while per-window state stays put. Two
+# owned windows share one state file: A keeps the shipped ui tree and B runs a byte copy of it, so
+# kill_flea reaps B through the copied boot-path enumeration in flea_pids. Both trees declare
+# ShellId flea, so a qs path route reaches the newest instance whichever tree it names; each window
+# is read through its own pid from hyprctl clients instead, and a first-rows stamp that must differ
+# proves the two routes reach two instances. The case then proves the key routing: it waits for A
+# to be the active window before typing, and moves only A's cursor. The toggle is pressed in A,
+# the density choice is stepped in B's own Settings panel, and A is read throughout through its pid.
+case_xwsettings() {
+    local root="$fixture_root/xwsettings" dir config state uib
+    dir="$root/files"
+    config="$root/config"
+    state="$root/state"
+    uib="$root/ui-b"
+    sandbox_scratch "$root"
+    [[ -f "$fixture_root/.flea-test-sandbox" ]] \
+        || fail "xwsettings: the sandbox root carries no marker, so nothing here is deletable"
+    mkdir -p "$dir/sub" "$config" "$state" || fail "xwsettings: the sandbox could not be made"
+    : > "$dir/a.txt"
+    : > "$dir/b.txt"
+    : > "$dir/.dot"
+    : > "$dir/sub/c.txt"
+    local real_config="${XDG_CONFIG_HOME-}" real_state="${XDG_STATE_HOME-}"
+    export XDG_CONFIG_HOME="$config"
+    export XDG_STATE_HOME="$state"
+    cp -r "$flea_ui" "$uib" || fail "xwsettings: the second ui tree could not be copied"
+    env XDG_STATE_HOME="$state" "$flea_bin" --ui-state \
+        '{"hidden":false,"density":"compact","view":"list"}' >/dev/null \
+        || fail "xwsettings: the seeding write failed"
+    printf 'XWSETTINGS setup=ok\n'
+
+    # Window A on the shipped tree.
+    kill_flea
+    cat "$flea_log" >> "$run_log" 2>/dev/null || true
+    : > "$flea_log"
+    FLEA_UI="$flea_ui" FLEA_BIN="$flea_bin" \
+        setsid nohup "$flea_bin" --gui "$dir" >"$flea_log" 2>&1 </dev/null &
+    omarchy-drive wait window flea --timeout 15 >/dev/null
+    local addrA addrB pidA pidB
+    addrA=$(omarchy-drive windows --json | jq -r '[.windows[] | select(.title == "Flea")] | .[0].address // empty')
+    [[ -n "$addrA" ]] || fail "xwsettings: no Flea window after launching A"
+    omarchy-drive focus "$addrA" >/dev/null
+    assert_window
+    pidA=$(xwsettings_pid "$addrA" "$flea_ui") || fail "xwsettings: A has no owned qs pid"
+    local ipcA=(timeout --kill-after="$ipc_call_kill_after" "$ipc_call_timeout" qs ipc --pid "$pidA" call flea)
+    wait_listing 3
+    [[ "$("${ipcA[@]}" path)" == "$dir" ]] || fail "xwsettings: A opened $("${ipcA[@]}" path), not $dir"
+
+    # Window B on the copied tree, over the same state file.
+    FLEA_UI="$uib" FLEA_BIN="$flea_bin" \
+        setsid nohup "$flea_bin" --gui "$dir" >>"$flea_log" 2>&1 </dev/null &
+    local attempt count
+    for (( attempt = 0; attempt < 150; attempt++ )); do
+        count=$(omarchy-drive windows --json | jq '[.windows[] | select(.title == "Flea")] | length')
+        [[ "$count" == 2 ]] && break
+        sleep 0.1
+    done
+    [[ "$count" == 2 ]] || fail "xwsettings: the second window never arrived, got $count"
+    addrB=$(omarchy-drive windows --json \
+        | jq -r --arg a "$addrA" '[.windows[] | select(.title == "Flea" and .address != $a)] | .[0].address // empty')
+    [[ -n "$addrB" ]] || fail "xwsettings: the second window has no address of its own"
+    pidB=$(xwsettings_pid "$addrB" "$uib") || fail "xwsettings: B has no owned qs pid"
+    local ipcB=(timeout --kill-after="$ipc_call_kill_after" "$ipc_call_timeout" qs ipc --pid "$pidB" call flea)
+    omarchy-drive focus "$addrB" >/dev/null
+    for (( attempt = 0; attempt < 150; attempt++ )); do
+        [[ "$("${ipcB[@]}" path 2>/dev/null)" == "$dir" ]] && break
+        sleep 0.1
+    done
+    [[ "$("${ipcB[@]}" path)" == "$dir" ]] || fail "xwsettings: B never listed $dir"
+
+    # Both windows list $dir, so only a field that must differ tells the routes apart: A listed before B launched.
+    local firstA firstB
+    firstA=$("${ipcA[@]}" firstRowsAt)
+    firstB=$("${ipcB[@]}" firstRowsAt)
+    [[ "$firstA" =~ ^[0-9]+$ && "$firstB" =~ ^[0-9]+$ ]] \
+        || fail "xwsettings: no first-rows stamp over the pid routes, A (pid $pidA) gave '$firstA' and B (pid $pidB) gave '$firstB'"
+    (( firstB > firstA )) \
+        || fail "xwsettings: the pid routes reach one instance, A (pid $pidA) and B (pid $pidB) both answered first-rows $firstA and $firstB"
+
+    # Focus once, then poll only the active address before injecting the routing proof.
+    local active="" focus_wait_tries=50 focus_poll_s=0.1
+    omarchy-drive focus "$addrA" >/dev/null
+    for (( attempt = 0; attempt < focus_wait_tries; attempt++ )); do
+        active=$(hyprctl activewindow -j 2>/dev/null | jq -r 'select(.address != null) | .address')
+        [[ "$active" == "$addrA" ]] && break
+        sleep "$focus_poll_s"
+    done
+    if [[ "$active" != "$addrA" ]]; then
+        xwsettings_route_snapshot
+        fail "xwsettings: A never became the active window, active is $active"
+    fi
+    omarchy-drive key --window "$addrA" j >/dev/null
+    settle
+    if [[ "$("${ipcA[@]}" cursor)" != "1" ]]; then
+        xwsettings_route_snapshot
+        fail "xwsettings: A's cursor did not step, it is $("${ipcA[@]}" cursor)"
+    fi
+    [[ "$("${ipcB[@]}" cursor)" == "0" ]] || fail "xwsettings: the step addressed to A moved B to $("${ipcB[@]}" cursor)"
+    omarchy-drive key --window "$addrA" k >/dev/null
+    settle
+    printf 'XWSETTINGS route=ok\n'
+
+    # Views stay their own and non-vacuous: A in list, B in grid, so the shared hidden change below
+    # proves each kept its view rather than two list windows agreeing by doing nothing.
+    omarchy-drive focus "$addrB" >/dev/null
+    omarchy-drive key --window "$addrB" -M ctrl -k 3 -m ctrl >/dev/null
+    settle
+    [[ "$("${ipcB[@]}" viewMode)" == "grid" ]] || fail "xwsettings: B did not switch to grid, it is $("${ipcB[@]}" viewMode)"
+    [[ "$("${ipcA[@]}" viewMode)" == "list" ]] || fail "xwsettings: A did not stay in list, it is $("${ipcA[@]}" viewMode)"
+
+    # Hidden files, toggled in A and applied in B: the '.' and Ctrl+> keys and the menu row all
+    # write the one global hidden preference, so one keypress stands in for all three entrances.
+    # The fixture holds sub, a.txt, b.txt and .dot, so 3 rows without dotfiles and 4 with.
+    omarchy-drive focus "$addrA" >/dev/null
+    local hid_start hid_ms hid_total=0
+    hid_start=$(date +%s%3N)
+    omarchy-drive key --window "$addrA" . >/dev/null
+    for (( attempt = 0; attempt < 20; attempt++ )); do
+        hid_total=$("${ipcB[@]}" total 2>/dev/null || printf 0)
+        [[ "$hid_total" == 4 ]] && break
+        sleep 0.05
+    done
+    hid_ms=$(( $(date +%s%3N) - hid_start ))
+    [[ "$hid_total" == 4 ]] || fail "xwsettings: B never showed the dotfiles, total is $hid_total"
+    printf 'XWSETTINGS hidden=ok elapsed_ms=%s (information only, no bound)\n' "$hid_ms"
+    [[ "$("${ipcB[@]}" showHidden)" == "true" ]] || fail "xwsettings: B lists four rows but reports showHidden $("${ipcB[@]}" showHidden)"
+    [[ "$("${ipcA[@]}" showHidden)" == "true" ]] || fail "xwsettings: A's own toggle did not take"
+    [[ "$("${ipcA[@]}" viewMode)" == "list" ]] || fail "xwsettings: the shared hidden change moved A to $("${ipcA[@]}" viewMode)"
+    [[ "$("${ipcB[@]}" viewMode)" == "grid" ]] || fail "xwsettings: the shared hidden change moved B to $("${ipcB[@]}" viewMode)"
+
+    # Density, stepped in B's own Settings panel and applied in A: compact is the default, so one
+    # step right lands on Normal, the same move settings_view drives on one window.
+    omarchy-drive focus "$addrB" >/dev/null
+    local beforeA afterA sections down target cursor count step
+    beforeA=$("${ipcA[@]}" fileRowHeight)
+    omarchy-drive key --window "$addrB" , >/dev/null
+    settle
+    sections=$("${ipcB[@]}" settingsSections)
+    down=$(printf '%s' "$sections" | jq -r 'map(.id) | index("view") // empty')
+    count=$(printf '%s' "$sections" | jq 'length')
+    [[ "$down" =~ ^[0-9]+$ ]] || fail "xwsettings: B's rail has no view section, it carries $sections"
+    [[ "$("${ipcB[@]}" settingsSide)" == "rail" ]] \
+        || { omarchy-drive key --window "$addrB" -k Tab >/dev/null; settle; }
+    for (( step = 1; step < count; step++ )); do omarchy-drive key --window "$addrB" -k k >/dev/null; done
+    settle
+    [[ "$("${ipcB[@]}" settingsSection)" == "view" ]] || fail "xwsettings: B's rail did not reach View"
+    for (( step = 0; step < down; step++ )); do omarchy-drive key --window "$addrB" -k j >/dev/null; settle; done
+    target=$("${ipcB[@]}" settingsModel | jq -r 'map(.id) | index("density") // empty')
+    count=$("${ipcB[@]}" settingsModel | jq 'length')
+    [[ "$target" =~ ^[0-9]+$ ]] || fail "xwsettings: B's View has no density control"
+    [[ "$("${ipcB[@]}" settingsSide)" == "pane" ]] \
+        || { omarchy-drive key --window "$addrB" -k Tab >/dev/null; settle; }
+    for (( attempt = 0; attempt <= count; attempt++ )); do
+        cursor=$("${ipcB[@]}" settingsCursor)
+        [[ "$cursor" == "$target" ]] && break
+        if (( cursor < target )); then omarchy-drive key --window "$addrB" j >/dev/null
+        else omarchy-drive key --window "$addrB" -k k >/dev/null; fi
+        settle
+    done
+    [[ "$cursor" == "$target" ]] || fail "xwsettings: B's cursor never reached density, it is $cursor"
+    omarchy-drive key --window "$addrB" l >/dev/null
+    for (( attempt = 0; attempt < 30; attempt++ )); do
+        if "${ipcB[@]}" uiSettings 2>/dev/null | jq -e '.density == "normal"' >/dev/null \
+            && jq -e '.density == "normal"' "$state/flea/ui.json" >/dev/null; then break; fi
+        sleep 0.1
+    done
+    "${ipcB[@]}" uiSettings | jq -e '.density == "normal"' >/dev/null \
+        || fail "xwsettings: B's density step never landed"
+    afterA=$("${ipcA[@]}" fileRowHeight)
+    [[ "$afterA" != "$beforeA" ]] || fail "xwsettings: A's rows never changed height, still $afterA"
+    [[ "$afterA" == "$("${ipcB[@]}" fileRowHeight)" ]] \
+        || fail "xwsettings: A draws $afterA while B draws $("${ipcB[@]}" fileRowHeight)"
+    omarchy-drive key --window "$addrB" -k Escape >/dev/null
+    settle
+    printf 'XWSETTINGS density=ok\n'
+
+    # Per-window state stays put: B navigates into sub while A keeps its folder and its view.
+    omarchy-drive focus "$addrB" >/dev/null
+    omarchy-drive key --window "$addrB" -k Return >/dev/null
+    for (( attempt = 0; attempt < 100; attempt++ )); do
+        [[ "$("${ipcB[@]}" path 2>/dev/null)" == "$dir/sub" ]] && break
+        sleep 0.1
+    done
+    [[ "$("${ipcB[@]}" path)" == "$dir/sub" ]] || fail "xwsettings: B never opened sub, it is at $("${ipcB[@]}" path)"
+    [[ "$("${ipcA[@]}" path)" == "$dir" ]] || fail "xwsettings: A left $dir for $("${ipcA[@]}" path)"
+    [[ "$("${ipcA[@]}" viewMode)" == "list" ]] || fail "xwsettings: A's view moved to $("${ipcA[@]}" viewMode)"
+    [[ "$("${ipcB[@]}" viewMode)" == "grid" ]] || fail "xwsettings: B's view moved to $("${ipcB[@]}" viewMode)"
+    [[ "$("${ipcA[@]}" total)" == "4" ]] || fail "xwsettings: A lost the applied toggle, total is $("${ipcA[@]}" total)"
+    printf 'XWSETTINGS pinned=ok\n'
+
+    if [[ -n "$real_config" ]]; then export XDG_CONFIG_HOME="$real_config"; else unset XDG_CONFIG_HOME; fi
+    if [[ -n "$real_state" ]]; then export XDG_STATE_HOME="$real_state"; else unset XDG_STATE_HOME; fi
+    kill_flea
+}
+
+# The keyboard dispatcher reaches Reload.begin with the pane's wire for F5 and Ctrl+R.
+case_reload() {
+    local dir="$fixture_root/reload" chord before after errors message
+    sandbox_scratch "$dir"
+    : > "$dir/a.txt"
+    launch "$dir"
+    wait_listing 1
+
+    for chord in F5 Ctrl+R; do
+        before=$(ipc listRequests)
+        if [[ "$chord" == F5 ]]; then
+            key -k F5 >/dev/null
+        else
+            hotkey --global ctrl r flea >/dev/null
+        fi
+        settle
+        errors=$(grep -E 'TypeError|ReferenceError' "$flea_log" | grep -E 'Reload\.js|Focus\.js|Pane\.qml' || true)
+        [[ -z "$errors" ]] || fail "reload: $chord raised $errors"
+        after=$(ipc listRequests)
+        [[ "$after" =~ ^[0-9]+$ && "$before" =~ ^[0-9]+$ ]] || fail "reload: $chord returned invalid listRequests ($before to $after)"
+        (( after == before + 1 )) || fail "reload: no single re-list after $chord, listRequests $before to $after"
+        wait_listing 1
+        [[ "$(ipc path)" == "$dir" ]] || fail "reload: $chord left the listing path; observed [$(ipc path)], expected [$dir]"
+        message=$(ipc lastMessage)
+        [[ "$message" != *Reloaded* ]] || fail "reload: $chord announced unchanged rows: $message"
+        printf 'RELOAD key=%s lists=%s-to-%s unchanged=quiet log=clean\n' "$chord" "$before" "$after"
+    done
+
+    # The watcher re-reads 400 ms after a change and no hold lets a key through, so the owned backend is held: the reload's list is sent before the change is reported.
+    local qs_pid pid held_pid="" held_requests held_inflight
+    qs_pid=$(flea_pid)
+    # Sample input: /proc/<pid>/cmdline "/usr/bin/flea\0--backend\0"; ViewState's writer is a flea child too, run as --ui-state.
+    for pid in $(pgrep -P "$qs_pid" -x flea); do
+        tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" | grep -Fq -- ' --backend ' && held_pid="$held_pid $pid"
+    done
+    held_pid=${held_pid# }
+    [[ "$held_pid" =~ ^[0-9]+$ ]] || fail "reload: expected one flea --backend child of qs $qs_pid to hold, found '$held_pid'"
+    before=$(ipc listRequests)
+    # The pid is expanded here because the trap runs after this function's locals are gone.
+    trap "kill -CONT $held_pid 2>/dev/null || true" EXIT
+    kill -STOP "$held_pid" || fail "reload: could not stop backend $held_pid, so the watcher would report the change first"
+    : > "$dir/b.txt"
+    key -k F5 >/dev/null
+    settle
+    held_requests=$(ipc listRequests)
+    held_inflight=$(ipc listInFlight)
+    kill -CONT "$held_pid" || fail "reload: could not resume backend $held_pid"
+    trap - EXIT
+    [[ "$held_requests" == "$((before + 1))" && "$held_inflight" == true ]] \
+        || fail "reload: with the backend held F5 sent $before to $held_requests list requests, in flight $held_inflight, want one unanswered request"
+    settle
+    errors=$(grep -E 'TypeError|ReferenceError' "$flea_log" | grep -E 'Reload\.js|Focus\.js|Pane\.qml' || true)
+    [[ -z "$errors" ]] || fail "reload: changed-row F5 raised $errors"
+    after=$(ipc listRequests)
+    [[ "$after" =~ ^[0-9]+$ ]] || fail "reload: changed-row F5 returned invalid listRequests: $after"
+    (( after > before )) || fail "reload: no re-list after changed-row F5, listRequests stayed $before"
+    wait_listing 2
+    message=$(ipc lastMessage)
+    [[ "$message" == "Reloaded · 1 row changed" ]] || fail "reload: changed-row F5 said '$message', expected 'Reloaded · 1 row changed'"
+    [[ "$(ipc path)" == "$dir" ]] || fail "reload: changed-row F5 left the listing path; observed [$(ipc path)], expected [$dir]"
+    [[ "$(ipc rowAt 1)" == b.txt\|* ]] || fail "reload: changed-row F5 did not draw b.txt; observed [$(ipc rowAt 1)]"
+    printf 'RELOAD changed-row F5=ok notice=%s log=clean\n' "$message"
     kill_flea
 }
 
@@ -3070,20 +4027,27 @@ case_watch() {
     [[ "$(ipc rowAt "$(ipc cursor)")" == preview-me.txt\|* ]] \
         || fail "watch: a create above the cursor moved it to $(ipc rowAt "$(ipc cursor)")"
 
-    # A selection names rows by index, so the re-read waits for it rather than re-pointing it.
+    # xw5: a selection no longer holds the re-read back. The change applies at once and every mark
+    # stays on the same file by identity, so a window holding a selection never looks stale.
     key v >/dev/null
     settle
     [[ "$(ipc selectionCount)" == "1" ]] || fail "watch: v did not select the cursor row"
     printf 'held\n' > "$dir/BBB-while-selected.txt"
-    sleep 2
-    [[ "$(ipc total)" == "5" ]] \
-        || fail "watch: the listing re-read to $(ipc total) rows while a selection stood"
-    [[ "$(ipc selectionCount)" == "1" ]] || fail "watch: the held selection was cleared anyway"
-    # Clearing the selection is what pays the debt the notification left standing.
-    key -k Escape >/dev/null
     omarchy-drive wait ipc -p "$flea_ui/boot" flea total 6 --timeout 15 >/dev/null \
-        || fail "watch: clearing the selection did not run the owed re-read, total is $(ipc total)"
-    printf 'WATCH deferred=ok paid=ok total=%s\n' "$(ipc total)"
+        || fail "watch: the listing did not re-read to 6 rows while a selection stood, total is $(ipc total)"
+    settle
+    [[ "$(ipc selectionCount)" == "1" ]] \
+        || fail "watch: the re-read cleared the held selection"
+    [[ "$(ipc rowAt "$(ipc cursor)")" == preview-me.txt\|* ]] \
+        || fail "watch: the re-read moved the cursor to $(ipc rowAt "$(ipc cursor)")"
+    [[ "$(ipc selectedIndices)" == "$(ipc cursor)" ]] \
+        || fail "watch: the held mark is on $(ipc selectedIndices), not on the cursor file"
+    # Clearing the selection now owes nothing: the change was already applied under it.
+    key -k Escape >/dev/null
+    settle
+    [[ "$(ipc selectionCount)" == "0" ]] || fail "watch: Escape did not clear the selection"
+    [[ "$(ipc total)" == "6" ]] || fail "watch: clearing the selection re-read to $(ipc total) rows"
+    printf 'WATCH immediate=ok kept=ok total=%s\n' "$(ipc total)"
 
     # A directory under continuous writing still has to settle. The timer absorbs notifications rather
     # than being restarted by them, so the sample that matters is taken WHILE the writing is still
@@ -3103,20 +4067,25 @@ case_watch() {
     (( during > before )) \
         || fail "watch: nothing re-read while the directory was still being written, total stayed $before"
 
-    # A debt owed by this directory must not be paid by re-listing the next one. The selection is what
-    # holds the debt, and leaving clears that selection, so without the guard the owed re-read fires
-    # against whatever the pane has just opened.
-    key v >/dev/null
+    # A debt owed here must not be paid by re-listing the next folder: the open menu holds it and takes every key, so its own Open on the folder row is the navigation.
+    key -k Home >/dev/null
     settle
+    [[ "$(ipc rowAt 0)" == brand-new-folder\|dir\|* ]] || fail "watch: row 0 is not the folder the menu opens: $(ipc rowAt 0)"
+    key m >/dev/null
+    settle
+    local held_total
+    held_total=$(ipc total)
     printf 'owed\n' > "$dir/CCC-owed-on-leaving.txt"
-    sleep 0.5
-    # Counted from before the navigation, not from after it: the owed re-read lands about 400 ms after
-    # the selection clears, which is inside wait_path's own polling, so a sample taken on arrival has
-    # already counted it and could never tell the two apart.
+    sleep 1
+    [[ "$(ipc total)" == "$held_total" ]] || fail "watch: the open menu did not hold the re-read, total $held_total to $(ipc total)"
+    # Counted from before the navigation, not from after it: the menu still holds the debt at the
+    # navigation, so without the guard the timer pays it with a re-list of the folder being opened,
+    # which wait_path polling would otherwise count as the navigation itself.
     local before_nav after_nav
     before_nav=$(ipc listRequests)
-    key -k Backspace >/dev/null
-    wait_path "$fixture_root"
+    menus_seek open
+    key -k Return >/dev/null
+    wait_path "$dir/brand-new-folder"
     sleep 1.5
     after_nav=$(ipc listRequests)
     printf 'WATCH carried lists %s to %s, one navigation and nothing else\n' "$before_nav" "$after_nav"
@@ -3126,6 +4095,476 @@ case_watch() {
     settle
     assert_window
     kill_flea
+}
+
+# xw5: another window's change shows at once with the selection kept on the same files.
+#
+# Two owned qs processes on one folder: B selects three files, A creates, renames and deletes
+# through its own UI, and B applies each change with the marks and the cursor still on the same
+# files. The driver is the shell plus A itself, so nothing here stubs gio or the backend: both
+# windows watch the same directory and B answers only its own inotify.
+#
+# The UI copy identifies A's owned process for launch and cleanup. Both windows share ShellId
+# flea, so config paths cannot distinguish their IPC: every read names the window's qs pid.
+# Keys reach each window by its Hyprland address, resolved from the same owned pid.
+# A qs pid of this run whose cmdline carries the needle, or nothing; a foreign match never qualifies.
+xw_owned_pid_for_arg() {
+    local needle="$1" pid pids
+    pids=$(pgrep -x qs) || return 0
+    for pid in $pids; do
+        if tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" | grep -Fq -- "$needle"; then
+            if flea_process_owned "$pid"; then printf '%s\n' "$pid"; return 0; fi
+        fi
+    done
+    return 0
+}
+
+# The compositor addresses of one pid right now, empty or several when the window is not up alone.
+# Sample input: hyprctl clients -j answers [{"address":"0xabc","pid":111}] and the helper prints 0xabc for 111.
+xw_window_addr_now() {
+    hyprctl clients -j | jq -r --argjson pid "$1" '.[] | select(.pid == $pid) | .address'
+}
+
+# Polls until exactly one compositor client holds the pid, so a window still mapping never reads as missing; only the condition is asserted.
+xw_addr_for_pid() {
+    local pid="$1" addr status attempt clients
+    local tries=200
+    local gap_s=0.05
+    if ! flea_process_owned "$pid"; then
+        printf 'xwwatch: pid %s is not a window this run owns\n' "$pid" >&2
+        return 1
+    fi
+    addr=""
+    for attempt in $(seq 1 $tries); do
+        addr=$(xw_window_addr_now "$pid")
+        status=$?
+        if [[ $status -ne 0 ]]; then
+            printf 'xwwatch: pid %s has no window address: the clients list could not be read\n' "$pid" >&2
+            return 1
+        fi
+        if [[ -n "$addr" && "$addr" != *$'\n'* ]]; then
+            printf '%s\n' "$addr"
+            return 0
+        fi
+        addr=""
+        sleep $gap_s
+    done
+    clients=$(hyprctl clients -j 2>&1)
+    printf 'xwwatch: pid %s has no single window address: %s\n' "$pid" "$clients" >&2
+    return 1
+}
+
+xw_second_window() {
+    local start_path="$1" ui_copy="$2" pid addr status
+    mkdir -p "$ui_copy" || fail "xwwatch: could not stage the second window's UI copy"
+    cp -a "$flea_ui/." "$ui_copy/" || fail "xwwatch: could not copy the UI for the second window"
+    FLEA_UI="$ui_copy" FLEA_BIN="$flea_bin" \
+        setsid nohup "$flea_bin" --gui "$start_path" >>"$run_root/flea.A.log" 2>&1 </dev/null &
+    pid=""
+    for _attempt in $(seq 1 "$xw_window_poll_tries"); do
+        pid=$(xw_owned_pid_for_arg "$ui_copy") && [[ -n "$pid" ]] && break || pid=""
+        sleep "$xw_ui_poll_s"
+    done
+    [[ -n "$pid" ]] || fail "xwwatch: the second window's process never appeared"
+    addr=""
+    for _attempt in $(seq 1 "$xw_window_poll_tries"); do
+        addr=$(xw_window_addr_now "$pid")
+        status=$?
+        if [[ $status -ne 0 ]]; then
+            fail "xwwatch: the second window's address is unreadable: the clients list could not be read"
+        fi
+        if [[ -n "$addr" && "$addr" != *$'\n'* ]]; then
+            break
+        fi
+        addr=""
+        sleep "$xw_ui_poll_s"
+    done
+    [[ -n "$addr" ]] || fail "xwwatch: pid $pid never showed a window"
+    printf '%s\n' "$addr"
+}
+
+xw_key() {
+    local addr="$1"
+    shift
+    omarchy-drive key --window "$addr" "$@" >/dev/null
+}
+
+xw_ipc() {
+    local pid="$1"
+    shift
+    timeout --kill-after="$ipc_call_kill_after" "$ipc_call_timeout" qs ipc --pid "$pid" call flea "$@"
+}
+
+# Aim at this address's own empty listing centre, then raise that window before the right click.
+xw_click_background() {
+    local addr="$1" pid="$2" clients geometry window_pid wx wy ww wh cx cy total row centre row_x row_y row_h
+    clients=$(hyprctl clients -j) || fail "xwwatch: cannot read A's window geometry"
+    # Sample clients: [{"address":"0xaaa","class":"com.thisisgm.flea","pid":111,"at":[100,200],"size":[880,620]}].
+    geometry=$(jq -er --arg addr "$addr" --arg class "$flea_window_class" '
+        [.[] | select(.address == $addr and .class == $class)] | select(length == 1) | .[0]
+        | [.pid, .at[0], .at[1], .size[0], .size[1]]
+        | select(all(.[]; type == "number" and . == floor))
+        | select(.[0] > 0 and .[3] > 0 and .[4] > 0) | @tsv' <<< "$clients") \
+        || fail "xwwatch: A has no single valid window geometry at $addr"
+    read -r window_pid wx wy ww wh <<< "$geometry"
+    [[ "$window_pid" == "$pid" ]] || fail "xwwatch: A's address $addr belongs to pid $window_pid, not $pid"
+    flea_process_owned "$pid" || fail "xwwatch: refusing background coordinates from unowned window $pid"
+    read -r cx cy <<< "$(xw_ipc "$pid" listingBackgroundCentre)"
+    [[ "$cx $cy" =~ ^[0-9]+\ [0-9]+$ ]] \
+        && (( cx < ww && cy < wh )) || fail "xwwatch: A's listing centre is outside its window"
+    total=$(xw_ipc "$pid" total)
+    row_h=$(xw_ipc "$pid" fileRowHeight)
+    [[ "$total $row_h" =~ ^[0-9]+\ [0-9]+$ ]] && (( row_h > 0 )) \
+        || fail "xwwatch: A's listing bounds are unreadable"
+    for (( row = 0; row < total; row++ )); do
+        centre=$(xw_ipc "$pid" rowCentre "$row")
+        [[ -n "$centre" ]] || continue
+        read -r row_x row_y <<< "$centre"
+        [[ "$row_y" =~ ^[0-9]+$ ]] || fail "xwwatch: A's row $row has no valid centre"
+        (( cy > row_y + row_h / 2 || cy < row_y - row_h / 2 )) \
+            || fail "xwwatch: A's background point lands on row $row"
+    done
+    hypr_window_focus "$addr" || fail "xwwatch: could not raise A's window"
+    omarchy-drive click "$((cx + wx))" "$((cy + wy))" right >/dev/null
+}
+
+# Stop the copied-UI window before kill_flea waits for all owned backends and Trash monitors.
+xw_kill_second() {
+    local copy="$1" pid pids process ownership
+    local deadline=$((SECONDS + drain_wait_s)) poll_gap_s=0.05
+    pids=$(pgrep -x qs) || return 0
+    for pid in $pids; do
+        process=$(flea_process_dir "$pid") || return 3
+        if tr '\0' ' ' 2>/dev/null < "$process/cmdline" | grep -Fq -- "$copy"; then
+            if flea_process_owned "$pid"; then
+                kill "$pid" || [[ ! -d "$process" ]] || fail "xwwatch: could not stop the second window $pid"
+                while [[ -d "$process" ]]; do
+                    if flea_process_owned "$pid"; then
+                        (( SECONDS < deadline )) || fail "xwwatch: second window survived for $drain_wait_s s"
+                        sleep "$poll_gap_s"
+                    else
+                        ownership=$?
+                        (( ownership != 3 )) || fail "xwwatch: second window ownership became unreadable during teardown"
+                        break
+                    fi
+                done
+            else
+                ownership=$?
+                (( ownership == 2 )) || fail "xwwatch: refusing to stop unowned or unreadable second window $pid"
+            fi
+        fi
+    done
+}
+
+# Run both cleanup halves even if one fails, without re-entering the case's exit trap.
+xw_cleanup() {
+    local copy="$1" result=0
+    (
+        trap - EXIT
+        xw_kill_second "$copy"
+    ) || result=1
+    (
+        trap - EXIT
+        kill_flea
+    ) || result=1
+    return "$result"
+}
+
+# The hang guard in seconds: the 400 ms watch settle plus whatever the compositor and IPC cost that day, asserted as condition only.
+xw_hang_s=30
+# Poll at half the 400 ms watch settle so completed re-reads are seen without busy polling.
+xw_poll_s=0.2
+# Poll dialog and editor focus every 50 ms so typing can start as soon as the UI is ready.
+xw_ui_poll_s=0.05
+# Keep dialog and editor waits bounded to five seconds of sleep plus their IPC round trips.
+xw_ui_poll_tries=100
+# Allow each second-window startup stage fifteen seconds of polling plus its IPC round trips.
+xw_window_poll_tries=300
+
+xw_wait_total() {
+    local pid="$1" want="$2" step="$3" start=$SECONDS seen
+    while (( SECONDS - start < xw_hang_s )); do
+        if seen=$(xw_ipc "$pid" total) && [[ -n "$seen" && "$seen" == "$want" ]]; then
+            printf 'XWWATCH %s ok\n' "$step"
+            return 0
+        fi
+        sleep "$xw_poll_s"
+    done
+    fail "xwwatch: $step left pid $pid at ${seen:-unreadable}, not $want"
+}
+
+# A rename moves no count, so no total can wait on it: sweep the rows until the name appears.
+xw_wait_row() {
+    local pid="$1" want="$2" step="$3" start total row seen
+    start=$SECONDS
+    while (( SECONDS - start < xw_hang_s )); do
+        total=$(xw_ipc "$pid" total 2>/dev/null || printf 0)
+        for ((row = 0; row < total; row++)); do
+            seen=$(xw_ipc "$pid" rowAt "$row" 2>/dev/null || true)
+            if [[ "$seen" == "$want|"* ]]; then
+                printf 'XWWATCH %s ok\n' "$step"
+                return 0
+            fi
+        done
+        sleep "$xw_poll_s"
+    done
+    fail "xwwatch: $step never showed $want"
+}
+
+xw_goto() {
+    local addr="$1" pid="$2" target="$3" n
+    xw_key "$addr" g
+    for ((n = 0; n < target; n++)); do
+        xw_key "$addr" j
+    done
+    sleep "$settle_s"
+}
+
+xw_menu_seek() {
+    local addr="$1" pid="$2" want="$3" entries target i cursor steps step label
+    entries=$(xw_ipc "$pid" contextMenuEntries)
+    target=-1
+    i=0
+    local IFS='|'
+    for label in $entries; do
+        [[ "$label" == "$want" ]] && { target=$i; break; }
+        i=$((i + 1))
+    done
+    unset IFS
+    [[ "$target" -ge 0 ]] || fail "xwwatch: no menu row labelled $want in $entries"
+    steps=$(xw_ipc "$pid" contextMenuModel | jq -er 'length') || fail "xwwatch: could not read menu inventory"
+    for ((step = 0; step <= steps; step++)); do
+        cursor=$(xw_ipc "$pid" contextMenuCursor)
+        [[ "$cursor" == "$target" ]] && return 0
+        xw_key "$addr" -k Down
+        sleep "$settle_s"
+    done
+    fail "xwwatch: could not reach $want, cursor stalled at $(xw_ipc "$pid" contextMenuCursor)"
+}
+
+# Sample environ: FLEA_TEST_RUN_ROOT=/tmp/flea-ui-run.ABCDEFGH, an exact assignment identifying one run.
+xw_process_abandoned() {
+    local process environment candidate_root="" line runner runner_process
+    process=$(flea_process_dir "$1") || return 1
+    environment=$(tr '\0' '\n' 2>/dev/null < "$process/environ") || return 1
+    while IFS= read -r line; do
+        [[ "$line" == FLEA_TEST_RUN_ROOT=* ]] || continue
+        [[ -z "$candidate_root" ]] || return 1
+        candidate_root=${line#FLEA_TEST_RUN_ROOT=}
+    done <<< "$environment"
+    [[ "$candidate_root" == /* ]] || return 1
+    local run_root="$candidate_root"
+    flea_process_owned "$1" || return 1
+    [[ -e "$run_root" ]] || return 0
+    [[ -d "$run_root" && -O "$run_root" && -f "$run_root/.flea-test-sandbox" ]] || return 1
+    runner=$(cat "$run_root/runner.pid" 2>/dev/null) || return 1
+    # Sample runner.pid: 12345; a missing or malformed runner record proves no abandonment.
+    [[ "$runner" =~ ^[1-9][0-9]*$ ]] || return 1
+    runner_process=$(flea_process_dir "$runner") || return 1
+    [[ ! -d "$runner_process" ]]
+}
+
+# Copied-UI windows qualify only when their exact run marker proves that the runner or its root is gone.
+xw_sweep_stale() {
+    local pid pids process
+    pids=$(pgrep -x qs) || return 0
+    for pid in $pids; do
+        process=$(flea_process_dir "$pid") || return 1
+        if tr '\0' ' ' 2>/dev/null < "$process/cmdline" | grep -Fq -- "$FIXTURE_ROOT"; then
+            xw_process_abandoned "$pid" || continue
+            kill "$pid" || [[ ! -d "$process" ]] || fail "xwwatch: could not stop stale test window $pid"
+        fi
+    done
+}
+
+# Matching totals require settled rows before any mark or cursor is read.
+xw_settled() {
+    local pid="$1" n
+    for ((n = 0; n < xw_ui_poll_tries; n++)); do
+        [[ "$(xw_ipc "$pid" listInFlight 2>/dev/null)" == "false" ]] && return 0
+        sleep "$xw_ui_poll_s"
+    done
+    fail "xwwatch: the listing never settled"
+}
+
+# Shared failure snapshot for the dialog and inline editor, with the case's window identities in scope.
+xw_editor_diagnostics() {
+    local pid="$1" step="$2" stateA="${3-}" dialogA="${4-}" stateB menuA menuB cursorA rowA totalA totalB active
+    if (( $# < 3 )); then stateA=$(xw_ipc "$pid" renameState 2>/dev/null || true); fi
+    # The case's local window identities and directory remain in scope for this failure snapshot.
+    stateB=$(xw_ipc "$pidB" renameState 2>/dev/null || true)
+    menuA=$(xw_ipc "$pid" contextMenuVisible 2>/dev/null || true)
+    menuB=$(xw_ipc "$pidB" contextMenuVisible 2>/dev/null || true)
+    if (( $# < 4 )); then dialogA=$(xw_ipc "$pid" menuDialogState 2>/dev/null || true); fi
+    cursorA=$(xw_ipc "$pid" cursor 2>/dev/null || true)
+    rowA=$(xw_ipc "$pid" rowAt "$cursorA" 2>/dev/null || true)
+    totalA=$(xw_ipc "$pid" total 2>/dev/null || true)
+    totalB=$(xw_ipc "$pidB" total 2>/dev/null || true)
+    active=$(hyprctl activewindow -j 2>/dev/null | jq -c --arg addrA "$addrA" --arg addrB "$addrB" \
+        --arg pidA "$pid" --arg pidB "$pidB" \
+        '{address, pid, isA: (.address == $addrA and (.pid | tostring) == $pidA),
+          isB: (.address == $addrB and (.pid | tostring) == $pidB)}' 2>/dev/null || true)
+    printf 'XWWATCH editor failure step=%s A=%s/%s B=%s/%s\n' "$step" "$addrA" "$pid" "$addrB" "$pidB" >&2
+    printf 'A renameState=%s contextMenuVisible=%s menuDialogState=%s\n' "${stateA:-unreadable}" "${menuA:-unreadable}" "${dialogA:-unreadable}" >&2
+    printf 'B renameState=%s contextMenuVisible=%s\n' "${stateB:-unreadable}" "${menuB:-unreadable}" >&2
+    printf 'A cursor=%s rowAt=%s total=%s; B total=%s; activewindow=%s\n' "${cursorA:-unreadable}" "${rowA:-unreadable}" "${totalA:-unreadable}" "${totalB:-unreadable}" "${active:-unreadable}" >&2
+    ls -la "$dir" >&2 || true
+}
+
+# The rename editor opens a round trip after its key, so typing starts on its focus, not on sleep.
+xw_wait_editor() {
+    local pid="$1" step="$2" n stateA
+    for ((n = 0; n < xw_ui_poll_tries; n++)); do
+        stateA=$(xw_ipc "$pid" renameState 2>/dev/null || true)
+        if printf '%s\n' "$stateA" | jq -e '.index >= 0 and .focused' >/dev/null; then
+            return 0
+        fi
+        sleep "$xw_ui_poll_s"
+    done
+    xw_editor_diagnostics "$pid" "$step" "$stateA"
+    fail "xwwatch: $step: the rename editor never opened or took focus"
+}
+
+# New File owns the dialog's Field control; completion requires a closed dialog and the created file.
+xw_wait_dialog() {
+    local pid="$1" want="$2" step="$3" file="${4-}" n state stateA
+    for ((n = 0; n < xw_ui_poll_tries; n++)); do
+        state=$(xw_ipc "$pid" menuDialogState 2>/dev/null || true)
+        if [[ "$want" == open ]]; then
+            if printf '%s\n' "$state" | jq -e '.opened == true and .action == "newFile" and any(.controls[]?; .name == "Field" and .focused == true)' >/dev/null; then
+                return 0
+            fi
+        elif printf '%s\n' "$state" | jq -e '.opened == false' >/dev/null && [[ -f "$file" ]]; then
+            return 0
+        fi
+        sleep "$xw_ui_poll_s"
+    done
+    stateA=$(xw_ipc "$pid" renameState 2>/dev/null || true)
+    xw_editor_diagnostics "$pid" "$step" "$stateA" "$state"
+    if [[ "$want" == open ]]; then
+        fail "xwwatch: $step: the New File name field never opened or took focus"
+    fi
+    fail "xwwatch: $step: the New File dialog never closed or $file never appeared on disk"
+}
+
+case_xwwatch() {
+    local dir="$fixture_root/xwwatch" ui_copy="$fixture_root/xwwatch-ui" addrB addrA row pidA pidB cleanup_command entries marksA marksB
+    printf -v cleanup_command 'xw_cleanup %q || exit 1' "$ui_copy"
+    trap "$cleanup_command" EXIT
+    trap 'exit 1' HUP INT TERM
+    xw_sweep_stale
+    sandbox_scratch "$dir"
+    sandbox_scratch "$ui_copy"
+    printf 'one\n' > "$dir/sel-one.txt"
+    printf 'two\n' > "$dir/sel-two.txt"
+    printf 'three\n' > "$dir/sel-three.txt"
+    printf 'four\n' > "$dir/renamed-later.txt"
+    printf 'five\n' > "$dir/untouched.txt"
+    launch "$dir"
+    wait_listing 5
+    pidB=$(flea_pid)
+    addrB=$(xw_addr_for_pid "$pidB") || fail "xwwatch: no B window address"
+    [[ -n "$addrB" ]] || fail "xwwatch: no B window address"
+
+    # B selects three files and parks its cursor on the last of them.
+    seek_row_named sel-one.txt
+    key v >/dev/null
+    key j >/dev/null
+    key v >/dev/null
+    key j >/dev/null
+    key v >/dev/null
+    settle
+    [[ "$(xw_ipc "$pidB" selectionCount)" == "3" ]] || fail "xwwatch: B selected $(xw_ipc "$pidB" selectionCount), not 3"
+    [[ "$(xw_ipc "$pidB" rowAt "$(xw_ipc "$pidB" cursor)")" == sel-two.txt\|* ]] \
+        || fail "xwwatch: B cursor is on $(xw_ipc "$pidB" rowAt "$(xw_ipc "$pidB" cursor)"), not sel-two.txt"
+
+    # A opens beside it on the same folder.
+    addrA=$(xw_second_window "$dir" "$ui_copy") || fail "xwwatch: no A window address"
+    [[ -n "$addrA" ]] || fail "xwwatch: no A window address"
+    pidA=$(hyprctl clients -j | jq -er --arg addr "$addrA" \
+        '[.[] | select(.address == $addr)] | select(length == 1) | .[0].pid
+         | select(type == "number" and . == floor and . > 0)') \
+        || fail "xwwatch: no single A pid at $addrA"
+    flea_process_owned "$pidA" || fail "xwwatch: A pid $pidA is not owned by this run"
+    [[ "$pidA" != "$pidB" ]] || fail "xwwatch: A and B share pid $pidA"
+    xw_wait_total "$pidA" 5 "second window listing"
+    xw_settled "$pidA"
+
+    # A has no marks; B holds three. Equal answers expose routes reaching the same instance.
+    marksA=$(xw_ipc "$pidA" selectionCount) || fail "xwwatch: A IPC route pid $pidA failed"
+    marksB=$(xw_ipc "$pidB" selectionCount) || fail "xwwatch: B IPC route pid $pidB failed"
+    [[ "$marksA" != "$marksB" ]] \
+        || fail "xwwatch: A IPC route pid $pidA and B IPC route pid $pidB both answered $marksA marks"
+    [[ "$marksA" == 0 ]] || fail "xwwatch: A IPC route pid $pidA answered $marksA marks, expected 0"
+    [[ "$marksB" == 3 ]] || fail "xwwatch: B IPC route pid $pidB answered $marksB marks, expected 3"
+
+    # A creates a file through its own New File row; B shows it with the same three marked.
+    xw_click_background "$addrA" "$pidA"
+    sleep "$settle_s"
+    entries=$(xw_ipc "$pidA" contextMenuEntries)
+    [[ "$entries" == 'New Folder|New File'* ]] || fail "xwwatch: A did not open its background menu: $entries"
+    xw_menu_seek "$addrA" "$pidA" "New File"
+    xw_key "$addrA" -k Return
+    xw_wait_dialog "$pidA" open "New File after menu Return"
+    xw_key "$addrA" -M ctrl -k a -m ctrl -k BackSpace
+    xw_key "$addrA" created-by-a.txt
+    xw_key "$addrA" -k Return
+    xw_wait_dialog "$pidA" closed "New File after submit" "$dir/created-by-a.txt"
+    xw_wait_total "$pidA" 6 "create in A"
+    xw_wait_total "$pidB" 6 "create"
+    xw_settled "$pidA"
+    xw_settled "$pidB"
+    xw_wait_row "$pidA" created-by-a.txt "create row in A"
+    xw_wait_row "$pidB" created-by-a.txt "create row in B"
+    [[ "$(xw_ipc "$pidB" selectionCount)" == "3" ]] || fail "xwwatch: B lost a mark after create"
+    marksB=$(xw_ipc "$pidB" selectedIndices) || fail "xwwatch: B marks unreadable after create"
+    local marked_names="" marked_row
+    for row in ${marksB//,/ }; do
+        marked_row=$(xw_ipc "$pidB" rowAt "$row") || fail "xwwatch: B marked row $row unreadable after create"
+        marked_names+="${marked_row%%|*}"$'\n'
+    done
+    [[ "$(printf '%s' "$marked_names" | LC_ALL=C sort)" == $'sel-one.txt\nsel-three.txt\nsel-two.txt' ]] \
+        || fail "xwwatch: B marks after create name $marked_names instead of the same three files"
+
+    # A renames a file B never marked; B follows the name with its marks untouched.
+    xw_goto "$addrA" "$pidA" 1
+    [[ "$(xw_ipc "$pidA" rowAt "$(xw_ipc "$pidA" cursor)")" == renamed-later.txt\|* ]] \
+        || fail "xwwatch: A cursor is on $(xw_ipc "$pidA" rowAt "$(xw_ipc "$pidA" cursor)"), not renamed-later.txt"
+    xw_key "$addrA" -k F2
+    xw_wait_editor "$pidA" "rename after F2"
+    xw_key "$addrA" -M ctrl -k a -m ctrl -k BackSpace
+    xw_key "$addrA" renamed-by-a.txt
+    xw_key "$addrA" -k Return
+    xw_wait_row "$pidB" renamed-by-a.txt "rename"
+    xw_settled "$pidB"
+
+    # A deletes a file B holds marked; B drops that mark and keeps the other two.
+    row=0
+    local found=-1
+    for ((row = 0; row < 6; row++)); do
+        if [[ "$(xw_ipc "$pidA" rowAt "$row")" == sel-one.txt\|* ]]; then found=$row; break; fi
+    done
+    [[ "$found" -ge 0 ]] || fail "xwwatch: A never listed sel-one.txt"
+    xw_goto "$addrA" "$pidA" "$found"
+    xw_key "$addrA" -k Delete
+    xw_wait_total "$pidB" 5 "delete"
+    xw_settled "$pidB"
+    [[ "$(xw_ipc "$pidB" selectionCount)" == "2" ]] \
+        || fail "xwwatch: B holds $(xw_ipc "$pidB" selectionCount) marks, not the 2 survivors"
+    [[ "$(xw_ipc "$pidB" rowAt "$(xw_ipc "$pidB" cursor)")" == sel-two.txt\|* ]] \
+        || fail "xwwatch: B cursor is on $(xw_ipc "$pidB" rowAt "$(xw_ipc "$pidB" cursor)"), not sel-two.txt"
+    local survivor_rows
+    survivor_rows=$(xw_ipc "$pidB" selectedIndices)
+    [[ -n "$survivor_rows" ]] || fail "xwwatch: B holds no readable marks"
+    for row in ${survivor_rows//,/ }; do
+        case "$(xw_ipc "$pidB" rowAt "$row")" in
+            sel-two.txt\|* | sel-three.txt\|*) ;;
+            *) fail "xwwatch: B mark on row $row is $(xw_ipc "$pidB" rowAt "$row"), not a survivor" ;;
+        esac
+    done
+    printf 'XWWATCH survivors ok\n'
+    xw_cleanup "$ui_copy" || fail "xwwatch: owned windows or backends did not drain"
+    trap - EXIT HUP INT TERM
 }
 
 # Issue 143, stubbed at lsblk and gio: empty, inserted and mounted optical media are all exercised without a real drive.
@@ -3415,7 +4854,8 @@ case_columns() {
     (( $(ipc headerTop) == $(ipc chromeHeight) )) || fail "columns: the column header did not collapse"
 
     # Row 0 is the directory "inner", so the third pane is its contents and not a preview.
-    [[ "$(ipc rowAt 0)" == "inner|dir|"* ]] || fail "columns: row 0 is $(ipc rowAt 0), not the directory"
+    # The hidden list has model 0 in columns, so rowAt reads loading there; visibleRowName reads the shown view.
+    [[ "$(ipc visibleRowName 0)" == "inner" ]] || fail "columns: row 0 is $(ipc visibleRowName 0), not the directory"
 
     # The archive tile: an exact count, an unpacked total, and the entries the frame could name.
     seek_row_named "backup.tar.zst"
@@ -3689,8 +5129,9 @@ case_colroot() {
             [[ -z "$(ipc columnGreatGrandparentRowCentre 0)" ]] \
                 || fail "colroot: limit $n shows a great-grandparent row at /"
         fi
-        [[ "$(ipc rowAt 0)" != "loading" ]] || fail "colroot: limit $n left the active column with no rows"
-        printf 'COLROOT limit=%s count=%s parent=blank active=%s\n' "$n" "$count" "$(ipc rowAt 0 | cut -d'|' -f1)"
+        # The hidden list has model 0 in columns, so rowAt reads loading there; visibleRowName reads the shown view.
+        [[ "$(ipc rowAt 0)" != "loading" || -n "$(ipc visibleRowName 0)" ]] || fail "colroot: limit $n left the active column with no rows"
+        printf 'COLROOT limit=%s count=%s parent=blank active=%s\n' "$n" "$count" "$(ipc visibleRowName 0)"
         shot "colroot-$n"
         kill_flea
     done
@@ -3732,11 +5173,15 @@ case_colroot() {
     kill_flea
 }
 
-# The listing at / has no fixed total, so this waits for a settled path rather than a count.
+# Waits for a settled path at / with no fixed total; the hidden list reads loading, so visibleRowName stands in.
 wait_colroot_settled() {
-    local row
+    local row shown
     for _attempt in $(seq 1 300); do
         row=$(ipc rowAt 0 2>/dev/null || printf loading)
+        if [[ "$row" == loading ]]; then
+            shown=$(ipc visibleRowName 0 2>/dev/null || true)
+            [[ -n "$shown" ]] && row="$shown|"
+        fi
         if [[ "$(ipc path 2>/dev/null)" == "/" && "$row" != "loading" && "$(ipc listInFlight 2>/dev/null)" == "false" ]]; then
             return
         fi
@@ -4510,7 +5955,8 @@ case_gridnavigation() {
         key -k End -k Down -k Right >/dev/null
         cardsize_expect cursor 60
         caption=$(ipc gridCaptionState 60)
-        jq -e '.lines == 2 and .truncated and .textHeight <= .slotHeight and .bottom <= .tileHeight' <<< "$caption" >/dev/null \
+        # 0d857089: Flea elides the name itself, so the mark is in the text and Qt, handed a fitting caption, truncates nothing.
+        jq -e '.lines == 2 and (.name | contains("\u2026")) and (.truncated | not) and .textHeight <= .slotHeight and .bottom <= .tileHeight' <<< "$caption" >/dev/null \
             || fail "grid: two-line caption leaves its reserved tile slot: $caption"
         shot "grid-navigation-$preset-two-line-caption"
         # Prime fixture count guarantees an incomplete row at every admitted column count.
@@ -4591,26 +6037,35 @@ case_header() {
     kill_flea
 }
 
-# ListColumns040: dragging a column edge resizes it, remembers the width, and never sorts. Sample input: headerCellRect size prints "400|70".
-# The drag is closed-loop against the live header rect, because ydotool relative motion is accelerated and a step count cannot name a distance.
-column_drag_to() {
-    local key="$1" target="$2" tries="$3"
-    local rect _x w
-    for (( _drag_i = 0; _drag_i < tries; _drag_i++ )); do
-        IFS='|' read -r _x w <<< "$(ipc headerCellRect "$key")"
-        if (( target >= 0 )); then
-            (( w >= target )) && return 0
-        else
-            (( w <= -target )) && return 0
-        fi
-        YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x "$4" -y 0 >/dev/null 2>&1 \
-            || fail "columnresize: the drag step failed"
+# headerCellRect is polled until two reads agree, so a mid-drag sample never stands in for a settled width.
+column_stable_rect() {
+    local key="$1" first second
+    for _stable_i in $(seq 1 40); do
+        first=$(ipc headerCellRect "$key")
+        sleep 0.05
+        second=$(ipc headerCellRect "$key")
+        [[ "$first" == "$second" ]] && { printf '%s' "$first"; return 0; }
+    done
+    printf '%s' "$second"
+    return 1
+}
+# Absolute header-drag motion while held; neither a step count nor cursorpos names the distance here.
+column_drag_absolute() {
+    local start_x="$1" y="$2" delta_x="$3" steps="$4" i x
+    for (( i = 1; i <= steps; i++ )); do
+        x=$(( start_x + delta_x * i / steps ))
+        omarchy-drive move "$x" "$y" >/dev/null \
+            || fail "columnresize: the absolute drag step failed"
+        # wl_pointer.motion without a frame needs this zero-net uinput nudge to flush one frame per step.
+        YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 1 -y 0 >/dev/null 2>&1 \
+            || fail "columnresize: the frame-flush nudge failed"
+        YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x -1 -y 0 >/dev/null 2>&1 \
+            || fail "columnresize: the frame-flush nudge failed"
         sleep 0.1
     done
-    IFS='|' read -r _x w <<< "$(ipc headerCellRect "$key")"
-    printf '%s' "$w"
 }
 
+# ListColumns040: dragging a column edge resizes it, remembers the width, and never sorts. Sample input: headerCellRect size prints "400|70".
 case_columnresize() {
     local dir="$fixture_root/columnresize"
     sandbox_scratch "$dir"
@@ -4620,35 +6075,60 @@ case_columnresize() {
     seed_ui_state "$fixture_root/columnresize-state" '{"view":"list"}'
     launch "$dir"
     wait_listing 3
-    local before_mark before_w
+    local before_mark before_w rect
     before_mark=$(ipc sortMark)
-    IFS='|' read -r _x before_w <<< "$(ipc headerCellRect size)"
+    rect=$(column_stable_rect size) || fail "columnresize: the size header never settled"
+    IFS='|' read -r _x before_w <<< "$rect"
     [[ "$before_w" =~ ^[0-9]+$ ]] || fail "columnresize: the size header has no width, got $before_w"
 
     # The handle sits on the cell's left edge (Header.qml anchors each ResizeHandle there), not on the painted text centre, which misses the 9 px handle on a right-aligned cell.
-    local cx cy cell_x cell_w edge_x header_left wx wy ww wh
+    local cx cy cell_x cell_w edge_x header_left wx wy ww wh start_x start_y injected=40
     read -r cx cy <<< "$(ipc headerCellCentre size)"
     [[ -n "$cx" && -n "$cy" ]] || fail "columnresize: the size header has no centre"
-    IFS='|' read -r cell_x cell_w <<< "$(ipc headerCellRect size)"
+    rect=$(column_stable_rect size) || fail "columnresize: the size header never settled on the edge pass"
+    IFS='|' read -r cell_x cell_w <<< "$rect"
     [[ "$cell_x" =~ ^-?[0-9]+$ ]] || fail "columnresize: the size header has no left edge, got $cell_x"
     header_left=$(ipc headerLeft)
     [[ "$header_left" =~ ^-?[0-9]+$ ]] || fail "columnresize: the header has no left edge, got $header_left"
     edge_x=$(( header_left + cell_x ))
     read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
-    omarchy-drive move "$(( wx + edge_x ))" "$(( wy + cy ))" >/dev/null
+    start_x=$(( wx + edge_x ))
+    start_y=$(( wy + cy ))
+    omarchy-drive move "$start_x" "$start_y" >/dev/null \
+        || fail "columnresize: the edge move failed"
     YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x40 >/dev/null 2>&1 \
         || fail "columnresize: the edge press failed"
-    # Closed-loop: ydotool relative motion is accelerated, so the rect decides when to stop.
-    column_drag_to size "$(( before_w + 40 ))" 12 -10
+    # Deterministic: absolute moves from the handle's x to handle x minus the injected drag while held.
+    column_drag_absolute "$start_x" "$start_y" -$injected 4
     YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 \
         || fail "columnresize: the edge release failed"
     settle
-    local grown_w
-    IFS='|' read -r _x grown_w <<< "$(ipc headerCellRect size)"
+    local grown_w trace trace_start trace_last trace_width trace_preview
+    rect=$(column_stable_rect size) || fail "columnresize: the size header never settled after the drag"
+    IFS='|' read -r _x grown_w <<< "$rect"
     printf 'COLUMNRESIZE before=%s grown=%s mark=%s\n' "$before_w" "$grown_w" "$(ipc sortMark)"
     shot columnresize-drag
-    (( grown_w >= before_w + 30 && grown_w <= before_w + 70 )) \
-        || fail "columnresize: a leftward 40 px drag moved size from $before_w to $grown_w"
+    trace=$(ipc headerDragTrace)
+    printf 'COLUMNRESIZE trace=%s injected=-%s\n' "$trace" "$injected"
+    IFS='|' read -r trace_start trace_last trace_width trace_preview <<< "$trace"
+    # headerDragTrace carries QML reals (Header.qml dragStartX, dragLastX), which bash arithmetic cannot compare.
+    python3 - "$trace_start" "$trace_last" "$before_w" "$grown_w" "$trace_preview" "$injected" "$col_travel_tol_px" "$col_grown_tol_px" <<'PYEOF' \
+        || fail "columnresize: the header did not follow the pointer as the app saw it, trace=$trace before=$before_w grown=$grown_w expected-start=$cell_x expected-last=$(( cell_x - injected ))"
+import sys
+start, last, before, grown, preview, injected, travel_tol, grown_tol = [float(v) for v in sys.argv[1:9]]
+if not last < start:
+    sys.stderr.write("no leftward drag reached the app: startX=%s lastX=%s\n" % (start, last))
+    sys.exit(1)
+if abs((start - last) - injected) > travel_tol:
+    sys.stderr.write("app-seen travel %s against the injected %s\n" % (start - last, injected))
+    sys.exit(1)
+if abs((grown - before) - (start - last)) > grown_tol:
+    sys.stderr.write("drawn delta %s against app-seen travel %s\n" % (grown - before, start - last))
+    sys.exit(1)
+if abs(grown - preview) > grown_tol:
+    sys.stderr.write("drawn %s against the drag preview %s\n" % (grown, preview))
+    sys.exit(1)
+PYEOF
     [[ "$(ipc sortMark)" == "$before_mark" ]] \
         || fail "columnresize: the drag sorted, mark is $(ipc sortMark)"
     [[ "$(ipc columnWidths | jq -er '.size')" == "$grown_w" ]] \
@@ -4664,30 +6144,41 @@ case_columnresize() {
     [[ "$(ipc rowCellOverflow 0)" == "0|0|0|0" ]] \
         || fail "columnresize: a cell painted past its resized column, $(ipc rowCellOverflow 0)"
 
-    # To the floor: a rightward drag shrinks to the 48 rail, and six steps past it still read 48.
+    # To the floor: a rightward absolute drag shrinks to the 48 rail, with overshoot still reading 48.
     read -r cx cy <<< "$(ipc headerCellCentre size)"
-    IFS='|' read -r cell_x cell_w <<< "$(ipc headerCellRect size)"
+    rect=$(column_stable_rect size) || fail "columnresize: the size header never settled on the floor pass"
+    IFS='|' read -r cell_x cell_w <<< "$rect"
     [[ "$cell_x" =~ ^-?[0-9]+$ ]] || fail "columnresize: the size header has no left edge on the floor pass, got $cell_x"
     header_left=$(ipc headerLeft)
     [[ "$header_left" =~ ^-?[0-9]+$ ]] || fail "columnresize: the header has no left edge on the floor pass, got $header_left"
     edge_x=$(( header_left + cell_x ))
-    omarchy-drive move "$(( wx + edge_x ))" "$(( wy + cy ))" >/dev/null
+    start_x=$(( wx + edge_x ))
+    start_y=$(( wy + cy ))
+    omarchy-drive move "$start_x" "$start_y" >/dev/null \
+        || fail "columnresize: the floor move failed"
     YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x40 >/dev/null 2>&1 \
         || fail "columnresize: the floor press failed"
-    column_drag_to size -48 24 10
-    for _over in $(seq 1 6); do
-        YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 10 -y 0 >/dev/null 2>&1 \
-            || fail "columnresize: the overshoot step failed"
-        sleep 0.1
-    done
+    column_drag_absolute "$start_x" "$start_y" "$(( grown_w - 48 + 60 ))" 6
     YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 \
         || fail "columnresize: the floor release failed"
     settle
     local floored_w
-    IFS='|' read -r _x floored_w <<< "$(ipc headerCellRect size)"
+    rect=$(column_stable_rect size) || fail "columnresize: the size header never settled on the floor read"
+    IFS='|' read -r _x floored_w <<< "$rect"
     printf 'COLUMNRESIZE floored=%s\n' "$floored_w"
     shot columnresize-floor
     [[ "$floored_w" == "48" ]] || fail "columnresize: a drag past the floor landed at $floored_w, not 48"
+    trace=$(ipc headerDragTrace)
+    printf 'COLUMNRESIZE floored-trace=%s\n' "$trace"
+    IFS='|' read -r trace_start trace_last trace_width trace_preview <<< "$trace"
+    python3 - "$trace_start" "$trace_last" <<'PYEOF' \
+        || fail "columnresize: the floor drag left no rightward travel in the trace, trace=$trace"
+import sys
+start, last = [float(v) for v in sys.argv[1:3]]
+if not last > start:
+    sys.stderr.write("no rightward drag reached the app: startX=%s lastX=%s\n" % (start, last))
+    sys.exit(1)
+PYEOF
 
     kill_flea
 }
@@ -5405,6 +6896,18 @@ case_tabs() {
     [[ "$(ipc tabBarVisible)" == "false" ]] || fail "tabs: the bar stayed up after the last extra tab closed"
     key w >/dev/null
     wait_message "Can't close the last tab."
+    # A remembered strip is whole: the single tabs dir with its index, never a refused half patch.
+    local tabs_doc=""
+    for _attempt in $(seq 1 40); do
+        tabs_doc=$(env XDG_STATE_HOME="$suite_state" "$flea_bin" --ui-state 2>/dev/null || true)
+        [[ -n "$tabs_doc" ]] || { sleep 0.25; continue; }
+        if printf '%s' "$tabs_doc" | jq -e --arg dir "$dir" '.lastPath == $dir and .lastTabs == {paths: [$dir], index: 0}' >/dev/null; then
+            break
+        fi
+        sleep 0.25
+    done
+    printf '%s' "$tabs_doc" | jq -e --arg dir "$dir" '.lastPath == $dir and .lastTabs == {paths: [$dir], index: 0}' >/dev/null \
+        || fail "tabs: stored strip is $(printf '%s' "$tabs_doc" | jq -c '{lastPath, lastTabs}' 2>/dev/null || printf 'unreadable'), not the single tabs dir"
     shot tabs-one
     key t >/dev/null
     settle
@@ -5418,6 +6921,338 @@ case_tabs() {
     [[ "$(ipc tabIndex)" == "0" ]] || fail "tabs: clicking tab 0 did not select it, index=$(ipc tabIndex)"
     shot tabs-two
     printf 'TABS count=%s index=%s labels=%s\n' "$(ipc tabCount)" "$(ipc tabIndex)" "$(ipc tabLabels)"
+    kill_flea
+}
+
+# Catches a tab drag not reordering the strip, and the { and } keys beside it.
+# All three move the same strip ui/js/Tabs.js owns: a move lists nothing and the
+# dragged tab stays current. A warp alone sends Qt no motion, so the press and
+# every step go through uinput; ydotool accelerates relative motion about 2x,
+# so each step covers half the remaining distance the way case_scrollbar does.
+tabdrag_to() {
+    local from_x="$1" from_y="$2" to_x="$3" to_y="$4" held="${5:-tabdrag-held}" wx wy ww wh
+    read -r wx wy ww wh < <(window_box) || fail "tabdrag: native window coordinates unavailable"
+    hypr_cursor_move "$((wx + from_x))" "$((wy + from_y))" || fail "tabdrag: pointer drag failed"
+    sleep 0.2
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x40 >/dev/null 2>&1 \
+        || fail "tabdrag: pointer press failed"
+    local step cursor_x cursor_y
+    for step in $(seq 1 24); do
+        cursor_x=$(hyprctl cursorpos | tr -d ',' | cut -d' ' -f1)
+        cursor_y=$(hyprctl cursorpos | tr -d ',' | cut -d' ' -f2)
+        if [[ ! "$cursor_x" =~ ^[0-9]+$ || ! "$cursor_y" =~ ^[0-9]+$ ]]; then
+            YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 || true
+            fail "tabdrag: no pointer row from hyprctl cursorpos [$cursor_x,$cursor_y]"
+        fi
+        (( cursor_x >= wx + to_x - 2 && cursor_x <= wx + to_x + 2 && cursor_y >= wy + to_y - 2 && cursor_y <= wy + to_y + 2 )) && break
+        YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" \
+            ydotool mousemove -x "$(( (wx + to_x - cursor_x) / 2 ))" -y "$(( (wy + to_y - cursor_y) / 2 ))" >/dev/null 2>&1 || {
+            YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 || true
+            fail "tabdrag: pointer drag failed"
+        }
+        sleep 0.05
+    done
+    # The loop breaks on arrival, so ending it off target means the steering never landed.
+    local end_x end_y
+    end_x=$(hyprctl cursorpos | tr -d ',' | cut -d' ' -f1)
+    end_y=$(hyprctl cursorpos | tr -d ',' | cut -d' ' -f2)
+    if [[ ! "$end_x" =~ ^[0-9]+$ || ! "$end_y" =~ ^[0-9]+$ ]] || (( end_x < wx + to_x - 2 || end_x > wx + to_x + 2 || end_y < wy + to_y - 2 || end_y > wy + to_y + 2 )); then
+        YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 || true
+        fail "tabdrag: the drag ended at [$end_x,$end_y], over 2 px off [$((wx + to_x)),$((wy + to_y))]"
+    fi
+    shot "$held"
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool click 0x80 >/dev/null 2>&1 \
+        || fail "tabdrag: pointer release failed"
+    settle
+}
+
+case_tabdrag() {
+    local dir="$fixture_root/tabdrag"
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/alpha" "$dir/beta" "$dir/gamma"
+    launch "$dir"
+    wait_listing 3
+    key t >/dev/null
+    settle
+    key t >/dev/null
+    settle
+    [[ "$(ipc tabCount)" == "3" ]] || fail "tabdrag: t twice did not make 3 tabs, count=$(ipc tabCount)"
+    click_tab 0
+    seek_row_named "alpha" || fail "tabdrag: could not find alpha"
+    key -k Return >/dev/null
+    wait_path "$dir/alpha"
+    click_tab 1
+    seek_row_named "beta" || fail "tabdrag: could not find beta"
+    key -k Return >/dev/null
+    wait_path "$dir/beta"
+    click_tab 2
+    seek_row_named "gamma" || fail "tabdrag: could not find gamma"
+    key -k Return >/dev/null
+    wait_path "$dir/gamma"
+    [[ "$(ipc tabLabels)" == "alpha|beta|gamma" ]] || fail "tabdrag: tabs label [$(ipc tabLabels)], not alpha|beta|gamma"
+    local c0x c0y c1x c1y c2x c2y w
+    read -r c0x c0y <<< "$(ipc tabCentre 0)"
+    read -r c1x c1y <<< "$(ipc tabCentre 1)"
+    read -r c2x c2y <<< "$(ipc tabCentre 2)"
+    w=$((c1x - c0x))
+    (( w > 0 )) || fail "tabdrag: tab centres do not step right [$c0x,$c1x,$c2x]"
+    # Tab 1 past tab 2's far edge: insertion point 3 of 3.
+    tabdrag_to "$c1x" "$c1y" "$((c2x + w / 2 + 3))" "$c2y"
+    [[ "$(ipc tabLabels)" == "alpha|gamma|beta" ]] || fail "tabdrag: drag labelled [$(ipc tabLabels)], not alpha|gamma|beta"
+    # Tabs040 "Dragged tab": a drag reorders and never selects, so gamma stays current at its new place.
+    [[ "$(ipc tabIndex)" == "1" ]] || fail "tabdrag: the current tab did not stay current, index=$(ipc tabIndex)"
+    click_tab 2
+    [[ "$(ipc tabIndex)" == "2" ]] || fail "tabdrag: clicking the moved tab did not select it, index=$(ipc tabIndex)"
+    # The same tab back before tab 0: insertion point 0 of 3.
+    read -r c0x c0y <<< "$(ipc tabCentre 0)"
+    read -r c2x c2y <<< "$(ipc tabCentre 2)"
+    w=$(( (c2x - c0x) / 2 ))
+    tabdrag_to "$c2x" "$c2y" "$((c0x - w / 2 - 3))" "$c0y" tabdrag-held-back
+    [[ "$(ipc tabLabels)" == "beta|alpha|gamma" ]] || fail "tabdrag: drag back labelled [$(ipc tabLabels)], not beta|alpha|gamma"
+    [[ "$(ipc tabIndex)" == "0" ]] || fail "tabdrag: the dragged tab is not current, index=$(ipc tabIndex)"
+    key "}" >/dev/null
+    settle
+    [[ "$(ipc tabLabels)" == "alpha|beta|gamma" ]] || fail "tabdrag: } labelled [$(ipc tabLabels)], not alpha|beta|gamma"
+    [[ "$(ipc tabIndex)" == "1" ]] || fail "tabdrag: } left index=$(ipc tabIndex), not 1"
+    key "{" >/dev/null
+    settle
+    [[ "$(ipc tabLabels)" == "beta|alpha|gamma" ]] || fail "tabdrag: { labelled [$(ipc tabLabels)], not beta|alpha|gamma"
+    [[ "$(ipc tabIndex)" == "0" ]] || fail "tabdrag: { left index=$(ipc tabIndex), not 0"
+    # A click still selects after a drag, so the DragHandler did not eat the TapHandler.
+    click_tab 2
+    [[ "$(ipc tabIndex)" == "2" ]] || fail "tabdrag: clicking tab 2 after a drag did not select it"
+    printf 'TABDRAG labels=%s index=%s\n' "$(ipc tabLabels)" "$(ipc tabIndex)"
+    shot tabdrag-dropped
+    kill_flea
+}
+
+# A middle click on a directory opens it in a new tab, the mirror of ui/TabBar.qml closing one on the
+# same button, in each of the three views and on a Favorites row; tests/js/tap.js holds the decision
+# in ui/js/Tap.js and this presses it at the real window. The file row and the Trash row are the
+# negative controls: the same button on a row with no folder of its own must leave the count alone,
+# which is what says the count below moved because of the directory and not because of the button.
+wait_tabs() {
+    local want="$1"
+    for _attempt in $(seq 1 40); do
+        [[ "$(ipc tabCount)" == "$want" ]] && return
+        sleep 0.25
+    done
+    fail "${FUNCNAME[1]#case_}: $2 left $(ipc tabCount) tabs, not $want"
+}
+
+case_middleclick() {
+    local dir="$fixture_root/middleclick"
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/alpha" "$dir/fav"
+    : > "$dir/note.txt"
+    seed_ui_state "$fixture_root/middleclick-state" "$(printf '{"places":{"favourites":[{"label":"Fav","path":"%s/fav"}]}}' "$dir")"
+    launch "$dir"
+    # Measured row order: alpha, fav, note.txt.
+    wait_listing 3
+    [[ "$(ipc tabCount)" == "1" ]] || fail "middleclick: started with $(ipc tabCount) tabs, not 1"
+
+    echo "-- a file opens no tab --"
+    click_row 2 middle
+    settle
+    [[ "$(ipc tabCount)" == "1" ]] || fail "middleclick: a middle click on a file opened a tab"
+    [[ "$(ipc path)" == "$dir" ]] || fail "middleclick: a middle click on a file left for $(ipc path)"
+
+    echo "-- a directory opens in a new tab, in each view --"
+    local count=1 view
+    for view in list grid columns; do
+        [[ "$view" == list ]] || click_chrome "$view"
+        settle
+        [[ "$(ipc viewMode)" == "$view" ]] || fail "middleclick: the chrome did not switch to $view"
+        click_row 0 middle
+        count=$((count + 1))
+        wait_tabs "$count" "a middle click on alpha in $view"
+        wait_path "$dir/alpha"
+        printf 'MIDDLECLICK %s tabs=%s labels=%s\n' "$view" "$(ipc tabCount)" "$(ipc tabLabels)"
+        click_tab 0
+        wait_path "$dir"
+        # rowAt reads the list view's own delegate, which a tab switch back into grid or columns leaves
+        # unbuilt; the row the shown view draws is the one to wait on.
+        for _attempt in $(seq 1 300); do
+            [[ "$(ipc total)" == 3 && "$(ipc visibleRowName 0)" == alpha && "$(ipc listInFlight)" == false ]] && break
+            sleep 0.05
+        done
+        [[ "$(ipc visibleRowName 0)" == alpha ]] || fail "middleclick: $view never drew alpha at row 0 after the tab switch"
+    done
+    shot middleclick-views
+
+    echo "-- a Favorites row opens in a new tab, and the Trash row opens none --"
+    local trash_index fav_index
+    trash_index=$(ipc railEntries | jq -r 'map(.label) | index("Trash")')
+    [[ -n "$trash_index" && "$trash_index" != "null" ]] || fail "middleclick: the rail has no Trash row"
+    click_rail_row "$trash_index" middle
+    settle
+    [[ "$(ipc tabCount)" == "$count" ]] || fail "middleclick: a middle click on the Trash opened a tab"
+    fav_index=$(ipc railEntries | jq -r 'map(.label) | index("Fav")')
+    [[ -n "$fav_index" && "$fav_index" != "null" ]] \
+        || fail "middleclick: the seeded favourite is not on the rail, which carries $(ipc railEntries)"
+    click_rail_row "$fav_index" middle
+    wait_tabs "$((count + 1))" "a middle click on the Fav row"
+    wait_path "$dir/fav"
+    shot middleclick-rail
+    kill_flea
+}
+
+# One undo history for every Flea window: two live windows share one session journal, so the
+# newest entry from either is what Ctrl+Z undoes in whichever window it is pressed. The two
+# backends are separate processes sharing the suite scratch journal dir, and each window
+# is driven by its Hyprland address: --window flea refuses an ambiguous match, and qs ipc cannot
+# address one instance out of two, so every assertion past the second launch reads the filesystem
+# rather than the seam. Each directory holds one file, so the cursor can only ever be row 0.
+case_xwundo() {
+    local dir="$fixture_root/xwundo" dirB="$fixture_root/xwundo-b"
+    sandbox_scratch "$dir"
+    sandbox_scratch "$dirB"
+    printf 'note\n' > "$dir/note.txt"
+    printf 'boxed\n' > "$dirB/b.txt"
+    local blog="$run_root/flea-b.log"
+    : > "$blog"
+
+    kill_flea
+    cat "$flea_log" >> "$run_log" 2>/dev/null || true
+    : > "$flea_log"
+    # Both windows run under the session runtime dir; only their backends share the suite journal dir.
+    rm -f "$FLEA_UNDO_DIR/undo-journal" "$FLEA_UNDO_DIR/undo-journal.lock"
+    FLEA_UI="$flea_ui" FLEA_BIN="$flea_bin" \
+        setsid nohup "$flea_bin" --gui "$dir" >"$flea_log" 2>&1 </dev/null &
+    omarchy-drive wait window flea --timeout 15 >/dev/null
+    omarchy-drive focus flea >/dev/null
+    assert_window
+    wait_listing 1
+    local addrA
+    addrA=$(omarchy-drive windows --json | jq -r '.windows[] | select(.title == "Flea") | .address')
+    [[ -n "$addrA" ]] || fail "xwundo: window A never appeared"
+
+    FLEA_UI="$flea_ui" FLEA_BIN="$flea_bin" \
+        setsid nohup "$flea_bin" --gui "$dirB" >"$blog" 2>&1 </dev/null &
+    local addrB="" attempt
+    for attempt in $(seq 1 150); do
+        if [[ "$(omarchy-drive windows --json | jq '[.windows[] | select(.title == "Flea")] | length')" == "2" ]]; then
+            addrB=$(omarchy-drive windows --json | jq -r --arg a "$addrA" '.windows[] | select(.title == "Flea" and .address != $a) | .address')
+            [[ -n "$addrB" ]] && break
+        fi
+        sleep 0.1
+    done
+    [[ -n "$addrB" ]] || fail "xwundo: window B never appeared beside A"
+    omarchy-drive focus "$addrB" >/dev/null || fail "xwundo: window B never took focus"
+
+    echo "-- rename in A, Ctrl+Z in B restores the name --"
+    omarchy-drive focus "$addrA" >/dev/null || fail "xwundo: window A never took focus back"
+    omarchy-drive key --window "$addrA" r >/dev/null || fail "xwundo: the rename keypress failed"
+    settle
+    printf '%s' "note2" | omarchy-drive key --window "$addrA" - >/dev/null \
+        || fail "xwundo: typing the new name failed"
+    omarchy-drive key --window "$addrA" -k Return >/dev/null || fail "xwundo: the rename commit failed"
+    xwundo_wait_file "$dir/note2.txt" "xwundo: the rename never landed"
+    [[ ! -e "$dir/note.txt" ]] || fail "xwundo: the old name is still on disk"
+    omarchy-drive focus "$addrB" >/dev/null || fail "xwundo: window B never took focus back"
+    settle
+    xwundo_until 100 "$dir/note.txt" "xwundo: B never undid A's rename" \
+        omarchy-drive key --window "$addrB" z
+    [[ ! -e "$dir/note2.txt" ]] || fail "xwundo: the renamed file survived B's undo"
+    printf 'XWUNDO rename ok\n'
+
+    echo "-- move by paste in B, Ctrl+Z in A puts it back --"
+    omarchy-drive focus "$addrB" >/dev/null || fail "xwundo: window B lost focus before the cut"
+    omarchy-drive key --window "$addrB" x >/dev/null || fail "xwundo: the cut keypress failed"
+    settle
+    # The path bar opens with the current path selected, so typing replaces it whole.
+    omarchy-drive key --window "$addrB" : >/dev/null || fail "xwundo: the path bar never opened"
+    settle
+    printf '%s' "$dir" | omarchy-drive key --window "$addrB" - >/dev/null \
+        || fail "xwundo: typing the destination failed"
+    omarchy-drive key --window "$addrB" -k Return >/dev/null || fail "xwundo: the path bar commit failed"
+    sleep 1
+    omarchy-drive key --window "$addrB" p >/dev/null || fail "xwundo: the paste keypress failed"
+    xwundo_wait_file "$dir/b.txt" "xwundo: the paste never landed"
+    [[ ! -e "$dirB/b.txt" ]] || fail "xwundo: the source survived its own move"
+    omarchy-drive focus "$addrA" >/dev/null || fail "xwundo: window A never took focus back"
+    settle
+    xwundo_until 100 "$dirB/b.txt" "xwundo: A never undid B's move" \
+        omarchy-drive key --window "$addrA" z
+    [[ ! -e "$dir/b.txt" ]] || fail "xwundo: the moved file survived A's undo"
+    [[ "$(ls -A "$dir")" == "note.txt" ]] || fail "xwundo: A's directory holds more than the restored note"
+    printf 'XWUNDO move ok\n'
+
+    cat "$flea_log" >> "$run_log" 2>/dev/null || true
+    cat "$blog" >> "$run_log" 2>/dev/null || true
+    kill_flea
+}
+
+# A bounded filesystem poll: qs ipc cannot address one instance out of two.
+xwundo_wait_file() {
+    local file="$1" message="$2" i
+    for i in $(seq 1 100); do
+        [[ -e "$file" ]] && return 0
+        sleep 0.1
+    done
+    fail "$message"
+}
+
+# The polled file starts absent; the key is resent until it appears, which an empty journal tolerates.
+xwundo_until() {
+    local attempts="$1" file="$2" message="$3"; shift 3
+    local i
+    for i in $(seq 1 "$attempts"); do
+        [[ -e "$file" ]] && return 0
+        if (( i % 10 == 1 )); then "$@" >/dev/null || fail "$message (the keypress failed)"; fi
+        sleep 0.1
+    done
+    fail "$message"
+}
+
+# Ctrl+Return opens the cursor folder in a new tab, the keyboard twin of the
+# middle click above, in each of the three views; tests/js/tabs.js holds the
+# decision in ui/js/Tabs.js and this presses it at the real window. Grid sends
+# Ctrl+KP_Enter, the keypad Enter Keymap.js binds beside Return. A file row
+# is the negative control: the same chord on a row with no folder must leave
+# the count alone and say only a folder does, which is what says the count
+# below moved because of the directory and not because of the chord.
+case_opentab() {
+    local dir="$fixture_root/opentab"
+    sandbox_scratch "$dir"
+    mkdir -p "$dir/alpha"
+    : > "$dir/note.txt"
+    launch "$dir"
+    wait_listing 2
+    [[ "$(ipc tabCount)" == "1" ]] || fail "opentab: started with $(ipc tabCount) tabs, not 1"
+
+    echo "-- a file opens no tab --"
+    seek_row_named "note.txt" || fail "opentab: could not find note.txt"
+    key -M ctrl -k Return -m ctrl >/dev/null || fail "opentab: key Ctrl+Return was rejected"
+    wait_message "Only a folder opens in a new tab."
+    [[ "$(ipc tabCount)" == "1" ]] || fail "opentab: Ctrl+Return on a file opened a tab"
+    [[ "$(ipc path)" == "$dir" ]] || fail "opentab: Ctrl+Return on a file left for $(ipc path)"
+
+    echo "-- a directory opens in a new tab, in each view --"
+    local count=1 view chord
+    for view in list grid columns; do
+        [[ "$view" == list ]] || click_chrome "$view"
+        settle
+        [[ "$(ipc viewMode)" == "$view" ]] || fail "opentab: the chrome did not switch to $view"
+        seek_row_named "alpha" || fail "opentab: could not find alpha in $view"
+        local first_cursor
+        first_cursor=$(ipc cursor)
+        if [[ "$view" == grid ]]; then chord="KP_Enter"; else chord="Return"; fi
+        key -M ctrl -k "$chord" -m ctrl >/dev/null || fail "opentab: key Ctrl+$chord was rejected"
+        count=$((count + 1))
+        wait_tabs "$count" "Ctrl+$chord on alpha in $view"
+        wait_path "$dir/alpha"
+        printf 'OPENTAB %s tabs=%s labels=%s\n' "$view" "$(ipc tabCount)" "$(ipc tabLabels)"
+        click_tab 0
+        wait_path "$dir"
+        [[ "$(ipc cursor)" == "$first_cursor" ]] || fail "opentab: $view left the first tab's cursor at $(ipc cursor), not $first_cursor"
+        for _attempt in $(seq 1 300); do
+            [[ "$(ipc total)" == 2 && "$(ipc visibleRowName 0)" == alpha && "$(ipc listInFlight)" == false ]] && break
+            sleep 0.05
+        done
+        [[ "$(ipc visibleRowName 0)" == alpha ]] || fail "opentab: $view never drew alpha at row 0 after the tab switch"
+    done
+    shot opentab-views
     kill_flea
 }
 
@@ -5457,7 +7292,7 @@ case_renderer() {
     cp "$repo/tests/renderer-retry.qml" "$proberoot/probe.qml"
     : > "$probe"
     env RETRY_HELPER="$flea_ui/RendererRetry.qml" RETRY_BACKEND=vulkan \
-        FLEA_RENDERER_AUTOMATIC=1 FLEA_BIN="$dir/flea-stub" QT_QPA_PLATFORM=offscreen \
+        FLEA_RENDERER_AUTOMATIC=1 FLEA_BIN="$dir/flea-stub" QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=generic \
         timeout 20 qs -p "$proberoot/probe.qml" > "$probe" 2>&1
     local want='RETRY argv ["/usr/bin/env","QSG_RHI_BACKEND=opengl","'"$dir/flea-stub"'","--gui"]'
     grep -aqF "$want" "$probe" \
@@ -5717,10 +7552,11 @@ PYEOF
 # launch() so omarchy-drive itself is unaffected. Two rows, not one, in the fixture directory:
 # setCursor clamps cursorDown to the single valid index on a one-row listing, which reads exactly
 # like dead keyboard input and cost real time to tell apart from it while this case was written.
-# gio's own mount table is per-user, not per-HOME, so a real share left mounted from other work
-# would leak into networkEntries and fail the empty check no matter what fixture HOME says; this
-# gates the empty check on "gio mount -l" itself carrying no Mount() line, and fails loud with
-# that listing rather than guessing, since this case cannot unmount another task's own work.
+# gio's own mount table is per-user, not per-HOME, but Flea reads it only through "gio mount -li",
+# and the case's gio double answers that with nothing, so the operator's gio mounts never reach the
+# rail. The double does not cover /proc/self/mountinfo, which Flea also lists kernel NFS and CIFS
+# mounts from: such a mount outside home still shows, and case_network then fails naming it rather
+# than refusing. It waits for the rail to build from a listing and asserts the group is empty.
 # Issue 21, TomFaulkner: a saved network place can be edited from the rail, and the address that
 # finally mounts is written back over that place's own line rather than saved beside it.
 case_editplace() {
@@ -6044,10 +7880,30 @@ case_network() {
             || fail "network: $1 fixture was no longer waiting at its release barrier"
     }
 
-    local live_mounts
-    live_mounts=$(gio mount -l 2>/dev/null | grep -c '^Mount(') || true
-    [[ "$live_mounts" -eq 0 ]] \
-        || fail "network: $live_mounts real gio mount(s) already present, cannot assert an empty rail against ambient state: $(gio mount -l 2>/dev/null)"
+    # One ipc read into network_ipc_out; a failed read fails by name, so it is never mistaken for an empty answer.
+    local network_ipc_out=""
+    network_ipc() {
+        local status=0
+        network_ipc_out=$(ipc "$@" 2>&1) || status=$?
+        (( status == 0 )) || fail "network: ipc $1 failed with status $status: $network_ipc_out"
+    }
+    # networkBuilt (ui/Ipc.qml) is true only after the rail rebuilt from a gio listing and a mountinfo read, and an empty group is also what the unbuilt rail shows.
+    local network_built_attempts=400
+    network_wait_built() {
+        local attempt
+        for attempt in $(seq 1 "$network_built_attempts"); do
+            network_ipc networkBuilt
+            [[ "$network_ipc_out" == true ]] && return
+            sleep 0.05
+        done
+        fail "network: the rail never built its Network group from a mount listing (networkBuilt is $network_ipc_out)"
+    }
+    network_assert_empty() {
+        local what="$1"
+        network_ipc networkEntries
+        [[ -z "$network_ipc_out" ]] \
+            || fail "network: $what: the Network group shows [$network_ipc_out], not empty (the gio double isolates the gio mount table only; a kernel network mount Flea lists from /proc/self/mountinfo shows as its own row)"
+    }
 
     # This case proves form/bookmark behavior, not a network route; a bounded local gio double keeps
     # the newly functional Save action from dialing TEST-NET-2 or reopening on its later timeout.
@@ -6105,7 +7961,8 @@ EOS
     launch "$dir"
     export HOME="$real_home"
     wait_listing 3
-    [[ -z "$(ipc networkEntries)" ]] || fail "network: the group is not empty with no bookmarks, gio mounts or Dropbox"
+    network_wait_built
+    network_assert_empty "no bookmarks, no listed mounts and no Dropbox"
     shot network-empty
 
     # The current keymap binds "a" to add network from both listing and rail contexts.
@@ -6214,8 +8071,12 @@ EOS
     key -k Tab >/dev/null
     key -k Tab >/dev/null
     key -k Tab >/dev/null
+    settle
+    # networkFocus names fields only, so the chip's focus is shot, not asserted.
+    shot network-chip-focus
     key -k Return >/dev/null
     settle
+    shot network-chip-picked-focus
     [[ "$(ipc networkUri)" == "sftp://uu@hh/ss" ]] \
         || fail "network: Enter on a tabbed-to chip did not pick SFTP, URI is $(ipc networkUri)"
 
@@ -6808,7 +8669,7 @@ case_networkauth() {
             contextMenuEntries contextMenuGlyphs contextMenuSubmenuGlyphs contextMenuSubmenuEntries \
             renameEditorText railRenameEditorText previewKind previewState previewPdfZoom previewExpanded \
             previewPdfPage headerTitles sortMark previewSliderCentre headerLeft viewMode archiveFormats \
-            keymapSheetRows convertFormat previewFacts previewColumnState columnPlayCentre columnStripCentre \
+            keymapSheetRows keymapSheetResults convertFormat previewFacts previewColumnState columnPlayCentre columnStripCentre \
             tabLabels pathBarText pathCentre \
             headerTop networkProtocol networkPort networkUri networkPathLabel networkTitle networkFields \
             networkFocus networkHostPortWidths networkPasswordState networkNote networkAction networkStatus \
@@ -7853,6 +9714,132 @@ EOS
     sandbox_remove "$fixture_home"; sandbox_remove "$good_dir"
 }
 
+# A restored folder's listing deadline (ui/Pane.qml): a proxy holds the first list past the wait, then the rows land.
+case_hanglisting() {
+    local dir="$fixture_root/hanglisting"
+    sandbox_scratch "$dir"
+    : > "$dir/one.txt"
+    : > "$dir/two.txt"
+    cat > "$dir/flea-proxy" <<'EOS'
+#!/usr/bin/env python3
+# Forwards a backend session to the real binary, holding the first list past the deadline.
+import os, subprocess, sys, threading, time
+real = os.environ["FLEA_HANGLISTING_REAL"]
+if sys.argv[1:] != ["--backend"]:
+    os.execv(real, [real] + sys.argv[1:])
+delay = float(os.environ.get("FLEA_HANGLISTING_DELAY", "15"))
+marker = os.environ.get("FLEA_HANGLISTING_MARKER", "")
+child = subprocess.Popen([real, "--backend"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr, text=True, bufsize=1)
+def pump():
+    for line in child.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+threading.Thread(target=pump, daemon=True).start()
+held = False
+for line in sys.stdin:
+    if '"c":"list"' in line and not held:
+        held = True
+        if marker:
+            open(marker, "w").write("delayed\n")
+        time.sleep(delay)
+    try:
+        child.stdin.write(line)
+        child.stdin.flush()
+    except BrokenPipeError:
+        break
+EOS
+    chmod +x "$dir/flea-proxy"
+    local real_bin="$flea_bin"
+    export FLEA_HANGLISTING_REAL="$real_bin" FLEA_HANGLISTING_DELAY=15 FLEA_HANGLISTING_MARKER="$dir/delayed"
+    flea_bin="$dir/flea-proxy"
+    launch "$dir"
+    flea_bin="$real_bin"
+    wait_marker "$dir/delayed" "hanglisting: the proxy never saw the listing"
+    local seen="" deadline=$(( $(date +%s%3N) + 25000 ))
+    while (( $(date +%s%3N) < deadline )); do
+        seen=$(ipc stateMessage 2>/dev/null || true)
+        [[ "$seen" == "That folder is not responding." ]] && break
+        sleep 0.2
+    done
+    [[ "$seen" == "That folder is not responding." ]] \
+        || fail "hanglisting: the deadline never spoke, stateMessage is $seen"
+    [[ "$(ipc state)" == "waiting" ]] \
+        || fail "hanglisting: the pane is not waiting, state is $(ipc state)"
+    shot hanglisting-waiting
+    # flea-proxy and delayed are the stub entries beside the two files under test.
+    wait_listing 4
+    [[ "$(ipc path)" == "$dir" ]] || fail "hanglisting: the landed listing navigated to $(ipc path)"
+    [[ -z "$(ipc stateMessage)" ]] || fail "hanglisting: the landed listing kept $(ipc stateMessage)"
+
+    printf 'HANGLISTING deadline=ok rows-land-after=ok\n'
+    kill_flea
+}
+
+# The favourite inspector's deadline (ui/Favourites.qml): the first inspect hangs, 40 favourites let a rail scroll refire it, and a second inspect proves the guard cleared.
+case_hanginspect() {
+    local dir="$fixture_root/hanginspect"
+    sandbox_scratch "$dir"
+    : > "$dir/one.txt"
+    local favs="" answers="" n
+    for ((n = 0; n < 40; n++)); do
+        favs="$favs$(printf '{"label":"F%02d","path":"%s/f%02d"},' "$n" "$dir" "$n")"
+        answers="$answers$(printf '{"index":%d,"record":{"label":"F%02d","path":"%s/f%02d"},"error":""},' "$n" "$n" "$dir" "$n")"
+    done
+    cat > "$dir/bin-flea" <<EOS
+#!/bin/sh
+# The first inspect hangs past the guard; every later one answers every seeded favourite at once.
+if [ "\$1" = --favourites ] && [ "\${2#*inspect}" != "\$2" ]; then
+    printf 'inspect\n' >> "$dir/calls"
+    if [ ! -e "$dir/hung" ]; then : > "$dir/hung"; exec sleep 25; fi
+    printf '{"statuses":[${answers%,}]}'
+    exit 0
+fi
+exec "$flea_bin" "\$@"
+EOS
+    chmod +x "$dir/bin-flea"
+    local real_bin="$flea_bin" real_state="${XDG_STATE_HOME-}"
+    # The state sits beside the listing so the guard sees a marked parent.
+    seed_ui_state "$fixture_root/hanginspect-state" "{\"places\":{\"favourites\":[${favs%,}]}}"
+    flea_bin="$dir/bin-flea"
+    launch "$dir"
+    # bin-flea is the stub entry beside the one file under test.
+    wait_listing 2
+    wait_rail 40
+    # Warp onto a rail row, then one uinput pixel so Qt sees the pointer rest there, as case_scroll does.
+    # One second past the inspector's 10 s guard, FavGuard.INSPECT_WAIT_MS.
+    local past_guard_s=11 idx=0 count centre="" cx cy wx wy ww wh
+    count=$(ipc railCount)
+    while (( idx < count )); do
+        centre=$(ipc railRowCentre "$idx" 2>/dev/null || true)
+        [[ -n "$centre" ]] && break
+        idx=$((idx + 1))
+    done
+    [[ -n "$centre" ]] || fail "hanginspect: no rail row has a centre"
+    read -r cx cy <<< "$centre"
+    read -r wx wy ww wh < <(window_box) || fail "hanginspect: native window coordinates unavailable"
+    hypr_cursor_move "$((wx + cx))" "$((wy + cy))" || fail "hanginspect: pointer motion failed"
+    YDOTOOL_SOCKET="$XDG_RUNTIME_DIR/.ydotool_socket" ydotool mousemove -x 1 -y 0 >/dev/null 2>&1
+    settle
+    omarchy-drive scroll down 2 >/dev/null
+    wait_marker "$dir/hung" "hanginspect: the first inspect never started"
+    sleep "$past_guard_s"
+    omarchy-drive scroll up 2 >/dev/null
+    settle
+    local calls=0 deadline=$(( $(date +%s%3N) + 25000 ))
+    while (( $(date +%s%3N) < deadline )); do
+        calls=$(grep -c inspect "$dir/calls" 2>/dev/null || true)
+        [[ "$calls" -ge 2 ]] && break
+        sleep 0.5
+    done
+    [[ "$calls" -ge 2 ]] \
+        || fail "hanginspect: no second inspect after the deadline, calls is $calls"
+    flea_bin="$real_bin"
+    if [[ -n "$real_state" ]]; then export XDG_STATE_HOME="$real_state"; else unset XDG_STATE_HOME; fi
+
+    printf 'HANGINSPECT guard-clears=ok later-inspect-runs=ok\n'
+    kill_flea
+}
+
 # The rail's own context menu, which is the whole affordance: a release nobody can see is a release
 # nobody has. gio is stubbed so no real unmount ever runs, and the stub logs each call it receives.
 case_unmount() {
@@ -8516,6 +10503,582 @@ EOS
     sandbox_remove "$fixture_home"
 }
 
+# The expected rows sit on one disk and no other row of that disk is on the rail; both switch legs share this check.
+fsdevice_same_disk() {
+    local expected="$1" label dev pk disk="" others want
+    for label in $expected; do
+        dev=$(fs_row_device "$label")
+        [[ -n "$dev" && "$dev" != "null" ]] || fail "fsdevice: $label carries no device node"
+        # A whole-disk device (the isohybrid layout) has no parent, so it is its own disk.
+        pk=$(lsblk -dno PKNAME "$dev" 2>/dev/null) || fail "fsdevice: lsblk cannot name the parent of $dev"
+        if [[ -z "$pk" ]]; then pk=$(lsblk -dno KNAME "$dev" 2>/dev/null) || fail "fsdevice: lsblk cannot name the disk $dev"; fi
+        if [[ -z "$disk" ]]; then disk="$pk"; elif [[ "$disk" != "$pk" ]]; then fail "fsdevice: expected rows span two disks, $disk and $pk"; fi
+    done
+    # Both sides go through jq, so one byte order sorts them; a row with no device counts as none.
+    others=$(ipc railEntries | jq -r --arg d "/dev/$disk" '[.[] | select(.group == "device" and ((.device // "") | startswith($d))) | .label] | sort | join(",")')
+    want=$(printf '%s\n' "$expected" | jq -R . | jq -sr 'sort | join(",")')
+    [[ "$others" == "$want" ]] || fail "fsdevice: disk $disk carries [$others], not just [$want]"
+}
+
+# Show unmounted off keeps a stick's unmounted rows (Devices.js collectVolumes), and no hidden partition of its disk joins them.
+fsdevice_switch_off() {
+    local layout="$1" expected="$2" label end mounted
+    for label in $expected; do
+        # A row can be absent for a poll after the unmount, so read it until it reads false or the wait runs out.
+        end=$((SECONDS + unmount_wait_s)); mounted=""
+        while :; do
+            mounted=$(fs_row_mounted "$label")
+            [[ "$mounted" == "false" ]] && break
+            (( SECONDS < end )) || break
+            sleep 0.5
+        done
+        [[ "$mounted" == "false" ]] \
+            || fail "fsdevice: $label is not a rail row marked unmounted with showUnmounted off, last mounted value '$mounted', rows are: $(fs_rail_labels | tr '\n' ',')"
+    done
+    fsdevice_same_disk "$expected"
+    printf 'FSDEVICE %s switch-off=ok\n' "$layout"
+}
+
+# The native filesystem round (ROOTCAUSE.md section 5, piece 3), driven on minipc against the real
+# stick the controller prepared from tests/fs-stick-images.sh. Given FLEA_FS_LAYOUT (one of vfat,
+# exfat, ntfs3, espdata, espmsrswap, isohybrid) and FLEA_FS_EXPECTED (that layout's expected-rows
+# JSON array), it checks rail rows with the switch off and on, mount on activation, open and list
+# against ls, one copy in, trash and restore, thumbnails, an outside change, eject and the 15 s
+# stay-gone check. It never formats anything: writing the image to the stick is the controller's
+# step, and every destructive path below is the mounted volume (a disposable device) or this
+# case's own fixture dir. Reads go through the existing Ipc readers and real ls and gio; every
+# action is a key or a click.
+case_fsdevice() {
+    local layout="${FLEA_FS_LAYOUT:-}" expected_json="${FLEA_FS_EXPECTED:-}" trash_checks=0
+    case "$layout" in vfat|exfat|ntfs3|espdata|espmsrswap|isohybrid) ;;
+        *) fail "fsdevice: set FLEA_FS_LAYOUT to a stick layout, got '$layout'" ;;
+    esac
+    [[ -n "$expected_json" ]] || fail "fsdevice: set FLEA_FS_EXPECTED to the layout's expected-rows JSON array"
+    local expected
+    expected=$(jq -r '.[]' <<< "$expected_json" 2>/dev/null) || fail "fsdevice: FLEA_FS_EXPECTED is not a JSON array"
+    [[ -n "$expected" ]] || fail "fsdevice: FLEA_FS_EXPECTED names no rows"
+    local want1
+    want1=$(head -1 <<< "$expected")
+
+    local dir="$fixture_root/fsdevice"
+    sandbox_scratch "$dir"
+    head -c 1MiB /dev/zero > "$dir/copy-me.bin"
+    local fixture_home="$fixture_root/fsdevice-home"
+    fixture_home_make "$fixture_home"
+    local real_home="$HOME" real_state="${XDG_STATE_HOME-}"
+
+    # Sample deviceEntries line: FLEA-VFAT|device|volume|false
+    fs_rail_labels() { ipc deviceEntries | awk -F'|' '$2 == "device" { print $1 }'; }
+    # Sample railEntries device object: {"group":"device","label":"FLEA-VFAT","device":"/dev/sda1","path":"/run/media/gm/x","mounted":true}
+    fs_row_device() { ipc railEntries | jq -r --arg l "$1" '.[] | select(.group == "device" and .label == $l) | .device'; }
+    fs_row_path() { ipc railEntries | jq -r --arg l "$1" '.[] | select(.group == "device" and .label == $l) | .path'; }
+    fs_row_mounted() { ipc railEntries | jq -r --arg l "$1" '.[] | select(.group == "device" and .label == $l) | .mounted'; }
+    # The operation's own "... · z undoes" line is written after the drive confirms and the journal holds it; undo before that answers busy.
+    local confirm_wait_s=90
+    fs_wait_said() {
+        local want="$1" said_end=$((SECONDS + confirm_wait_s)) seen=""
+        while (( SECONDS < said_end )); do
+            seen=$(ipc lastMessage)
+            [[ "$seen" == "$want" ]] && return 0
+            sleep 0.2
+        done
+        fail "fsdevice: the status bar never said: $want, last message: $seen"
+    }
+
+    # Unmount any expected row first, so the switch-off leg below reads rows that stay marked unmounted.
+    seed_ui_state "$fixture_root/fsdevice-state-off" '{"places":{"showUnmounted":false}}'
+    export HOME="$fixture_home"
+    launch "$dir"
+    export HOME="$real_home"
+    wait_listing 1
+    local label mnt
+    for label in $expected; do
+        mnt=$(fs_row_path "$label")
+        if [[ -n "$mnt" && "$mnt" != "null" && "$mnt" != "" ]]; then
+            gio mount -u "$mnt" >/dev/null 2>&1 || fail "fsdevice: could not unmount $label at $mnt before the switch legs"
+        fi
+    done
+    # Two device poll periods (5 s each): the row clears on the next lsblk poll, not the unmount.
+    local unmount_wait_s=10 end
+    for label in $expected; do
+        end=$((SECONDS + unmount_wait_s))
+        while (( SECONDS < end )); do [[ "$(fs_row_mounted "$label")" != "true" ]] && break; sleep 0.5; done
+        [[ "$(fs_row_mounted "$label")" != "true" ]] || fail "fsdevice: $label is still mounted after the unmount"
+    done
+    fsdevice_switch_off "$layout" "$expected"
+    kill_flea
+
+    # Switch on: expected rows only, same-disk scope keeps the host ESP and swap out.
+    seed_ui_state "$fixture_root/fsdevice-state-on" '{"hidden":true,"places":{"showUnmounted":true}}'
+    export HOME="$fixture_home"
+    launch "$dir"
+    export HOME="$real_home"
+    wait_listing 1
+    local rows
+    for label in $expected; do
+        # The row arrives on the 5 s device poll after launch, so poll for it; the failure names the rows last seen.
+        end=$((SECONDS + unmount_wait_s))
+        rows=$(fs_rail_labels)
+        until grep -Fxq "$label" <<< "$rows"; do
+            (( SECONDS < end )) || fail "fsdevice: $label is no row with showUnmounted on, rows are: $(tr '\n' ',' <<< "$rows")"
+            sleep 0.5
+            rows=$(fs_rail_labels)
+        done
+    done
+    fsdevice_same_disk "$expected"
+    printf 'FSDEVICE %s switch-on rows=%s\n' "$layout" "$(tr '\n' ',' <<< "$expected" | sed 's/,$//')"
+
+    # Mount on activation: the row opens at its mountpoint with no false timer message.
+    seek_row_named copy-me.bin
+    key y >/dev/null
+    settle
+    click_rail_row "$(rail_row_of "$want1")" left
+    local end=$((SECONDS + 30))
+    mnt=""
+    while (( SECONDS < end )); do
+        [[ "$(fs_row_mounted "$want1")" == "true" ]] && mnt=$(fs_row_path "$want1") && [[ -n "$mnt" && "$mnt" != "null" ]] && break
+        sleep 0.2
+    done
+    [[ -n "$mnt" && "$mnt" != "null" ]] || fail "fsdevice: activating $want1 mounted nothing"
+    wait_path "$mnt"
+    # The window now shows the stick root, which holds the seeded tree, so the listing settles at ls -A's count.
+    local want_sorted="$dir/ls-want" want_n have_n vis cap i row built built_names
+    ls -A "$mnt" | sort > "$want_sorted"
+    want_n=$(wc -l < "$want_sorted" | tr -d ' ')
+    wait_listing "$want_n"
+    [[ "$(ipc lastMessage)" != *"mounted but never reported"* ]] \
+        || fail "fsdevice: the 15 s timer fired over a mount that landed: $(ipc lastMessage)"
+    [[ -f "$mnt/thumb.png" ]] || fail "fsdevice: $mnt holds no seeded tree, refusing to run against the wrong disk"
+    printf 'FSDEVICE %s mount=%s\n' "$layout" "$mnt"
+
+    # Open and list against ls: total matches ls -A, built first-screen rows are members.
+    have_n=$(ipc total)
+    [[ "$have_n" == "$want_n" ]] || fail "fsdevice: the listing holds $have_n rows, ls -A holds $want_n"
+    vis=$(ipc visibleRows)
+    [[ "$vis" =~ ^[1-9][0-9]*$ ]] || fail "fsdevice: no visible row count, got [$vis]"
+    cap=$vis; (( have_n < cap )) && cap=$have_n
+    built=0
+    built_names="$dir/built-names"
+    : > "$built_names"
+    for (( i = 0; i < cap; i++ )); do
+        row=$(ipc rowAt "$i")
+        [[ "$row" == "loading" ]] && continue
+        built=$((built + 1))
+        printf '%s\n' "${row%%|*}" >> "$built_names"
+        grep -Fxq "${row%%|*}" "$want_sorted" || fail "fsdevice: row ${row%%|*} is no ls -A member"
+    done
+    # A repeated built name means one ls row is drawn twice and another never answers.
+    [[ -z "$(sort "$built_names" | uniq -d)" ]] || fail "fsdevice: a built row name repeats: $(sort "$built_names" | uniq -d | tr '\n' ',')"
+    (( built >= (have_n < vis ? have_n : vis) )) || fail "fsdevice: only $built built rows answer of $vis on screen"
+    printf 'FSDEVICE %s list=%s total and first screen match ls\n' "$layout" "$have_n"
+
+    if [[ "$layout" == "isohybrid" ]]; then
+        # iso9660 is read-only: the paste is refused and no row offers Trash.
+        key p >/dev/null
+        end=$((SECONDS + 10))
+        while (( SECONDS < end )); do [[ "$(ipc lastMessage)" == *"cannot be written"* ]] && break; sleep 0.5; done
+        [[ "$(ipc lastMessage)" == *"cannot be written"* ]] || fail "fsdevice: the read-only paste said $(ipc lastMessage)"
+        [[ ! -e "$mnt/copy-me.bin" ]] || fail "fsdevice: the read-only paste landed on $mnt"
+        # The refusal is an error that stands until Escape, and a standing error hides every later notice, the eject verdict included.
+        key -k Escape >/dev/null
+        end=$((SECONDS + 10))
+        while (( SECONDS < end )); do [[ "$(ipc statusError)" == "false" ]] && break; sleep 0.2; done
+        [[ "$(ipc statusError)" == "false" ]] || fail "fsdevice: Escape left the refusal standing: $(ipc lastMessage)"
+        click_row 0 right
+        settle
+        [[ "$(ipc contextMenuEntries)" != *"Move to Trash"* ]] || fail "fsdevice: a read-only volume offers Move to Trash"
+        key -k Escape >/dev/null
+        settle
+        printf 'FSDEVICE %s read-only paste-refused trash-absent=ok\n' "$layout"
+    else
+    # One copy in through the clipboard, verified by bytes, then undone.
+    key p >/dev/null
+    fs_wait_said "Copied 1 item · z undoes"
+    [[ -f "$mnt/copy-me.bin" ]] || fail "fsdevice: the paste never landed on $mnt"
+    cmp -s "$dir/copy-me.bin" "$mnt/copy-me.bin" || fail "fsdevice: the pasted bytes differ"
+    key z >/dev/null
+    end=$((SECONDS + 20))
+    while (( SECONDS < end )); do [[ ! -e "$mnt/copy-me.bin" ]] && break; sleep 0.2; done
+    [[ ! -e "$mnt/copy-me.bin" ]] || fail "fsdevice: undo left the pasted copy behind, last message: $(ipc lastMessage)"
+    printf 'FSDEVICE %s copy-in undo=ok\n' "$layout"
+
+    # Trash through dd, proving the volume's own trash dir, then restore from the Trash view.
+    local before
+    before=$(ipc total)
+    printf 'trash me' > "$mnt/trash-me.txt"
+    # The watch re-read moves total by one; seeking then names the row with bounded IPC.
+    end=$((SECONDS + 30))
+    while (( SECONDS < end )); do [[ "$(ipc total)" != "$before" ]] && break; sleep 0.5; done
+    [[ "$(ipc total)" != "$before" ]] || fail "fsdevice: the open listing never followed the outside change"
+    seek_row_named trash-me.txt
+    local trash_before trash_uid trash_idx
+    trash_before=$(ipc trashState | jq -r '.count')
+    key d >/dev/null
+    key d >/dev/null
+    fs_wait_said "Moved 1 item to Trash · z undoes"
+    [[ ! -e "$mnt/trash-me.txt" ]] || fail "fsdevice: dd left trash-me.txt on the volume"
+    trash_uid=$(id -u)
+    [[ -d "$mnt/.Trash-$trash_uid" ]] || fail "fsdevice: no .Trash-$trash_uid at the volume root"
+    trash_wait ".count == $((trash_before + 1))" "trash count moves by one"
+    click_rail_row "$(rail_row_of Trash)" left
+    # The view is opened before its list reply, so wait for the row itself with the view idle, which restore needs.
+    trash_wait ".opened == true and .busy == false and any(.rows[]?; .original == $(jq -Rn --arg o "$mnt/trash-me.txt" '$o'))" "the Trash view lists trash-me.txt"
+    trash_idx=$(ipc trashState | jq -r --arg o "$mnt/trash-me.txt" '.rows | to_entries[] | select(.value.original == $o) | .key' | head -1)
+    [[ -n "$trash_idx" && "$trash_idx" != "null" ]] || fail "fsdevice: trash-me.txt is no row in the Trash view"
+    trash_click trashRowCentre "$trash_idx" right
+    settle
+    [[ "$(ipc contextMenuEntries)" == *"Restore"* ]] || fail "fsdevice: trash-me.txt offers no Restore"
+    menu_seek Restore
+    key -k Return >/dev/null
+    # Restore runs async, so wait for the count to land back before reading the file.
+    trash_wait '.busy == false and .count == '"$trash_before"
+    end=$((SECONDS + 20))
+    while (( SECONDS < end )); do [[ "$(cat "$mnt/trash-me.txt" 2>/dev/null)" == "trash me" ]] && break; sleep 0.2; done
+    [[ "$(cat "$mnt/trash-me.txt" 2>/dev/null)" == "trash me" ]] || fail "fsdevice: Restore did not bring trash-me.txt back"
+    printf 'FSDEVICE %s trash restore=ok\n' "$layout"
+    fi
+
+    # Back on the volume: thumbnails, the filesystem name, and an outside change.
+    click_rail_row "$(rail_row_of "$want1")" left
+    wait_path "$mnt"
+    seek_row_named thumb.png
+    end=$((SECONDS + 20))
+    while (( SECONDS < end )); do [[ "$(ipc rowThumbReady "$(ipc cursor)")" == "true" ]] && break; sleep 0.5; done
+    [[ "$(ipc rowThumbReady "$(ipc cursor)")" == "true" ]] || fail "fsdevice: thumb.png never decoded a thumbnail"
+    local fsname
+    fsname=$(ipc statusFooterState | jq -r '.filesystem')
+    [[ -n "$fsname" && "$fsname" != 0x* ]] || fail "fsdevice: the status bar names no filesystem, got '$fsname'"
+    if [[ "$layout" != "isohybrid" ]]; then
+    before=$(ipc total)
+    printf 'touch' > "$mnt/from-shell.txt"
+    end=$((SECONDS + 30))
+    while (( SECONDS < end )); do [[ "$(ipc total)" != "$before" ]] && break; sleep 0.5; done
+    [[ "$(ipc total)" != "$before" ]] || fail "fsdevice: the open listing never followed the outside change"
+    seek_row_named from-shell.txt
+    rm -f "$mnt/from-shell.txt"
+    fi
+    printf 'FSDEVICE %s thumbs fs=%s watch=ok\n' "$layout" "$fsname"
+
+    # Eject from inside the volume, then the row stays gone for 15 s: the #232 remount check.
+    key -M ctrl -k e -m ctrl >/dev/null
+    wait_message "Ejected $want1, it is safe to unplug."
+    end=$((SECONDS + 10))
+    while (( SECONDS < end )); do fs_rail_labels | grep -Fxq "$want1" || break; sleep 0.5; done
+    fs_rail_labels | grep -Fxq "$want1" && fail "fsdevice: $want1 stayed on the rail after eject"
+    [[ "$(ipc path)" != "$mnt"* ]] || fail "fsdevice: the pane is still inside the ejected volume"
+    sleep 15
+    fs_rail_labels | grep -Fxq "$want1" && fail "fsdevice: $want1 came back inside 15 s, something remounted it"
+    printf 'FSDEVICE %s eject stay-gone=ok\n' "$layout"
+    kill_flea
+    if [[ -n "$real_state" ]]; then export XDG_STATE_HOME="$real_state"; else unset XDG_STATE_HOME; fi
+    sandbox_remove "$fixture_home"
+}
+
+# A rail row by its label, so the poweroff case follows volumes across rail rebuilds.
+poweroff_row() {
+    local want="$1" n i
+    n=$(ipc railCount)
+    for ((i = 0; i < n; i++)); do
+        if [[ "$(ipc railLabel "$i")" == "$want" ]]; then printf '%s' "$i"; return 0; fi
+    done
+    fail "poweroff: no rail row labelled $want, labels are $(ipc railLabels)"
+}
+
+# The USB power-off chain (ui/DeviceMounts.qml): a hung unmount leg ends at the deadline with its
+# own sentence, a user unmount mid-chain is refused, slow legs that still finish beat the old
+# whole-chain bound, and later operations are answered with their own verdicts. An rm=false
+# tran=usb disk with two volumes routes Eject to powerOff, the way a USB bridge reports itself.
+case_poweroff() {
+    local dir="$fixture_root/poweroff"
+    sandbox_scratch "$dir"
+    # The fixture disk name must not exist on the host, or the eject chain watches a real disk.
+    [[ ! -e /sys/block/sdflea ]] || fail "poweroff: fixture disk sdflea exists on this host"
+    mkdir -p "$dir/bin" "$dir/mnt/DATA1" "$dir/mnt/DATA2"
+    : > "$dir/0-one.txt"
+
+    local gio_log="$dir/gio.log"
+    : > "$gio_log"
+    cat > "$dir/bin/lsblk" <<EOS
+#!/bin/sh
+mp1="$dir/mnt/DATA1"
+mp2="$dir/mnt/DATA2"
+[ -f "$dir/un-sdflea1" ] && mp1=""
+[ -f "$dir/un-sdflea2" ] && mp2=""
+if [ -n "\$mp1" ]; then j1="\"\$mp1\""; else j1=null; fi
+if [ -n "\$mp2" ]; then j2="\"\$mp2\""; else j2=null; fi
+cat <<JSON
+{"blockdevices":[
+{"name":"nvme0n1","path":"/dev/nvme0n1","label":null,"mountpoints":[null],"rm":false,"size":"238.5G","type":"disk","model":"KBG40ZNS256G",
+"children":[{"name":"nvme0n1p1","path":"/dev/nvme0n1p1","label":null,"mountpoints":["/"],"rm":false,"size":"238.5G","type":"part","model":null}]},
+{"name":"sdflea","path":"/dev/sdflea","label":null,"mountpoints":[null],"rm":false,"tran":"usb","size":"1000.2G","type":"disk","model":"USB HDD",
+"children":[{"name":"sdflea1","path":"/dev/sdflea1","label":"DATA1","mountpoints":[\$j1],"rm":false,"size":"500.1G","type":"part","model":null,"fstype":"ext4"},
+{"name":"sdflea2","path":"/dev/sdflea2","label":"DATA2","mountpoints":[\$j2],"rm":false,"size":"500.1G","type":"part","model":null,"fstype":"ext4"}]}]}
+JSON
+EOS
+    chmod +x "$dir/bin/lsblk"
+    # A hung leg outlasts the deadline; slow legs pass the old whole-chain bound per leg.
+    cat > "$dir/bin/gio" <<EOS
+#!/bin/sh
+printf '%s\n' "\$*" >> "$gio_log"
+case "\$1 \$2" in
+"mount -u")
+  if [ -f "$dir/hang-unmount" ] && [ "\$3" = "$dir/mnt/DATA1" ]; then sleep 30; fi
+  if [ -f "$dir/slowlegs" ]; then sleep 8; fi
+  case "\$3" in
+  "$dir/mnt/DATA1") : > "$dir/un-sdflea1" ;;
+  "$dir/mnt/DATA2") : > "$dir/un-sdflea2" ;;
+  esac
+  exit 0 ;;
+"mount -d")
+  case "\$3" in
+  /dev/sdflea1) rm -f "$dir/un-sdflea1" ;;
+  /dev/sdflea2) rm -f "$dir/un-sdflea2" ;;
+  esac
+  exit 0 ;;
+*) exit 0 ;;
+esac
+EOS
+    chmod +x "$dir/bin/gio"
+
+    local fixture_home="$fixture_root/poweroff-home"
+    fixture_home_make "$fixture_home"
+    local real_home="$HOME" saved_path="$PATH" real_state="${XDG_STATE_HOME-}"
+    seed_ui_state "$fixture_root/poweroff-state" '{"places":{"showUnmounted":true}}'
+    export PATH="$dir/bin:$PATH"
+    export HOME="$fixture_home"
+    launch "$dir"
+    export HOME="$real_home"
+    export PATH="$saved_path"
+    # bin/, mnt/ and gio.log are the stub entries beside the one file under test.
+    wait_listing 4
+    for _attempt in $(seq 1 100); do
+        [[ "$(ipc deviceEntries)" == *"DATA1|device|volume|true"* ]] \
+            && [[ "$(ipc deviceEntries)" == *"DATA2|device|volume|true"* ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc deviceEntries)" == *"DATA1|device|volume|true"* ]] \
+        || fail "poweroff: DATA1 never appeared live, got $(ipc deviceEntries)"
+    [[ "$(ipc deviceEntries)" == *"DATA2|device|volume|true"* ]] \
+        || fail "poweroff: DATA2 never appeared live, got $(ipc deviceEntries)"
+
+    # The hung leg: the first unmount never answers, so the chain deadline ends it.
+    : > "$dir/hang-unmount"
+    click_rail_row "$(poweroff_row DATA1)" right
+    settle
+    menu_seek Eject
+    key -k Return >/dev/null
+    sleep 3
+    # A user unmount of the other volume mid-chain is refused and never reaches gio.
+    local unmounts_before unmounts_after
+    unmounts_before=$(grep -c "^mount -u $dir/mnt/DATA2\$" "$gio_log" || true)
+    click_rail_row "$(poweroff_row DATA2)" right
+    settle
+    menu_seek Unmount
+    key -k Return >/dev/null
+    wait_message "Still ejecting DATA1; wait for its result."
+    unmounts_after=$(grep -c "^mount -u $dir/mnt/DATA2\$" "$gio_log" || true)
+    [[ "$unmounts_after" == "$unmounts_before" ]] \
+        || fail "poweroff: the refused unmount still ran gio mount -u on DATA2"
+    # The deadline ends the hung leg with its own sentence, and the volume stays mounted.
+    wait_message "DATA1 did not finish ejecting and is still mounted."
+    [[ "$(ipc deviceEntries)" == *"DATA1|device|volume|true"* ]] \
+        || fail "poweroff: the hung volume left the rail: $(ipc deviceEntries)"
+    rm -f "$dir/hang-unmount"
+
+    # Two slow legs finish past the old whole-chain bound and earn the safe sentence.
+    : > "$dir/slowlegs"
+    click_rail_row "$(poweroff_row DATA1)" right
+    settle
+    menu_seek Eject
+    key -k Return >/dev/null
+    # A slow-legs failure names its guard: the rail plus the eject chain's own state.
+    wait_message "Ejected DATA1, it is safe to unplug." 'printf "rail: %s chain: %s" "$(ipc deviceEntries)" "$(ipc deviceEjectState)"'
+    rm -f "$dir/slowlegs"
+
+    # A later mount and unmount are answered with their own verdicts, not the chain's.
+    click_rail_row "$(poweroff_row DATA2)" right
+    settle
+    [[ "$(ipc contextMenuEntries)" == "Mount" ]] \
+        || fail "poweroff: the unmounted volume offers $(ipc contextMenuEntries), not Mount"
+    menu_seek Mount
+    key -k Return >/dev/null
+    for _attempt in $(seq 1 100); do
+        [[ "$(ipc deviceEntries)" == *"DATA2|device|volume|true"* ]] && break
+        sleep 0.1
+    done
+    [[ "$(ipc deviceEntries)" == *"DATA2|device|volume|true"* ]] \
+        || fail "poweroff: DATA2 never remounted: $(ipc deviceEntries)"
+    click_rail_row "$(poweroff_row DATA2)" right
+    settle
+    menu_seek Unmount
+    key -k Return >/dev/null
+    for _attempt in $(seq 1 100); do
+        [[ "$(ipc deviceEntries)" == *"DATA2|device|volume|false"* ]] && break
+        sleep 0.1
+    done
+    [[ "$(ipc deviceEntries)" == *"DATA2|device|volume|false"* ]] \
+        || fail "poweroff: the later unmount never landed: $(ipc deviceEntries)"
+    if grep -qE '(^| )(-f|--force)( |$)' "$gio_log"; then
+        fail "poweroff: a forced unmount reached gio: $(cat "$gio_log")"
+    fi
+
+    printf 'POWEROFF deadline=ok still-ejecting-refused=ok slow-legs-safe=ok later-mount=ok later-unmount=ok no-force=ok\n'
+    kill_flea
+    if [[ -n "$real_state" ]]; then export XDG_STATE_HOME="$real_state"; else unset XDG_STATE_HOME; fi
+    sandbox_remove "$fixture_home"
+}
+
+# Sidebar040: the rail's Recent row lists the desktop's history newest first, with the Used
+# mark over it, and Esc hands back the folder it was opened over. The history is a fixture
+# XBEL under a fixture home, so no other application's bookmarks can move the rows.
+case_recent() {
+    local dir="$fixture_root/recent"
+    sandbox_scratch "$dir"
+    printf 'first file\n' > "$dir/alpha.txt"
+    printf 'second file\n' > "$dir/beta.txt"
+    local deep="$dir/a-very-long-parent-directory/another-long-parent-directory/deeply-nested-recent-location"
+    mkdir -p "$deep"
+    printf 'third file\n' > "$deep/gamma.txt"
+
+    local fixture_home="$fixture_root/recent-home"
+    fixture_home_make "$fixture_home"
+    mkdir -p "$fixture_home/.local/share"
+    cat > "$fixture_home/.local/share/recently-used.xbel" <<EOS
+<?xml version="1.0" encoding="UTF-8"?>
+<xbel version="1.0">
+  <bookmark href="file://$deep/gamma.txt" added="2026-09-25T10:00:00Z" modified="2026-09-25T10:00:00Z" visited="2026-09-25T10:00:00Z"/>
+  <bookmark href="file://$dir/beta.txt" added="2026-09-26T10:00:00Z" modified="2026-09-26T10:00:00Z" visited="2026-09-26T10:00:00Z"/>
+  <bookmark href="file://$dir/alpha.txt" added="2026-09-26T09:00:00Z" modified="2026-09-26T09:00:00Z" visited="2026-09-27T10:00:00Z"/>
+</xbel>
+EOS
+    # Only visited favors alpha: beta leads in file order, added, modified and mtime alike.
+    touch -d '2026-09-26 10:00:00' "$dir/beta.txt"
+    touch -d '2026-09-26 09:00:00' "$dir/alpha.txt"
+    touch -d '2026-09-25 10:00:00' "$deep/gamma.txt"
+
+    local state="$fixture_root/recent-state"
+    seed_ui_state "$state" '{"places":{"showRecent":true}}'
+    local real_home="$HOME"
+    export HOME="$fixture_home"
+    launch "$dir"
+    export HOME="$real_home"
+    wait_listing 3
+    local labels=
+    for _attempt in $(seq 1 100); do
+        labels=$(ipc railLabels 2>/dev/null || printf unavailable)
+        if [[ "|$labels|" == *"|Recent|"* ]]; then break; fi
+        sleep 0.05
+    done
+    [[ "|$labels|" == *"|Recent|"* ]] \
+        || fail "recent: the rail has no Recent row: $labels"
+
+    key -k Tab >/dev/null
+    settle
+    [[ "$(ipc focusView)" == "rail" ]] || fail "recent: Tab did not reach the rail"
+    key j >/dev/null
+    settle
+    [[ "$(ipc railCursor)" == "1" ]] || fail "recent: Recent is not the second rail row"
+    key -k Return >/dev/null
+    local mode= total=
+    for _attempt in $(seq 1 200); do
+        mode=$(ipc recentMode 2>/dev/null || printf unavailable)
+        total=$(ipc total 2>/dev/null || printf unavailable)
+        if [[ "$mode" == "results" && "$total" == "3" && "$(ipc listInFlight 2>/dev/null)" == "false" ]]; then break; fi
+        sleep 0.05
+    done
+    [[ "$mode" == "results" ]] || fail "recent: Enter on the rail row never listed the history"
+    [[ "$total" == "3" ]] || fail "recent: the history listed $total rows, not 3"
+    [[ "$(ipc headerTitles)" == "Name|Location|Size|Used" ]] \
+        || fail "recent: the header does not read Name|Location|Size|Used: $(ipc headerTitles)"
+    [[ "$(ipc rowAt 0)" == *"/alpha.txt|file|"* ]] \
+        || fail "recent: the newest visited bookmark is not first: $(ipc rowAt 0)"
+    [[ "$(ipc rowAt 1)" == *"/beta.txt|file|"* ]] \
+        || fail "recent: the older visited bookmark is not second: $(ipc rowAt 1)"
+    [[ "$(ipc rowAt 2)" == *"${deep#/}/gamma.txt|file|"* ]] \
+        || fail "recent: the oldest visited bookmark with a deep location is not third: $(ipc rowAt 2)"
+    shot recent-listing
+
+    key -k Escape >/dev/null
+    wait_path "$dir"
+    [[ "$(ipc recentMode)" == "" ]] || fail "recent: Esc left the mode standing"
+
+    printf 'RECENT listing=newest-first used-mark=ok esc-returns=ok\n'
+    kill_flea
+    sandbox_remove "$fixture_home"
+}
+
+# Issue #170: the menu's Rename opens the editor at once instead of queueing
+# an activate behind the cold Open-with catalogue. The stub's info and mime
+# legs block until "$dir/release" exists, so the catalogue never answers
+# while the editor must already be live; the rename then commits first try
+# with an outside create landing mid-edit.
+case_renamefirst() {
+    local dir="$fixture_root/renamefirst"
+    sandbox_scratch "$dir"
+    : > "$dir/a-first.txt"
+    local bindir="$fixture_root/renamefirst-bin"
+    sandbox_scratch "$bindir"
+    cat > "$bindir/gio" <<EOS
+#!/bin/sh
+# The catalogue legs block until the release exists; every other leg answers at once.
+if [ "\$1" = info ] || [ "\$1" = mime ]; then
+  while [ ! -e "$dir/release" ]; do sleep 0.05; done
+fi
+if [ "\$1 \$2" = "mount -li" ]; then exit 0; fi
+exit 0
+EOS
+    chmod +x "$bindir/gio"
+
+    local fixture_home="$fixture_root/renamefirst-home"
+    fixture_home_make "$fixture_home"
+    local state="$fixture_root/renamefirst-state"
+    seed_ui_state "$state" '{"view":"list","keys":"default"}'
+    local real_home="$HOME" saved_path="$PATH"
+    export PATH="$bindir:$PATH"
+    export HOME="$fixture_home"
+    launch "$dir"
+    export HOME="$real_home"
+    export PATH="$saved_path"
+    wait_listing 1
+
+    click_row 0 right
+    settle
+    [[ "$(ipc contextMenuVisible)" == "true" ]] || fail "renamefirst: right click opened no menu"
+    # The snapshot answers at once; only the catalogue behind it blocks.
+    local attempt
+    for attempt in $(seq 1 100); do
+        [[ "$(ipc menuState | jq -r '.snapshotReady')" == "true" ]] && break
+        sleep 0.05
+    done
+    [[ "$(ipc menuState | jq -r '.snapshotReady')" == "true" ]] \
+        || fail "renamefirst: the menu never snapshotted"
+    local rename_index rx ry wx wy ww wh
+    rename_index=$(menu_row_index "Rename") || fail "renamefirst: the open menu has no Rename row"
+    read -r rx ry <<< "$(ipc contextMenuRowCentre "$rename_index")"
+    [[ -n "$ry" ]] || fail "renamefirst: the Rename row has no on-screen centre"
+    read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
+    omarchy-drive click "$((wx + rx))" "$((wy + ry))" left >/dev/null
+    # The editor opens at once, ahead of the blocked catalogue.
+    local opened=""
+    for attempt in $(seq 1 100); do
+        if [[ "$(ipc renamingIndex)" == "0" && "$(ipc renameEditorLive)" == "true" ]]; then opened="yes"; break; fi
+        sleep 0.05
+    done
+    [[ "$opened" == "yes" ]] \
+        || fail "renamefirst: Rename did not open the editor, renamingIndex is $(ipc renamingIndex)"
+    shot renamefirst-editing
+
+    # An outside create lands while the field is open; the held watch keeps the draft.
+    : > "$dir/x"
+    key "a-renamed" >/dev/null
+    key -k Return >/dev/null
+    settle
+    [[ -e "$dir/a-renamed.txt" ]] || fail "renamefirst: the commit did not land first try"
+    [[ ! -e "$dir/a-first.txt" ]] || fail "renamefirst: the old name is still on disk"
+    : > "$dir/release"
+    shot renamefirst-renamed
+}
+
 # Task 19: F2 renames a Network rail entry in place; "NAS" is bookmark-only, "isos" is mount-only.
 case_rename() {
     local dir="$fixture_root/rename"
@@ -8733,10 +11296,10 @@ EOS
     before=$(providers_calls omarchy-tailscale-send)
     key -k Return >/dev/null || fail 'taildrop: second-peer Enter failed'
     providers_call omarchy-tailscale-send "$(jq -cn --arg path "$menu_dir/b-cursor.txt" '["fixture.invalid",$path]')" "$before"
-    menus_expect menuState '(.opened | not) and (.submenu | not)' 'dispatch closes both native menus'
-    providers_expect '.listFocus' 'dispatch restores listing focus'
-    menus_message 'Sending b-cursor.txt to Bravo.' 'dispatch names the chosen peer and exact cursor file'
-    menus_equal 'dispatch preserves source bytes' 'list/b-cursor.txt original' "$(cat "$menu_dir/b-cursor.txt")"
+    menus_expect menuState '(.opened | not) and (.submenu | not)' 'the send closes both native menus'
+    providers_expect '.listFocus' 'the send restores listing focus'
+    menus_message 'Sending b-cursor.txt to Bravo.' 'the send names the chosen peer and exact cursor file'
+    menus_equal 'the send preserves source bytes' 'list/b-cursor.txt original' "$(cat "$menu_dir/b-cursor.txt")"
     menus_shot taildrop-sent
 
     providers_mode tailscale ready '{"BackendState":"NeedsLogin","Peer":{}}'
@@ -8929,17 +11492,18 @@ case_dual() {
     printf 'DUAL navigation=ok focus=ok watch=ok restart=ok crumb=ok before=%s\n' "$before"
 }
 
+# The row read is `at` (0 unless a kept cursor scrolled the list), where a row without a delegate reads "loading".
 dual_sort_wait() {
-    local mark="$1" first="$2" deadline=$((SECONDS + 15))
+    local mark="$1" first="$2" at="${3:-0}" deadline=$((SECONDS + 15))
     while (( SECONDS < deadline )); do
-        if [[ "$(ipc sortMark)" == "$mark" && "$(ipc rowAt 0)" == "$first|"* && "$(ipc listInFlight)" == false ]]; then
+        if [[ "$(ipc sortMark)" == "$mark" && "$(ipc rowAt "$at")" == "$first|"* && "$(ipc listInFlight)" == false ]]; then
             menus_checks=$((menus_checks + 1))
-            printf 'DUAL_SORT_CHECK %s mark=%s first=%s\n' "$menus_checks" "$mark" "$first"
+            printf 'DUAL_SORT_CHECK %s mark=%s first=%s at=%s\n' "$menus_checks" "$mark" "$first" "$at"
             return
         fi
         sleep 0.05
     done
-    fail "dualsort: expected $mark/$first, observed $(ipc sortMark)/$(ipc rowAt 0)"
+    fail "dualsort: expected $mark/$first at $at, observed $(ipc sortMark)/$(ipc rowAt "$at") inflight=$(ipc listInFlight) contentY=$(ipc listContentY) dual=$(ipc dualState)"
 }
 
 dual_sort_header() {
@@ -8952,7 +11516,7 @@ dual_sort_header() {
 
 case_dualsort() {
     local dir="$fixture_root/dual-sort" state="$fixture_root/dual-sort-state" menus_checks=0
-    local side index name left right left_scroll right_scroll mode list_requests date_epoch=1700000000
+    local side index name left right left_scroll right_scroll mode list_requests kept_name kept_at date_epoch=1700000000
     sandbox_scratch "$dir"
     sandbox_scratch "$state"
     for side in left right; do
@@ -8963,8 +11527,9 @@ case_dualsort() {
             touch -d "@$((date_epoch + index))" "$dir/$side/$name" || fail 'dualsort: private file date failed'
         done
     done
+    # rememberSort false keeps the live default here, so this stays about dual-pane independence.
     seed_ui_state "$state" "$(jq -cn --arg left "$dir/left" --arg right "$dir/right" \
-        '{view:"dual",keys:"default",sort:{key:"name",reverse:false},dual:{paths:[$left,$right],focus:0}}')"
+        '{view:"dual",keys:"default",rememberSort:false,sort:{key:"name",reverse:false},dual:{paths:[$left,$right],focus:0}}')"
     launch "$dir/left"
     menus_expect dualState '.active and .focused == 0 and all(.panes[]; .total == 80 and (.loading | not))' 'both dual listings start independently'
     dual_sort_wait name:asc file-00.txt
@@ -9051,7 +11616,10 @@ case_dualsort() {
         list_requests=$(ipc dualState | jq -er '.panes[1].listRequests')
         key -k Escape >/dev/null
         menus_expect keyDeliveryState '.searchMode == ""' "Escape closes dual Search $mode"
-        dual_sort_wait mtime:asc file-00.txt
+        # Typing relists via the preferences timer, which keeps the cursor row by name and scrolls to it; results relist from row 0.
+        if [[ "$mode" == typing ]]; then kept_name=file-79.txt kept_at=79; else kept_name=file-00.txt kept_at=0; fi
+        dual_sort_wait mtime:asc "$kept_name" "$kept_at"
+        menus_expect dualState ".panes[1].cursor == $kept_at" "dual Search $mode leaves the cursor on $kept_name"
         menus_expect dualState ".panes[1].listRequests == $((list_requests + 1))" "dual Search $mode consumes deferred sort in one listing"
         key -k Tab >/dev/null
         dual_sort_wait mtime:asc file-00.txt
@@ -9064,7 +11632,8 @@ case_dualsort() {
         key l >/dev/null
         settings_wait_value '.sort.key == "kind" and .sort.reverse == false'
         key -k Escape >/dev/null
-        dual_sort_wait kind:asc file-00.txt
+        # A Settings relist keeps the cursor file by name and scrolls to it, so the focused pane holds only rows around that file's new index.
+        dual_sort_wait kind:asc "$kept_name" "$kept_at"
     done
     kill_flea
     launch "$dir/left"
@@ -9361,6 +11930,15 @@ settings_places() {
         key -k Space >/dev/null; settle
         settings_wait_value ".places.$flag == true"
     done
+    # Sidebar040: Recent ships off, so its switch runs the other way round: on first, then off.
+    settings_click_control "places.showRecent"
+    settings_wait_value ".places.showRecent == true"
+    ipc railEntries | jq -e 'any(.[]; .group == "recent" and .label == "Recent")' >/dev/null \
+        || fail "settings: showRecent did not add the Recent rail row"
+    key -k Space >/dev/null; settle
+    settings_wait_value ".places.showRecent == false"
+    ipc railEntries | jq -e 'all(.[]; .group != "recent")' >/dev/null \
+        || fail "settings: showRecent did not remove the Recent rail row"
     for flag in driveSize trashCount; do
         settings_wait_value ".places.$flag == false"
         settings_click_control "places.$flag"
@@ -9831,7 +12409,7 @@ settings_section() {
     settle
 }
 
-# Opens the row menu and refuses a label that should not be in it, delimiters included so Copy path
+# Opens the row menu and refuses a label that should not be in it, delimiters included so Copy as
 # cannot answer for Copy.
 settings_menu_lacks() {
     local label="$1"
@@ -9938,6 +12516,1101 @@ case_duallaunch() {
         printf 'DUALLAUNCH focus=%s left=%s right=%s\n' "$side" "$(jq -r '.panes[0].path' <<< "$dual")" "$(jq -r '.panes[1].path' <<< "$dual")"
         kill_flea
     done
+}
+
+# A fail below exits the case subshell holding Ctrl, Shift or the button, so the trap releases the seat.
+xwdrag_cleanup() {
+    ydotool click 0x80 >/dev/null 2>&1 || true
+    ydotool key 29:0 >/dev/null 2>&1 || true
+    ydotool key 42:0 >/dev/null 2>&1 || true
+    ( kill_flea ) >/dev/null 2>&1 || true
+    if [[ -n "${xdev:-}" && "$xdev" == /* && -f "$xdev/.flea-test-sandbox" ]]; then
+        rm -rf "$xdev" || true
+    fi
+}
+
+# A fail before the tail exits this subshell, so the trap owns the second window and the root.
+case_xwdrag_cleanup() {
+    if [[ -n "${XW_SECOND_PID:-}" ]] && flea_process_owned "$XW_SECOND_PID" >/dev/null 2>&1; then
+        kill "$XW_SECOND_PID" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${xdev:-}" && "$xdev" == "$XDG_RUNTIME_DIR"/flea-xwdrag-* && -f "$xdev/.flea-test-sandbox" ]]; then
+        rm -rf "$xdev" >/dev/null 2>&1 || true
+    fi
+}
+# A signal must not resume the case after cleanup, so this handler exits instead of returning.
+xwdrag_signal_cleanup() {
+    case_xwdrag_cleanup
+    exit 1
+}
+# Two Flea windows are two qs processes with two backends: a drop from one into the other moves
+# within one device and copies across, with Shift forcing a move, Ctrl a copy and Ctrl with Shift
+# a link. The controller runs this on minipc; it needs the display, a real pointer and two owned
+# windows, so the headless battery never invokes it. Teardown kills only processes proven owned by
+# this run, and every deleted path is checked absolute and non-empty under a marked root.
+case_xwdrag() {
+    local dir adir bdir xdev
+    dir="$fixture_root/xwdrag"
+    sandbox_scratch "$dir"
+    adir="$dir/a"
+    bdir="$dir/b"
+    mkdir -p "$adir" "$bdir" || fail "xwdrag: could not create fixtures"
+    printf 'move payload\n' > "$adir/move.txt" || fail "xwdrag: could not seed move.txt"
+    printf 'copy payload\n' > "$adir/copy.txt" || fail "xwdrag: could not seed copy.txt"
+    printf 'xdev payload\n' > "$adir/xdev.txt" || fail "xwdrag: could not seed xdev.txt"
+    printf 'shift payload\n' > "$adir/shift.txt" || fail "xwdrag: could not seed shift.txt"
+    printf 'link payload\n' > "$adir/link.txt" || fail "xwdrag: could not seed link.txt"
+    xdev=$(mktemp -d "$XDG_RUNTIME_DIR/flea-xwdrag-XXXXXX") || fail "xwdrag: could not create tmpfs root"
+    [[ -n "$xdev" && "$xdev" == "$XDG_RUNTIME_DIR"/flea-xwdrag-* ]] || fail "xwdrag: tmpfs root escaped: $xdev"
+    : > "$xdev/.flea-test-sandbox" || fail "xwdrag: could not mark tmpfs root"
+    trap 'xwdrag_cleanup; case_xwdrag_cleanup' EXIT
+    trap xwdrag_signal_cleanup HUP INT TERM
+    [ "$(stat -c %d "$xdev")" != "$(stat -c %d "$adir")" ] || fail "xwdrag: $xdev is not another filesystem"
+    launch "$adir"
+    local apid aid
+    apid=$(flea_pid) || fail "xwdrag: no owned first window"
+    aid=$(xwdrag_qsid "$apid") || fail "xwdrag: no qs instance for $apid"
+    xwdrag_launch_second "$bdir"
+    local bpid bid
+    bpid=$XW_SECOND_PID
+    bid=$XW_SECOND_ID
+    xwdrag_place "$apid" 40 80 1000 720
+    xwdrag_place "$bpid" 1100 80 1000 720
+    xwdrag_focus "$apid"
+    local i sx sy dx dy
+    read -r sx sy < <(xwdrag_row_point "$aid" "$apid" "move.txt") || fail "xwdrag: move.txt is not visible"
+    read -r dx dy < <(xwdrag_floor_point "$bid" "$bpid") || fail "xwdrag: second window has no floor"
+    xwdrag_drag "$sx" "$sy" "$dx" "$dy" none
+    xwdrag_wait_path "$bdir/move.txt" present || fail "xwdrag: move.txt never landed in b"
+    xwdrag_wait_path "$adir/move.txt" absent || fail "xwdrag: move.txt survived its move"
+    xwdrag_wait_row_gone "$aid" "move.txt" || fail "xwdrag: A still lists move.txt"
+    printf 'XWDRAG move ok\n'
+    read -r sx sy < <(xwdrag_row_point "$aid" "$apid" "copy.txt") || fail "xwdrag: copy.txt is not visible"
+    read -r dx dy < <(xwdrag_floor_point "$bid" "$bpid") || fail "xwdrag: second window has no floor"
+    xwdrag_drag "$sx" "$sy" "$dx" "$dy" ctrl
+    xwdrag_wait_path "$bdir/copy.txt" present || fail "xwdrag: copy.txt never landed in b"
+    [[ -e "$adir/copy.txt" ]] || fail "xwdrag: ctrl copy deleted its source"
+    printf 'XWDRAG copy ok\n'
+    xwdrag_navigate_second "$xdev"
+    read -r sx sy < <(xwdrag_row_point "$aid" "$apid" "xdev.txt") || fail "xwdrag: xdev.txt is not visible"
+    read -r dx dy < <(xwdrag_floor_point "$bid" "$bpid") || fail "xwdrag: tmpfs window has no floor"
+    xwdrag_drag "$sx" "$sy" "$dx" "$dy" none
+    xwdrag_wait_path "$xdev/xdev.txt" present || fail "xwdrag: xdev.txt never landed on tmpfs"
+    [[ -e "$adir/xdev.txt" ]] || fail "xwdrag: cross-device plain drag moved its source"
+    printf 'XWDRAG xdev-copy ok\n'
+    read -r sx sy < <(xwdrag_row_point "$aid" "$apid" "shift.txt") || fail "xwdrag: shift.txt is not visible"
+    read -r dx dy < <(xwdrag_floor_point "$bid" "$bpid") || fail "xwdrag: tmpfs window has no floor"
+    xwdrag_drag "$sx" "$sy" "$dx" "$dy" shift
+    xwdrag_wait_path "$xdev/shift.txt" present || fail "xwdrag: shift.txt never landed on tmpfs"
+    xwdrag_wait_path "$adir/shift.txt" absent || fail "xwdrag: shift drag left its source"
+    printf 'XWDRAG xdev-move ok\n'
+    xwdrag_navigate_second "$bdir"
+    read -r sx sy < <(xwdrag_row_point "$aid" "$apid" "link.txt") || fail "xwdrag: link.txt is not visible"
+    read -r dx dy < <(xwdrag_floor_point "$bid" "$bpid") || fail "xwdrag: second window has no floor"
+    xwdrag_drag "$sx" "$sy" "$dx" "$dy" ctrllink
+    xwdrag_wait_path "$bdir/link.txt" present || fail "xwdrag: link.txt never landed in b"
+    [[ -L "$bdir/link.txt" ]] || fail "xwdrag: $bdir/link.txt is not a symlink"
+    [[ -e "$adir/link.txt" ]] || fail "xwdrag: link drag deleted its source"
+    printf 'XWDRAG link ok\n'
+    xwtab_key "$bpid" -M ctrl -k z -m ctrl
+    xwdrag_assert_focus "$bpid"
+    for i in $(seq 1 40); do [[ ! -L "$bdir/link.txt" ]] && break; sleep 0.25; done
+    [[ ! -L "$bdir/link.txt" ]] || fail "xwdrag: undo left the link in place"
+    printf 'XWDRAG undo ok\n'
+    xwdrag_kill_second "$bpid"
+    if [[ -n "$xdev" && -f "$xdev/.flea-test-sandbox" ]]; then
+        rm -rf "$xdev" || fail "xwdrag: could not remove tmpfs root"
+    else
+        fail "xwdrag: refusing cleanup of unmarked tmpfs root"
+    fi
+    trap - EXIT HUP INT TERM
+    kill_flea
+    trap - EXIT
+}
+
+# The qs instance id for an owned pid, so two windows sharing one config path stay addressable.
+xwdrag_qsid() {
+    local pid="$1" i pair
+    for i in $(seq 1 60); do
+        pair=$(qs list --all --json 2>/dev/null | python3 -c '
+import json, sys
+hits = [x for x in json.load(sys.stdin) if x["config_path"] == sys.argv[1] and x["pid"] == int(sys.argv[2])]
+print(("%s %s" % (hits[0]["id"], hits[0]["pid"])) if len(hits) == 1 else "")
+' "$flea_ui/boot/shell.qml" "$pid") || true
+        [[ -n "$pair" ]] && { printf '%s\n' "$pair" | cut -d' ' -f1; return 0; }
+        sleep 0.5
+    done
+    return 1
+}
+
+xwdrag_qs() {
+    qs ipc -i "$1" call flea "${@:2}"
+}
+
+# Dry guard: raw=$(xwdrag_qs "$id" total); case "$raw" in ''|*[!0-9]*) raw="SENTINEL";; esac
+# A qs failure must read as the sentinel, never as text that seq or $(( )) would choke on.
+xwdrag_count() {
+    local id="$1" sentinel="$2" raw
+    raw=$(xwdrag_qs "$id" total 2>/dev/null || true)
+    case "$raw" in
+        ''|*[!0-9]*) printf '%s\n' "$sentinel" ;;
+        *) printf '%s\n' "$raw" ;;
+    esac
+}
+
+# A second owned window over launch()'s own: same binary, UI and run marker, pid new and owned.
+xwdrag_launch_second() {
+    local start_path="$1" before after pid
+    before=$(flea_pids | tr '\n' ' ')
+    FLEA_UI="$flea_ui" FLEA_BIN="$flea_bin" \
+        setsid nohup "$flea_bin" --gui "$start_path" >"$run_root/flea-second.log" 2>&1 </dev/null &
+    for i in $(seq 1 60); do
+        after=$(flea_pids | tr '\n' ' ')
+        for pid in $after; do
+            [[ " $before " == *" $pid "* ]] && continue
+            if flea_process_owned "$pid"; then
+                XW_SECOND_PID=$pid
+                XW_SECOND_ID=$(xwdrag_qsid "$pid") || continue
+                [[ -n "$XW_SECOND_ID" ]] || continue
+                for _attempt in $(seq 1 100); do
+                    [[ "$(xwdrag_qs "$XW_SECOND_ID" path 2>/dev/null)" == "$start_path" \
+                        && "$(xwdrag_qs "$XW_SECOND_ID" listInFlight 2>/dev/null)" == false ]] && return 0
+                    sleep 0.05
+                done
+            else
+                fail "xwdrag: refusing unowned second window $pid"
+            fi
+        done
+        sleep 0.5
+    done
+    fail "xwdrag: no second owned window came up on $start_path"
+}
+
+# Sample input: `hyprctl clients -j` prints [{"address": "0x2a", "pid": 111}]; prints 0x2a.
+xwdrag_addr() {
+    local pid="$1" addr
+    addr=$(hyprctl clients -j | python3 -c '
+import json, sys
+hits = [c for c in json.load(sys.stdin) if str(c.get("pid")) == sys.argv[1]]
+print(hits[0]["address"] if len(hits) == 1 else "")
+' "$pid") || fail "xwdrag: no window for pid $pid"
+    [[ -n "$addr" ]] || fail "xwdrag: no address for pid $pid"
+    printf '%s\n' "$addr"
+}
+
+xwdrag_place() {
+    local pid="$1" x="$2" y="$3" w="$4" h="$5" addr
+    addr=$(xwdrag_addr "$pid") || fail "xwdrag: no window address for pid $pid"
+    hypr_window_focus "$addr" || fail "xwdrag: could not focus $pid"
+    sleep 0.3
+    hypr_window_float "$addr" "on" || fail "xwdrag: could not float $pid"
+    sleep 0.3
+    hypr_window_resize "$addr" "$w" "$h" || fail "xwdrag: could not resize $pid"
+    sleep 0.3
+    hypr_window_move "$addr" "$x" "$y" || fail "xwdrag: could not move $pid"
+    sleep 0.4
+}
+
+xwdrag_focus() {
+    local pid="$1" addr got now deadline next_focus
+    local focus_wait_ms=5000 focus_retry_ms=500 focus_poll_s=0.05
+    addr=$(xwdrag_addr "$pid") || fail "xwdrag: no window address for pid $pid"
+    now=$(date +%s%3N)
+    deadline=$((now + focus_wait_ms)); next_focus=$now
+    while (( now < deadline )); do
+        if (( now >= next_focus )); then
+            hypr_window_focus "$addr" || fail "xwdrag: could not focus $pid"
+            next_focus=$((now + focus_retry_ms))
+        fi
+        # Sample input: hyprctl activewindow -j prints {"pid": 111} for the focused window.
+        got=$(hyprctl activewindow -j | jq -r '.pid // ""') || fail "xwdrag: no active window to check against $pid"
+        [[ "$got" == "$pid" ]] && { xwdrag_assert_focus "$pid"; return; }
+        sleep "$focus_poll_s"
+        now=$(date +%s%3N)
+    done
+    fail "xwdrag: active window is ${got:-unknown}, wanted $pid after ${focus_wait_ms} ms"
+}
+
+xwdrag_geometry() {
+    hyprctl clients -j | python3 -c '
+import json, sys
+hits = [c for c in json.load(sys.stdin) if str(c.get("pid")) == sys.argv[1]]
+if len(hits) != 1:
+    raise SystemExit(1)
+c = hits[0]
+print(c["at"][0], c["at"][1], c["size"][0], c["size"][1])
+' "$1" || fail "xwdrag: no geometry for pid $1"
+}
+
+xwdrag_row_point() {
+    local id="$1" pid="$2" want="$3" total i n centre cx cy wx wy ww wh
+    for _attempt in $(seq 1 100); do
+        total=$(xwdrag_count "$id" 0)
+        for i in $(seq 0 $((total - 1))); do
+            n=$(xwdrag_qs "$id" rowAt "$i" 2>/dev/null || true)
+            case "$n" in "$want|"*) centre=$(xwdrag_qs "$id" rowCentre "$i" 2>/dev/null || true); break 2;; esac
+        done
+        sleep 0.1
+    done
+    [[ -n "${centre:-}" ]] || return 1
+    read -r cx cy <<< "$centre"
+    read -r wx wy ww wh < <(xwdrag_geometry "$pid") || return 1
+    printf '%s %s\n' "$((wx + cx))" "$((wy + cy))"
+}
+
+xwdrag_floor_point() {
+    local id="$1" pid="$2" area x y width height total last rx ry rw rh bottom wx wy ww wh
+    area=$(xwdrag_qs "$id" listAreaRect 2>/dev/null) || return 1
+    read -r x y width height <<< "$area"
+    read -r wx wy ww wh < <(xwdrag_geometry "$pid") || return 1
+    bottom=$y
+    total=$(xwdrag_count "$id" 0)
+    if (( total > 0 )); then
+        last=$(xwdrag_qs "$id" rowRect "$((total - 1))" 2>/dev/null) || return 1
+        read -r rx ry rw rh <<< "$last"
+        bottom=$((ry + rh))
+        x=$rx; width=$rw
+    fi
+    (( y + height - bottom > 8 )) || return 1
+    printf '%s %s\n' "$((wx + x + width / 2))" "$((wy + (bottom + y + height) / 2))"
+}
+
+xwdrag_glide() {
+    local tx="$1" ty="$2" i cx cy dx dy
+    for i in $(seq 1 16); do
+        set -- $(hyprctl cursorpos | tr -d ",")
+        cx=$1; cy=$2
+        dx=$(( tx - cx )); dy=$(( ty - cy ))
+        if [ "${dx#-}" -le 4 ] && [ "${dy#-}" -le 4 ]; then return 0; fi
+        ydotool mousemove -x "$(( dx / 2 ))" -y "$(( dy / 2 ))" >/dev/null 2>&1 || fail "xwdrag: pointer motion failed"
+        sleep 0.05
+    done
+    fail "xwdrag: pointer did not reach $tx,$ty"
+}
+
+xwdrag_drag() {
+    local sx="$1" sy="$2" dx="$3" dy="$4" mods="$5"
+    xwdrag_glide "$sx" "$sy"
+    sleep 0.4
+    case "$mods" in ctrl) ydotool key 29:1 >/dev/null 2>&1 || fail "xwdrag: ctrl press failed";; esac
+    case "$mods" in shift) ydotool key 42:1 >/dev/null 2>&1 || fail "xwdrag: shift press failed";; esac
+    case "$mods" in ctrllink) ydotool key 29:1 >/dev/null 2>&1 || fail "xwdrag: ctrl press failed"
+        ydotool key 42:1 >/dev/null 2>&1 || fail "xwdrag: shift press failed";; esac
+    ydotool click 0x40 >/dev/null 2>&1 || fail "xwdrag: pointer press failed"
+    sleep 0.3
+    xwdrag_glide "$dx" "$dy"
+    sleep 0.6
+    ydotool click 0x80 >/dev/null 2>&1 || fail "xwdrag: pointer release failed"
+    sleep 0.5
+    case "$mods" in ctrl|ctrllink) ydotool key 29:0 >/dev/null 2>&1 || fail "xwdrag: ctrl release failed";; esac
+    case "$mods" in shift|ctrllink) ydotool key 42:0 >/dev/null 2>&1 || fail "xwdrag: shift release failed";; esac
+    sleep 0.4
+}
+
+xwdrag_wait_path() {
+    local p="$1" want="$2" i
+    for i in $(seq 1 40); do
+        if [[ "$want" == present && -e "$p" ]]; then return 0; fi
+        if [[ "$want" == absent && ! -e "$p" ]]; then return 0; fi
+        sleep 0.25
+    done
+    return 1
+}
+
+xwdrag_wait_row_gone() {
+    local id="$1" want="$2" total
+    # The watch's 0.5 s re-read, then two passes of up to six ipc calls at up to 565 ms each.
+    local wait_ns=10000000000
+    local deadline=$(( $(date +%s%N) + wait_ns ))
+    while (( $(date +%s%N) < deadline )); do
+        total=$(xwdrag_count "$id" -1)
+        if [[ "$total" != "-1" ]]; then
+            local found=1 r seen
+            for r in $(seq 0 $((total - 1))); do
+                seen=$(xwdrag_qs "$id" rowAt "$r" 2>/dev/null || true)
+                case "$seen" in "$want|"*) found=0;; esac
+            done
+            (( found )) && return 0
+        fi
+        sleep 0.05
+    done
+    return 1
+}
+
+# Typed keys land in the active window, and two Flea windows share one class, so this pins focus first.
+xwdrag_assert_focus() {
+    local want="$1" got
+    got=$(hyprctl activewindow -j | python3 -c 'import json,sys; print(json.load(sys.stdin).get("pid",""))') || fail "xwdrag: no active window to check against $want"
+    [[ -n "$got" ]] || fail "xwdrag: active window has no pid, wanted $want"
+    [[ "$got" == "$want" ]] || fail "xwdrag: active window is $got, wanted $want"
+}
+# Targeted keystrokes carry a window address, since --window flea matches both windows at once.
+xwdrag_key() {
+    local addr="$1"
+    shift
+    omarchy-drive key --window "$addr" "$@"
+}
+
+# Sample input: {"pid":101,"address":"0xa","class":"flea","title":"Flea"} with the key pid answers 101, and a non-JSON reply answers nothing.
+xwdrag_active_field() {
+    printf '%s' "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1],""))' "$2" 2>/dev/null || true
+}
+
+xwdrag_focus_attempts=40 # Bound the wait for the wanted window to become the active one.
+xwdrag_focus_poll=0.25 # Poll the active window between checks.
+xwdrag_focus_settle=0.2 # Let the compositor deliver the focus before the next key.
+
+# Bounded wait until the active window is the wanted pid, so a later key reaches it.
+xwdrag_wait_focus() {
+    local pid="$1" addr="$2" i active apid
+    for i in $(seq 1 "$xwdrag_focus_attempts"); do
+        active=$(hyprctl activewindow -j 2>/dev/null || true)
+        apid=$(xwdrag_active_field "$active" pid)
+        [[ "$apid" == "$pid" ]] && { sleep "$xwdrag_focus_settle"; return 0; }
+        sleep "$xwdrag_focus_poll"
+    done
+    xwdrag_fail_unfocused "$pid" "$addr"
+}
+
+# Names the window that stole the focus, so a key that would have missed is loud.
+xwdrag_fail_unfocused() {
+    local pid="$1" addr="$2" active apid aaddr aclass atitle
+    active=$(hyprctl activewindow -j 2>/dev/null || true)
+    apid=$(xwdrag_active_field "$active" pid)
+    aaddr=$(xwdrag_active_field "$active" address)
+    aclass=$(xwdrag_active_field "$active" class)
+    atitle=$(xwdrag_active_field "$active" title)
+    [[ -n "$apid" ]] || apid="(none)"
+    fail "xwdrag: window $pid at $addr never took focus, active is pid=$apid addr=$aaddr class=$aclass title=$atitle"
+}
+
+# A keystroke aimed at one owned window by address, after the focus wait proves it is active.
+xwtab_key() {
+    local pid="$1"
+    shift
+    local addr
+    addr=$(hyprctl clients -j | python3 -c '
+import json, sys
+# Sample input: [{"pid":101,"address":"0xa"},{"pid":202,"address":"0xb"}].
+hits = [c for c in json.load(sys.stdin) if str(c.get("pid")) == sys.argv[1]]
+print(hits[0]["address"] if len(hits) == 1 else "")
+' "$pid") || fail "xwtab: no window for pid $pid"
+    [[ -n "$addr" ]] || fail "xwtab: no address for pid $pid"
+    hypr_window_focus "$addr" || fail "xwtab: could not focus $pid"
+    xwdrag_wait_focus "$pid" "$addr"
+    omarchy-drive key --window "$addr" "$@" >/dev/null || fail "xwtab: key did not reach $pid"
+}
+xwdrag_navigate_second() {
+    local want="$1"
+    xwtab_key "$bpid" -M ctrl -k l -m ctrl
+    xwdrag_assert_focus "$bpid"
+    for _attempt in $(seq 1 100); do [[ "$(xwdrag_qs "$bid" pathBarOpen 2>/dev/null)" == true ]] && break; sleep 0.05; done
+    xwtab_key "$bpid" "$want"
+    xwdrag_assert_focus "$bpid"
+    xwtab_key "$bpid" -k Return
+    xwdrag_assert_focus "$bpid"
+    for _attempt in $(seq 1 100); do
+        [[ "$(xwdrag_qs "$bid" path 2>/dev/null)" == "$want" && "$(xwdrag_qs "$bid" listInFlight 2>/dev/null)" == false ]] && return 0
+        sleep 0.05
+    done
+    fail "xwdrag: second window never opened $want"
+}
+
+xwdrag_kill_second() {
+    local pid="$1"
+    flea_process_owned "$pid" || fail "xwdrag: refusing to kill unowned window $pid"
+    kill "$pid" || fail "xwdrag: could not stop second window $pid"
+    for _attempt in $(seq 1 200); do
+        flea_process_owned "$pid" && sleep 0.05 || return 0
+    done
+    fail "xwdrag: second window $pid survived"
+}
+
+# Each launcher preserves stdout and stderr across exec_qs; run.log only archives flea.log.
+xwtab_logs=("$flea_log" "$run_root/flea-second.log")
+xwtab_outside_x=200
+xwtab_outside_y=60
+xwtab_target_nudge=6
+xwtab_receipt_attempts=30 # Bound each wait for a gesture receipt in the held-button trace.
+xwtab_receipt_poll=0.1 # Poll the trace between receipt checks.
+xwtab_marks=(0 0)
+xwtab_source=""
+xwtab_target=""
+xwtab_gesture=""
+xwtab_mark_logs() {
+    local i
+    for i in "${!xwtab_logs[@]}"; do
+        xwtab_marks[i]=$(wc -l 2>/dev/null < "${xwtab_logs[i]}" || printf 0)
+    done
+}
+
+# Every trace reader uses the same launch files and the marks taken before this press.
+xwtab_trace_lines() {
+    local i
+    for i in "${!xwtab_logs[@]}"; do
+        tail -n +"$((xwtab_marks[i] + 1))" "${xwtab_logs[i]}" 2>/dev/null | grep -a 'TABDRAG' || true
+    done
+}
+
+# Failure-only evidence names the gesture, actual output descriptors and marked log slices.
+xwtab_dump_trace() {
+    local i pid lines
+    printf 'XWTAB source=%s target=%s %s; cursorpos: ' "$xwtab_source" "$xwtab_target" "$xwtab_gesture" >&2
+    hyprctl cursorpos >&2 || true
+    for pid in $(printf '%s\n' "$xwtab_source" "$xwtab_target" | sort -u); do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        printf 'XWTAB pid=%s rect=%s stdout=%s stderr=%s\n' "$pid" "$(xwtab_rect_of "$pid" || true)" \
+            "$(readlink "/proc/$pid/fd/1" || true)" "$(readlink "/proc/$pid/fd/2" || true)" >&2
+    done
+    for i in "${!xwtab_logs[@]}"; do
+        printf 'XWTAB trace file=%s after-line=%s lines=%s\n' "${xwtab_logs[i]}" "${xwtab_marks[i]}" \
+            "$(wc -l 2>/dev/null < "${xwtab_logs[i]}" || printf 0)" >&2
+    done
+    lines=$(xwtab_trace_lines)
+    printf '%s\n' "${lines:-(no TABDRAG lines since press marks)}" >&2
+}
+
+# A platform drag must start at the source and stay active until the test releases it.
+xwtab_wait_start() {
+    local i lines
+    for i in $(seq 1 "$xwtab_receipt_attempts"); do
+        lines=$(xwtab_trace_lines | grep -a "TABDRAG .* pid=$xwtab_source " || true)
+        if grep -aq 'TABDRAG drag-finished' <<< "$lines"; then fail "xwtab: source $xwtab_source ended the drag before release"; fi
+        grep -aq 'TABDRAG drag-start' <<< "$lines" && return 0
+        sleep "$xwtab_receipt_poll"
+    done
+    fail "xwtab: no platform drag started on source $xwtab_source"
+}
+
+# Require an enter after this press with no later leave; require is the only mode.
+xwtab_wait_enter() {
+    local bpid="$1" mode="$2" i lines numbered enter_no leave_no source_lines
+    [[ "$mode" == require ]] || fail "xwtab: unknown enter wait mode '$mode', the only mode is require"
+    for i in $(seq 1 "$xwtab_receipt_attempts"); do
+        source_lines=$(xwtab_trace_lines | grep -a "TABDRAG .* pid=$xwtab_source " || true)
+        if grep -aq 'TABDRAG drag-finished' <<< "$source_lines"; then fail "xwtab: source $xwtab_source ended the drag before target $bpid entered"; fi
+        # Sample input: TABDRAG enter-window pid=202 (the foreign receiver ends its line at the pid).
+        lines=$(xwtab_trace_lines | grep -aE "TABDRAG .* pid=$bpid( |$)" || true)
+        numbered=$(printf '%s\n' "$lines" | grep -a -n -E 'TABDRAG (enter-window|enter-strip|leave-window|leave-strip)' || true)
+        enter_no=$(printf '%s\n' "$numbered" | grep -a -E 'TABDRAG (enter-window|enter-strip)' | tail -1 | cut -d: -f1 || true)
+        if [[ -n "$enter_no" ]]; then
+            leave_no=$(printf '%s\n' "$numbered" | grep -a -E 'TABDRAG (leave-window|leave-strip)' | tail -1 | cut -d: -f1 || true)
+            if [[ -z "$leave_no" ]] || (( enter_no > leave_no )); then return 0; fi
+        fi
+        sleep "$xwtab_receipt_poll"
+    done
+    fail "xwtab: no enter on $bpid after the press"
+}
+
+xwtab_refused_attempts=30 # Bound the refused-finish wait after release.
+xwtab_refused_poll=0.1 # Poll the source trace between refusal checks.
+# A disabled target proves refusal by cursor position while held, then IgnoreAction after release.
+xwtab_wait_refused() {
+    local bpid="$1" phase="$2" rect addr wx wy ww wh floating cursor cx cy attempt lines finished
+    if [[ "$phase" == held ]]; then
+        flea_process_owned "$bpid" || fail "xwtab: refused target $bpid is not owned"
+        rect=$(xwtab_rect_of "$bpid") || fail "xwtab: no owned rectangle for refused target $bpid"
+        # Sample input: 0xb 1100 80 1000 720 True.
+        read -r addr wx wy ww wh floating <<< "$rect"
+        cursor=$(hyprctl cursorpos 2>/dev/null) || fail "xwtab: no cursor position for refused target $bpid"
+        # Sample input: 1699, 468.
+        read -r cx cy <<< "${cursor//,/ }"
+        [[ "$cx" =~ ^-?[0-9]+$ && "$cy" =~ ^-?[0-9]+$ ]] || fail "xwtab: invalid cursor position $cursor"
+        (( cx >= wx && cx < wx + ww && cy >= wy && cy < wy + wh )) \
+            || fail "xwtab: cursor outside refused target $bpid: $cursor rect=$rect"
+    fi
+    for attempt in $(seq 1 "$xwtab_refused_attempts"); do
+        lines=$(xwtab_trace_lines)
+        # Sample input: qml: TABDRAG drag-finished pid=101 action=0.
+        finished=$(grep -aE "TABDRAG drag-finished pid=$xwtab_source( |$)" <<< "$lines" || true)
+        if [[ "$phase" == held && -n "$finished" ]]; then
+            fail "xwtab: source $xwtab_source ended the refused drag before release"
+        fi
+        # Sample input: qml: TABDRAG enter-window pid=202 ok=true.
+        if grep -aqE "TABDRAG [^ ]*(enter|drop)[^ ]* pid=$bpid( |$)" <<< "$lines"; then
+            fail "xwtab: refused target $bpid entered or dropped after the press"
+        fi
+        [[ "$phase" != held ]] || return 0
+        if grep -aqE "TABDRAG drag-finished pid=$xwtab_source action=0( |$)" <<< "$finished"; then
+            return 0
+        fi
+        [[ -z "$finished" ]] || fail "xwtab: refused drag on $bpid did not finish with action=0"
+        sleep "$xwtab_refused_poll"
+    done
+    fail "xwtab: no refused finish on $bpid after release within $xwtab_refused_attempts polls"
+}
+
+xwtab_cancel_attempts=30 # Bound the held-button cancellation wait.
+xwtab_cancel_poll=0.1 # Observe cancellation without releasing the pointer.
+# The cancellation receipt must arrive before the held button is released.
+xwtab_wait_cancel() {
+    local attempt
+    for attempt in $(seq 1 "$xwtab_cancel_attempts"); do
+        xwtab_trace_lines | grep -a "TABDRAG drag-finished pid=$xwtab_source action=0" >/dev/null && return 0
+        sleep "$xwtab_cancel_poll"
+    done
+    fail "xwtab: Escape did not cancel while the button was held"
+}
+
+xwtab_unmap_attempts=30 # Bound the wait for the catcher layer to leave the compositor after a cancel.
+xwtab_unmap_poll=0.1 # Poll the layer list between unmap checks.
+# The cancel receipt precedes the Loader unload, so the compositor may still list the catcher for a few polls.
+xwtab_wait_unmapped() {
+    local pid="$1" attempt layers verdict
+    for attempt in $(seq 1 "$xwtab_unmap_attempts"); do
+        layers=$(hyprctl layers -j 2>&1) || fail "xwtab: hyprctl layers failed: $layers"
+        # Sample input: {"DP-2":{"levels":{"1":[{"namespace":"flea-tab-tearoff","pid":101}]}}} while the catcher is mapped.
+        verdict=$(printf '%s' "$layers" | python3 -c '
+import json, sys
+def contains(node):
+    if isinstance(node, dict):
+        return str(node.get("pid", "")) == sys.argv[1] or any(contains(v) for v in node.values())
+    return isinstance(node, list) and any(contains(v) for v in node)
+print("mapped" if contains(json.load(sys.stdin)) else "unmapped")
+' "$pid" 2>&1) || fail "xwtab: layers JSON unreadable: $verdict"
+        [[ "$verdict" == mapped ]] || return 0
+        sleep "$xwtab_unmap_poll"
+    done
+    fail "xwtab: Escape left the catcher mapped after $xwtab_unmap_attempts polls"
+}
+
+# The case cleanup and failure path release every gesture that got as far as press.
+xwtab_button_down=false
+xwtab_release() {
+    if [[ "$xwtab_button_down" == true ]]; then
+        ydotool click 0x80 >/dev/null 2>&1 || return 1
+        xwtab_button_down=false
+    fi
+}
+xwtab_cleanup() {
+    xwtab_release || true
+    if [[ -n "${recv_pid:-}" ]]; then
+        kill "$recv_pid" 2>/dev/null || true
+        wait "$recv_pid" 2>/dev/null || true
+        recv_pid=""
+    fi
+    xwtab_restore_place
+}
+
+# A desktop drop must enter the catcher while the button is still held.
+xwtab_wait_catcher() {
+    local i lines
+    for i in $(seq 1 "$xwtab_receipt_attempts"); do
+        lines=$(xwtab_trace_lines | grep -a "TABDRAG .* pid=$xwtab_source " || true)
+        grep -aq 'TABDRAG drag-finished' <<< "$lines" && fail "xwtab: source ended before catcher enter"
+        grep -aq 'TABDRAG catcher-enter' <<< "$lines" && return 0
+        sleep "$xwtab_receipt_poll"
+    done
+    fail "xwtab: no catcher enter after platform start"
+}
+xwtab_own_attempts=30 # Match the catcher wait's held-phase bound.
+xwtab_own_poll=0.1 # Match the catcher wait's trace polling interval.
+xwtab_own_trace_tail=10 # Keep the last source receipts in a timeout diagnostic.
+# An own return may enter the catcher or re-enter the source strip while the button is held.
+xwtab_wait_own_enter() {
+    local attempt lines source_lines
+    local -a return_marks=("$@")
+    for attempt in $(seq 1 "$xwtab_own_attempts"); do
+        source_lines=$(xwtab_trace_lines | grep -aE "TABDRAG .* pid=$xwtab_source( |$)" || true)
+        lines=$source_lines
+        if (( ${#return_marks[@]} )); then
+            lines=$(
+                xwtab_marks=("${return_marks[@]}")
+                xwtab_trace_lines | grep -aE "TABDRAG .* pid=$xwtab_source( |$)" || true
+            )
+        fi
+        grep -aq 'TABDRAG drag-finished' <<< "$source_lines"$'\n'"$lines" && fail "xwtab: source $xwtab_source ended before catcher-enter or own enter-strip ok=true"
+        if grep -aq 'TABDRAG catcher-enter' <<< "$lines" \
+            || grep -aqE 'TABDRAG enter-strip .* ok=true( |$)' <<< "$lines"; then return 0; fi
+        sleep "$xwtab_own_poll"
+    done
+    printf '%s\n' "${lines:-(no TABDRAG lines for source $xwtab_source since return)}" | tail -n "$xwtab_own_trace_tail" >&2
+    fail "xwtab: source $xwtab_source reached neither TABDRAG catcher-enter nor TABDRAG enter-strip ok=true after return motion within $xwtab_own_attempts polls"
+}
+xwtab_wait_outcome() {
+    local outcome="$1" i
+    for i in $(seq 1 "$xwtab_receipt_attempts"); do
+        xwtab_trace_lines | grep -a "TABDRAG catcher-drop pid=$xwtab_source outcome=$outcome " >/dev/null && return 0
+        sleep "$xwtab_receipt_poll"
+    done
+    fail "xwtab: catcher never reported outcome=$outcome"
+}
+# An own drop lands on the catcher or, when Hyprland re-enters the source, on its own strip; both reorder.
+xwtab_wait_own_return() {
+    local i lines
+    for i in $(seq 1 "$xwtab_receipt_attempts"); do
+        lines=$(xwtab_trace_lines | grep -a "TABDRAG .* pid=$xwtab_source " || true)
+        grep -aq "TABDRAG catcher-drop pid=$xwtab_source outcome=return \|TABDRAG drop-strip pid=$xwtab_source " <<< "$lines" && return 0
+        sleep "$xwtab_receipt_poll"
+    done
+    fail "xwtab: own drop reached neither the catcher return nor the source strip"
+}
+
+# Start beyond the source edge before any target motion; Hyprland retargets only on motion.
+xwtab_drag_to_window() {
+    local sx="$1" sy="$2" dx="$3" dy="$4" apid="$5" bpid="$6" mode="$7" wx wy ww wh i
+    local -a own_marks=()
+    xwtab_source=$apid
+    xwtab_target=$bpid
+    xwtab_gesture="press=$sx,$sy target=$dx,$dy"
+    read -r wx wy ww wh < <(xwdrag_geometry "$apid") || fail "xwtab: no source geometry"
+    xwdrag_glide "$sx" "$sy"
+    xwtab_mark_logs
+    xwtab_button_down=true
+    ydotool click 0x40 >/dev/null 2>&1 || fail "xwtab: pointer press failed"
+    xwtab_gesture+=" outside=$((wx + xwtab_outside_x)),$((wy + wh + xwtab_outside_y))"
+    xwdrag_glide "$((wx + xwtab_outside_x))" "$((wy + wh + xwtab_outside_y))"
+    xwtab_wait_start
+    # Keep press marks for finishes; only receipts after this turn can prove an own return.
+    if [[ "$mode" == own ]]; then
+        for i in "${!xwtab_logs[@]}"; do
+            own_marks[i]=$(wc -l 2>/dev/null < "${xwtab_logs[i]}" || printf 0)
+        done
+    fi
+    xwdrag_glide "$dx" "$dy"
+    xwdrag_glide "$((dx + xwtab_target_nudge))" "$dy"
+    xwdrag_glide "$dx" "$dy"
+    if [[ "$mode" == catcher ]]; then
+        xwtab_wait_catcher
+    elif [[ "$mode" == own ]]; then
+        xwtab_wait_own_enter "${own_marks[@]}"
+    elif [[ "$mode" == refused ]]; then
+        xwtab_wait_refused "$bpid" held
+    else
+        xwtab_wait_enter "$bpid" "$mode"
+    fi
+    xwtab_release || fail "xwtab: pointer release failed"
+    if [[ "$mode" == refused ]]; then
+        xwtab_wait_refused "$bpid" released
+    fi
+}
+
+# The addr and rect of one owned pid, so room-making and restore never name a window by guess.
+xwtab_rect_of() {
+    local rect
+    # Sample input: [{"pid":101,"address":"0xa","at":[20,20],"size":[900,500],"floating":true}].
+    rect=$(hyprctl clients -j 2>/dev/null | python3 -c '
+import json, sys
+hits = [c for c in json.load(sys.stdin) if str(c.get("pid")) == sys.argv[1]]
+if len(hits) != 1:
+    sys.stderr.write("xwtab: %d clients carry pid %s, one wanted\n" % (len(hits), sys.argv[1]))
+    sys.exit(0)
+c = hits[0]
+print(c["address"], c["at"][0], c["at"][1], c["size"][0], c["size"][1], bool(c.get("floating")))
+' "$1" || true)
+    [[ -n "$rect" ]] || return 1
+    printf '%s\n' "$rect"
+}
+
+# Saved addr and rect per owned pid, restored at the case end and on failure through the trap.
+xwtab_saved=""
+xwtab_restore_place() {
+    [[ -n "$xwtab_saved" ]] || return 0
+    local pid addr x y w h floating cur caddr cx cy cw ch cfloating action failed remaining="" status=0
+    while read -r pid addr x y w h floating; do
+        [[ -n "${pid:-}" ]] || continue
+        if ! flea_process_owned "$pid"; then printf 'XWTAB restore skipped unowned pid=%s\n' "$pid" >&2; continue; fi
+        cur=$(xwtab_rect_of "$pid" || true)
+        read -r caddr cx cy cw ch cfloating <<< "$cur"
+        if [[ -z "$cur" || "$caddr" != "$addr" ]]; then
+            printf 'XWTAB restore skipped unproven address=%s\n' "$addr" >&2
+            remaining+="$pid $addr $x $y $w $h $floating"$'\n'
+            status=1
+            continue
+        fi
+        action=off
+        [[ "$floating" != True ]] || action=on
+        failed=0
+        hypr_window_float "$addr" on || failed=1
+        hypr_window_resize_absolute "$addr" "$w" "$h" || failed=1
+        hypr_window_move_absolute "$addr" "$x" "$y" || failed=1
+        hypr_window_float "$addr" "$action" || failed=1
+        xwtab_wait_place "$pid" "$addr" "$x" "$y" "$w" "$h" "$floating" || failed=1
+        if [[ "$failed" != 0 ]]; then
+            printf 'XWTAB restore failed pid=%s address=%s\n' "$pid" "$addr" >&2
+            remaining+="$pid $addr $x $y $w $h $floating"$'\n'
+            status=1
+        fi
+    done <<< "$xwtab_saved"
+    xwtab_saved=$remaining
+    return "$status"
+}
+
+xwtab_place_attempts=30
+xwtab_place_poll=0.1
+# Read back the owned address and exact geometry instead of trusting dispatcher success.
+xwtab_wait_place() {
+    local pid="$1" expected="$2 $3 $4 $5 $6 $7" attempt actual
+    for attempt in $(seq 1 "$xwtab_place_attempts"); do
+        actual=$(xwtab_rect_of "$pid" || true)
+        [[ "$actual" != "$expected" ]] || return 0
+        sleep "$xwtab_place_poll"
+    done
+    printf 'XWTAB place mismatch pid=%s expected=[%s] actual=[%s] monitors=%s\n' "$pid" "$expected" "$actual" "$(hyprctl monitors -j 2>/dev/null || true)" >&2
+    return 1
+}
+
+# Park owned windows and retain restore state in the caller until cleanup.
+xwtab_point=""
+xwtab_make_room() {
+    local apid="$1" bpid="$2" aaddr ax ay aw ah afloating baddr bx by bw bh bfloating
+    flea_process_owned "$apid" || fail "xwtab: refusing to move unowned window $apid"
+    flea_process_owned "$bpid" || fail "xwtab: refusing to move unowned window $bpid"
+    local arect brect
+    arect=$(xwtab_rect_of "$apid" 2>&1) || fail "xwtab: no geometry for $apid: $arect"
+    brect=$(xwtab_rect_of "$bpid" 2>&1) || fail "xwtab: no geometry for $bpid: $brect"
+    read -r aaddr ax ay aw ah afloating <<< "$arect"
+    read -r baddr bx by bw bh bfloating <<< "$brect"
+    [[ -n "${aaddr:-}" && -n "${baddr:-}" ]] || fail "xwtab: no geometry for a parked window"
+    xwtab_saved="$apid $aaddr $ax $ay $aw $ah $afloating
+$bpid $baddr $bx $by $bw $bh $bfloating"
+    trap 'xwtab_cleanup' EXIT
+    local mon_json mx my mw mh mon_name
+    mon_json=$(hyprctl monitors -j 2>/dev/null || true)
+    [[ -n "$mon_json" ]] || fail "xwtab: no focused monitor to make room on"
+    # Sample input: [{"name":"DP-2","x":0,"y":0,"width":2560,"height":1440,"focused":true,"activeWorkspace":{"id":1}}].
+    read -r mx my mw mh mon_name < <(printf '%s' "$mon_json" | python3 -c 'import json,sys; ms=json.load(sys.stdin); m=[x for x in ms if x.get("focused")] or ms; print(m[0]["x"],m[0]["y"],m[0]["width"],m[0]["height"],m[0].get("name",""))' || true)
+    [[ -n "${mon_name:-}" ]] || fail "xwtab: no focused monitor to make room on"
+    local pw ph park_inset=20 park_margin=60 park_min_width=200 park_min_height=150
+    pw=$(((mw - park_margin) / 2))
+    ph=$(((mh - park_margin) / 2))
+    (( pw >= park_min_width && ph >= park_min_height )) || fail "xwtab: monitor ${mw}x${mh} leaves no room to park two windows"
+    local pid addr px
+    for pid in "$apid" "$bpid"; do
+        if [[ "$pid" == "$apid" ]]; then
+            addr=$aaddr
+            px=$((mx + park_inset))
+        else
+            addr=$baddr
+            px=$((mx + 2 * park_inset + pw))
+        fi
+        hypr_window_float "$addr" on || fail "xwtab: could not float $pid"
+        hypr_window_resize_absolute "$addr" "$pw" "$ph" || fail "xwtab: could not size $pid"
+        hypr_window_move_absolute "$addr" "$px" "$((my + park_inset))" || fail "xwtab: could not park $pid"
+        xwtab_wait_place "$pid" "$addr" "$px" "$((my + park_inset))" "$pw" "$ph" True || fail "xwtab: owned window $pid never reached its parked rectangle"
+    done
+    local point
+    # Free point counts only what can take the drop, see tests/xwtab_free_point.py.
+    point=$(python3 -B "$repo/tests/xwtab_free_point.py" "$mx" "$my" "$mw" "$mh" "$mon_name" <(hyprctl clients -j 2>/dev/null) <(hyprctl layers -j 2>/dev/null) <(printf '%s' "$mon_json") || true)
+    [[ -n "$point" ]] || fail "xwtab: no empty desktop point on the focused monitor"
+    xwtab_point="$point"
+}
+
+# xw6: a tab dragged onto another Flea window moves there; torn off onto empty space it
+# opens a window of its own. Reuses the xwdrag two-window rig: launch() kills first, so the
+# second window is launched the same way, and every drop point is an absolute screen point.
+# Normalised pid sets compare without empty members, see tests/xwtab-norm.sh.
+. "$repo/tests/xwtab-norm.sh"
+xwtab_tab_point() {
+    local id="$1" pid="$2" index="$3" centre cx cy wx wy ww wh
+    centre=$(xwdrag_qs "$id" tabCentre "$index" 2>/dev/null || true)
+    [[ -n "$centre" ]] || return 1
+    read -r cx cy <<< "$centre"
+    read -r wx wy ww wh < <(xwdrag_geometry "$pid") || return 1
+    printf '%s %s\n' "$((wx + cx))" "$((wy + cy))"
+}
+
+# Hyprland client pids among the given qs pids, so a qs helper with no window never counts as one.
+xwtab_window_pids() {
+    local qs_pids="$1" clients
+    clients=$(hyprctl clients -j 2>/dev/null) || return 1
+    python3 -c '
+import json, sys
+# Sample input: [{"pid":101,"address":"0xa"}].
+clients = json.loads(sys.argv[2])
+qs = set(sys.argv[1].split())
+print(" ".join(sorted({str(c.get("pid")) for c in clients if str(c.get("pid")) in qs}, key=int)))
+' "$qs_pids" "$clients" || return 1
+}
+
+# One pid's cmdline, parent, age and window state, so the next native run names the extra process.
+xwtab_describe_pid() {
+    local pid="$1" process cmd ppid age win
+    process=$(flea_process_dir "$pid")
+    cmd=$(tr '\0' ' ' 2>/dev/null < "$process/cmdline" || true)
+    [[ -n "$cmd" ]] || cmd="(unreadable cmdline)"
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+    [[ -n "$ppid" ]] || ppid="?"
+    age=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+    [[ -n "$age" ]] || age="?"
+    # Sample input: [{"pid":101,"address":"0xa"}].
+    win=$(hyprctl clients -j 2>/dev/null | python3 -c 'import json, sys; print("yes" if any(str(c.get("pid")) == sys.argv[1] for c in json.load(sys.stdin)) else "no")' "$pid" 2>/dev/null || true)
+    [[ -n "$win" ]] || win="unknown"
+    printf 'XWTAB extra pid=%s ppid=%s age=%s window=%s cmd=%s\n' "$pid" "$ppid" "$age" "$win" "$cmd" >&2
+}
+
+xwtab_third_attempts=60 # Bound the wait for the torn-off window's owned process.
+xwtab_third_poll=0.5 # Poll the owned pids between checks.
+xwtab_wait_third() {
+    local before="$1" after pid
+    for _attempt in $(seq 1 "$xwtab_third_attempts"); do
+        after=$(flea_pids | tr '\n' ' ')
+        for pid in $after; do
+            [[ " $before " == *" $pid "* ]] && continue
+            if flea_process_owned "$pid"; then
+                printf '%s\n' "$pid"
+                return 0
+            else
+                fail "xwtab: refusing unowned third window $pid"
+            fi
+        done
+        sleep "$xwtab_third_poll"
+    done
+    return 1
+}
+
+# The two windows sit side by side at one height; the foreign receiver sits under B's column.
+xwtab_window_y=80
+xwtab_window_w=1000
+xwtab_window_h=720
+xwtab_a_x=40
+xwtab_b_x=1100
+xwtab_receiver_x=1100
+xwtab_receiver_y=500
+xwtab_tabcount_attempts=40 # Bound the wait for a window's tab count to change.
+xwtab_tabcount_poll=0.25 # Poll the tab count between checks.
+xwtab_parked_attempts=10 # Bound the wait for the parked windows to appear as clients.
+xwtab_parked_poll=0.5 # Poll the clients between checks.
+xwtab_listing_attempts=100 # Bound the wait for the torn-off window to list its folder.
+xwtab_listing_poll=0.05 # Poll the folder and listing flag between checks.
+xwtab_settle_attempts=20 # Bound the wait for the process and window counts to settle after a tear-off.
+xwtab_settle_poll=0.5 # Poll the process and window sets between checks.
+xwtab_reorder_attempts=40 # Bound the wait for the own-strip drop to move the active tab.
+xwtab_reorder_poll=0.1 # Poll the active tab index between checks.
+xwtab_receiver_attempts=40 # Bound the wait for the foreign receiver window to map.
+xwtab_receiver_poll=0.25 # Poll the clients between checks.
+case_xwtab() {
+    local dir adir bdir
+    # The tab handoff trace, on for both windows; every fail below dumps it first.
+    export FLEA_TRACE_TABDRAG=1
+    eval "$(declare -f fail | sed '1s/fail/xwtab_saved_fail/')"
+    fail() { xwtab_release || true; xwtab_dump_trace; xwtab_saved_fail "$@"; }
+    trap 'xwtab_cleanup' EXIT
+    dir="$fixture_root/xwtab"
+    sandbox_scratch "$dir"
+    adir="$dir/a"
+    bdir="$dir/b"
+    mkdir -p "$adir/sub1" "$adir/sub2" "$bdir" || fail "xwtab: could not create fixtures"
+    launch "$adir"
+    wait_listing 2
+    local apid aid
+    apid=$(flea_pid) || fail "xwtab: no owned first window"
+    aid=$(xwdrag_qsid "$apid") || fail "xwtab: no qs instance for $apid"
+    # A opens a second tab and puts it on sub1, before the second window exists.
+    key t >/dev/null
+    settle
+    [[ "$(xwdrag_qs "$aid" tabCount 2>/dev/null)" == "2" ]] || fail "xwtab: t did not open a second tab"
+    seek_row_named "sub1" || fail "xwtab: could not find sub1"
+    key -k Return >/dev/null
+    wait_path "$adir/sub1"
+    xwdrag_launch_second "$bdir"
+    local bpid bid
+    bpid=$XW_SECOND_PID
+    bid=$XW_SECOND_ID
+    xwdrag_place "$apid" "$xwtab_a_x" "$xwtab_window_y" "$xwtab_window_w" "$xwtab_window_h"
+    xwdrag_place "$bpid" "$xwtab_b_x" "$xwtab_window_y" "$xwtab_window_w" "$xwtab_window_h"
+    # B has one tab, enabling its window DropArea, so require an enter before the move.
+    xwdrag_focus "$apid"
+    local sx sy dx dy i
+    local move_before
+    move_before=$(flea_pids | tr '\n' ' ')
+    read -r sx sy < <(xwtab_tab_point "$aid" "$apid" 1) || fail "xwtab: A's second tab has no centre"
+    read -r dx dy < <(xwdrag_floor_point "$bid" "$bpid") || fail "xwtab: B has no floor"
+    xwtab_drag_to_window "$sx" "$sy" "$dx" "$dy" "$apid" "$bpid" require
+    for i in $(seq 1 "$xwtab_tabcount_attempts"); do
+        [[ "$(xwdrag_qs "$bid" tabCount 2>/dev/null)" == "2" ]] && break
+        sleep "$xwtab_tabcount_poll"
+    done
+    [[ "$(xwdrag_qs "$bid" tabCount 2>/dev/null)" == "2" ]] || fail "xwtab: B never gained the tab"
+    [[ "$(xwdrag_qs "$bid" path 2>/dev/null)" == "$adir/sub1" ]] \
+        || fail "xwtab: B shows $(xwdrag_qs "$bid" path 2>/dev/null), not sub1"
+    for i in $(seq 1 "$xwtab_tabcount_attempts"); do
+        [[ "$(xwdrag_qs "$aid" tabCount 2>/dev/null)" == "1" ]] && break
+        sleep "$xwtab_tabcount_poll"
+    done
+    [[ "$(xwdrag_qs "$aid" tabCount 2>/dev/null)" == "1" ]] || fail "xwtab: A kept its moved tab"
+    [[ "$(xwdrag_qs "$aid" path 2>/dev/null)" == "$adir" ]] \
+        || fail "xwtab: A shows $(xwdrag_qs "$aid" path 2>/dev/null), not $adir"
+    [[ "$(flea_pids | tr '\n' ' ')" == "$move_before" ]] \
+        || fail "xwtab: the move opened a window of its own"
+    printf 'XWTAB move ok\n'
+    # B's new tab torn off onto empty desktop space opens a third owned window on it.
+    local ex ey before before_wins cpid cid
+    before=$(flea_pids | tr '\n' ' ')
+    # The parked windows' Hyprland pids, retried while the compositor catches up with the move.
+    before_wins=""
+    for i in $(seq 1 "$xwtab_parked_attempts"); do
+        before_wins=$(xwtab_window_pids "$before" || true)
+        [[ -n "$before_wins" ]] && break
+        sleep "$xwtab_parked_poll"
+    done
+    [[ -n "$before_wins" ]] || fail "xwtab: no Hyprland windows for the parked Flea pids $before"
+    xwtab_make_room "$apid" "$bpid" || fail "xwtab: no empty desktop to tear off onto"
+    read -r ex ey <<< "$xwtab_point"
+    xwdrag_focus "$bpid"
+    read -r sx sy < <(xwtab_tab_point "$bid" "$bpid" 1) || fail "xwtab: B's second tab has no centre"
+    xwtab_drag_to_window "$sx" "$sy" "$ex" "$ey" "$bpid" desktop catcher
+    xwtab_wait_outcome tearoff
+    cpid=$(xwtab_wait_third "$before") || fail "xwtab: no third window tore off"
+    cid=$(xwdrag_qsid "$cpid") || fail "xwtab: no qs instance for $cpid"
+    for i in $(seq 1 "$xwtab_listing_attempts"); do
+        [[ "$(xwdrag_qs "$cid" path 2>/dev/null)" == "$adir/sub1" \
+            && "$(xwdrag_qs "$cid" listInFlight 2>/dev/null)" == false ]] && break
+        sleep "$xwtab_listing_poll"
+    done
+    [[ "$(xwdrag_qs "$cid" path 2>/dev/null)" == "$adir/sub1" ]] \
+        || fail "xwtab: third window shows $(xwdrag_qs "$cid" path 2>/dev/null), not sub1"
+    for i in $(seq 1 "$xwtab_tabcount_attempts"); do
+        [[ "$(xwdrag_qs "$bid" tabCount 2>/dev/null)" == "1" ]] && break
+        sleep "$xwtab_tabcount_poll"
+    done
+    [[ "$(xwdrag_qs "$bid" tabCount 2>/dev/null)" == "1" ]] || fail "xwtab: B kept its torn-off tab"
+    printf 'XWTAB tearoff ok\n'
+    # The tear-off opened exactly one window: qs pids and Hyprland windows settle to before plus the third.
+    local want_after want_wins after after_wins
+    want_after=$(xwtab_norm_set "$before $cpid")
+    want_wins=$(xwtab_norm_set "$before_wins $cpid")
+    after=""; after_wins=""
+    for i in $(seq 1 "$xwtab_settle_attempts"); do
+        after=$(xwtab_norm_set "$(flea_pids | tr '\n' ' ')")
+        after_wins=$(xwtab_norm_set "$(xwtab_window_pids "$after" || true)")
+        [[ "$after" == "$want_after" && "$after_wins" == "$want_wins" ]] && break
+        sleep "$xwtab_settle_poll"
+    done
+    if [[ "$after" != "$want_after" || "$after_wins" != "$want_wins" ]]; then
+        printf 'XWTAB pids before: %s\n' "$before" >&2
+        printf 'XWTAB pids after: %s\n' "$after" >&2
+        printf 'XWTAB windows before: %s want: %s after: %s\n' "$before_wins" "$want_wins" "$after_wins" >&2
+        for pid in $after; do
+            [[ " $want_after " == *" $pid "* ]] || xwtab_describe_pid "$pid"
+        done
+        for pid in $want_after; do
+            [[ " $after " == *" $pid "* ]] || printf 'XWTAB missing pid=%s\n' "$pid" >&2
+        done
+        fail "xwtab: the tear-off opened more than one window"
+    fi
+    printf 'XWTAB tearoff-count ok\n'
+    xwdrag_kill_second "$cpid"
+    xwtab_restore_place
+    # A opens a second tab again for the legs below: Escape, own-strip and the refusals.
+    # Focus is waited on by address, so the key cannot land on the window the kill left active.
+    xwtab_key "$apid" t
+    settle
+    [[ "$(xwdrag_qs "$aid" tabCount 2>/dev/null)" == "2" ]] || fail "xwtab: t did not reopen a second tab on A"
+    local esc_before
+    esc_before=$(flea_pids | tr '\n' ' ')
+    # Escape mid-drag over A cancels with no move, no tear-off and no new window.
+    read -r sx sy < <(xwtab_tab_point "$aid" "$apid" 1) || fail "xwtab: A's second tab has no centre"
+    local addr
+    addr=$(hyprctl clients -j | python3 -c '
+import json, sys
+# Sample input: [{"pid":1154634,"address":"0x62e8374a53d0"}].
+hits = [c for c in json.load(sys.stdin) if str(c.get("pid")) == sys.argv[1]]
+print(hits[0]["address"] if len(hits) == 1 else "")
+' "$apid") || fail "xwtab: no window for pid $apid before Escape drag"
+    [[ -n "$addr" ]] || fail "xwtab: no address for pid $apid before Escape drag"
+    local awx awy aww awh
+    read -r awx awy aww awh < <(xwdrag_geometry "$apid") || fail "xwtab: no geometry for A"
+    xwtab_source=$apid; xwtab_target=$apid; xwtab_gesture="Escape press=$sx,$sy"
+    xwdrag_glide "$sx" "$sy"
+    xwtab_mark_logs
+    xwtab_button_down=true
+    ydotool click 0x40 >/dev/null 2>&1 || fail "xwtab: pointer press failed"
+    sleep 0.3
+    xwdrag_glide "$((awx + xwtab_outside_x))" "$((awy + awh + xwtab_outside_y))"
+    xwtab_wait_start
+    xwdrag_glide "$sx" "$sy"
+    xwdrag_glide "$((sx + xwtab_target_nudge))" "$sy"
+    xwdrag_glide "$sx" "$sy"
+    # The catcher never takes keyboard focus, so Escape reaches the source drag filter.
+    omarchy-drive key --window "$addr" -k Escape >/dev/null || fail "xwtab: Escape did not reach $apid"
+    xwtab_wait_cancel
+    xwtab_release || fail "xwtab: pointer release failed"
+    xwtab_wait_unmapped "$apid"
+    [[ "$(xwdrag_qs "$aid" tabCount 2>/dev/null)" == "2" ]] || fail "xwtab: Escape moved the tab"
+    [[ "$(flea_pids | tr '\n' ' ')" == "$esc_before" ]] || fail "xwtab: Escape opened a window"
+    printf 'XWTAB escape ok\n'
+    # Out and back onto the own strip reorders with no new window.
+    local ox oy
+    read -r ox oy < <(xwtab_tab_point "$aid" "$apid" 0) || fail "xwtab: A's first tab has no centre"
+    read -r sx sy < <(xwtab_tab_point "$aid" "$apid" 1) || fail "xwtab: A's second tab has no centre after Escape"
+    # The first tab's left quarter inserts before it; its centre is the next insertion slot.
+    ox=$((ox - (sx - ox) / 4))
+    xwtab_drag_to_window "$sx" "$sy" "$ox" "$oy" "$apid" "$apid" own
+    xwtab_wait_own_return
+    for i in $(seq 1 "$xwtab_reorder_attempts"); do
+        [[ "$(xwdrag_qs "$aid" tabIndex 2>/dev/null)" == 0 ]] && break
+        sleep "$xwtab_reorder_poll"
+    done
+    [[ "$(xwdrag_qs "$aid" tabIndex 2>/dev/null)" == 0 ]] || fail "xwtab: own-strip drop did not reorder the active tab"
+    sleep 0.5
+    [[ "$(xwdrag_qs "$aid" tabCount 2>/dev/null)" == "2" ]] || fail "xwtab: own-strip drop changed the tab count"
+    [[ "$(flea_pids | tr '\n' ' ')" == "$esc_before" ]] || fail "xwtab: own-strip drop opened a window"
+    printf 'XWTAB own-strip ok\n'
+    # A drop on B's listing is refused without an enter: B's window DropArea is off with two tabs; keys go by address.
+    xwtab_key "$bpid" t
+    settle
+    [[ "$(xwdrag_qs "$bid" tabCount 2>/dev/null)" == "2" ]] || fail "xwtab: t did not open a second tab on B"
+    xwdrag_focus "$apid"
+    read -r sx sy < <(xwtab_tab_point "$aid" "$apid" 1) || fail "xwtab: A's second tab has no centre"
+    read -r dx dy < <(xwdrag_floor_point "$bid" "$bpid") || fail "xwtab: B has no floor"
+    xwtab_drag_to_window "$sx" "$sy" "$dx" "$dy" "$apid" "$bpid" refused
+    sleep 0.5
+    [[ "$(xwdrag_qs "$bid" tabCount 2>/dev/null)" == "2" ]] || fail "xwtab: B took a listing drop"
+    [[ "$(xwdrag_qs "$bid" path 2>/dev/null)" == "$bdir" ]] || fail "xwtab: B left $bdir"
+    [[ "$(xwdrag_qs "$aid" tabCount 2>/dev/null)" == "2" ]] || fail "xwtab: A lost its tab to a refused drop"
+    [[ "$(flea_pids | tr '\n' ' ')" == "$esc_before" ]] || fail "xwtab: a refused drop opened a window"
+    printf 'XWTAB listing-refused ok\n'
+    # A drop onto a foreign receiver is refused: it takes uri-list and plain text only; its enter receipt is still required.
+    : > "$dir/.flea-test-sandbox"
+    local recv_log="$dir/receiver.log" recv_pid="" recv_addr="" rcx rcy
+    : > "$recv_log"
+    setsid python3 "$repo/tests/drag-receiver.py" "$recv_log" >"$dir/receiver-err.log" 2>&1 &
+    recv_pid=$!
+    xwtab_logs+=("$recv_log")
+    xwtab_marks+=(0)
+    for i in $(seq 1 "$xwtab_receiver_attempts"); do
+        recv_addr=$(hyprctl clients -j | python3 -c '
+import json, sys
+# Sample input: [{"title":"flea-drag-receiver","address":"0xc"}], one hit once the receiver is mapped.
+hits = [w for w in json.load(sys.stdin) if w.get("title") == "flea-drag-receiver"]
+print(hits[0]["address"] if len(hits) == 1 else "")
+') || true
+        [[ -n "$recv_addr" ]] && break
+        sleep "$xwtab_receiver_poll"
+    done
+    [[ -n "$recv_addr" ]] || fail "xwtab: the foreign receiver never came up: $(cat "$dir/receiver-err.log" 2>/dev/null)"
+    xwdrag_focus "$recv_pid"
+    sleep 0.3
+    hypr_window_float "$recv_addr" on || fail "xwtab: could not float foreign receiver $recv_pid"
+    sleep 0.3
+    hypr_window_move "$recv_addr" "$xwtab_receiver_x" "$xwtab_receiver_y" || fail "xwtab: could not move foreign receiver $recv_pid"
+    sleep 0.4
+    read -r rcx rcy < <(hyprctl clients -j | python3 -c '
+import json, sys
+# Sample input: [{"title":"flea-drag-receiver","at":[1100,500],"size":[400,300]}], read once it is placed.
+hits = [w for w in json.load(sys.stdin) if w.get("title") == "flea-drag-receiver"]
+c = hits[0]
+print(c["at"][0] + c["size"][0] // 2, c["at"][1] + c["size"][1] // 2)
+') || fail "xwtab: no geometry for the foreign receiver"
+    xwdrag_focus "$apid"
+    read -r sx sy < <(xwtab_tab_point "$aid" "$apid" 1) || fail "xwtab: A's second tab has no centre"
+    xwtab_drag_to_window "$sx" "$sy" "$rcx" "$rcy" "$apid" "$recv_pid" require
+    sleep 1
+    [[ "$(xwdrag_qs "$aid" tabCount 2>/dev/null)" == "2" ]] || fail "xwtab: A lost its tab to a foreign receiver"
+    grep -q '^actions=' "$recv_log" && fail "xwtab: the foreign receiver took the tab drop"
+    [[ "$(flea_pids | tr '\n' ' ')" == "$esc_before" ]] || fail "xwtab: a foreign drop opened a window"
+    kill "$recv_pid" 2>/dev/null || true
+    wait "$recv_pid" 2>/dev/null || true
+    recv_pid=""
+    printf 'XWTAB foreign-refused ok\n'
+    xwdrag_kill_second "$bpid"
+    kill_flea
+    # Restore the suite fail and stop the trace past this case.
+    eval "$(declare -f xwtab_saved_fail | sed '1s/xwtab_saved_fail/fail/')"
+    unset -f xwtab_saved_fail
+    unset FLEA_TRACE_TABDRAG
+    trap - EXIT
 }
 
 # The cursor parks on row 0 above the card, so a press that runs on from an overlay control to any row beneath moves it.
@@ -10210,7 +13883,7 @@ views_fixture() {
 # and scrolling under an open menu or card, a click outside the menu selecting the row beneath, and
 # a right click on a card running on to the row under it. Every check runs in all three views.
 case_overlays() {
-    local dir="$fixture_root/overlays" mode n cx cy wx wy
+    local dir="$fixture_root/overlays" mode n cx cy wx wy before after
     views_fixture "$dir"
     launch "$dir"
     wait_listing 406
@@ -10232,12 +13905,14 @@ case_overlays() {
         click_row 2 right
         settle
         [[ "$(ipc contextMenuVisible)" == "true" && "$(ipc cursor)" == "2" ]] || fail "$mode: a right click on row 2 opened no menu (visible $(ipc contextMenuVisible), cursor $(ipc cursor))"
+        before=$(ipc viewContentY)
         hover_row "$n"
         settle
         [[ "$(ipc rowHovered "$n")" == "false" ]] || fail "$mode: row $n lifted under the open menu"
         omarchy-drive scroll down 3 >/dev/null
         settle
-        [[ "$(ipc viewContentY)" == "0" && "$(ipc contextMenuVisible)" == "true" ]] || fail "$mode: the wheel under the menu moved the view to $(ipc viewContentY) (menu $(ipc contextMenuVisible))"
+        after=$(ipc viewContentY)
+        [[ "$after" == "$before" && "$(ipc contextMenuVisible)" == "true" ]] || fail "$mode: the wheel under the menu moved the view from $before to $after (menu $(ipc contextMenuVisible))"
         click_row_beside_menu "$n" left
         settle
         [[ "$(ipc contextMenuVisible)" == "false" && "$(ipc cursor)" == "2" ]] || fail "$mode: the click outside the menu left it $(ipc contextMenuVisible) and moved the cursor to $(ipc cursor)"
@@ -10249,12 +13924,14 @@ case_overlays() {
         settle
         printf 'OVERLAYS_DIAG %s after settings=%s focus=%s\n' "$mode" "$(ipc settingsOpen)" "$(ipc focusView)"
         [[ "$(ipc settingsOpen)" == "true" ]] || fail "$mode: the comma key did not open settings"
+        before=$(ipc viewContentY)
         hover_row "$n"
         settle
         [[ "$(ipc rowHovered "$n")" == "false" ]] || fail "$mode: row $n lifted under the settings card"
         omarchy-drive scroll down 3 >/dev/null
         settle
-        [[ "$(ipc viewContentY)" == "0" && "$(ipc settingsOpen)" == "true" ]] || fail "$mode: the wheel under settings moved the view to $(ipc viewContentY)"
+        after=$(ipc viewContentY)
+        [[ "$after" == "$before" && "$(ipc settingsOpen)" == "true" ]] || fail "$mode: the wheel under settings moved the view from $before to $after (settings $(ipc settingsOpen))"
         read -r cx cy _cw _ch <<< "$(ipc settingsCardRect)"
         read -r wx wy _ww _wh < <(window_box) || fail "native window coordinates unavailable"
         omarchy-drive click "$((wx + cx + 40))" "$((wy + cy + 40))" right >/dev/null
@@ -10304,10 +13981,11 @@ case_views() {
         # $pass, not $mode: the "again" pass runs the grid a second time and shot keeps every capture.
         shot "views-$pass-thumbs"
         # Directories sort first, so the fixture's four media files are rows 2 to 5 in this order.
+        # The hidden list has model 0 in grid and columns, so rowAt reads loading there; visibleRowName reads the shown view.
         local names=(a-clip.mp4 b-clip.mp4 c-pic.png d-pic.jpg)
         for r in 2 3 4 5; do
-            [[ "$(ipc rowAt "$r")" == "${names[r - 2]}|"* ]] || fail "$mode: row $r is $(ipc rowAt "$r" | cut -d'|' -f1), not ${names[r - 2]}"
-            [[ "$(ipc rowThumbReady "$r")" == "true" ]] || fail "$mode: row $r ($(ipc rowAt "$r" | cut -d'|' -f1)) has no decoded thumbnail"
+            [[ "$(ipc visibleRowName "$r")" == "${names[r - 2]}" ]] || fail "$mode: row $r is $(ipc visibleRowName "$r"), not ${names[r - 2]}"
+            [[ "$(ipc rowThumbReady "$r")" == "true" ]] || fail "$mode: row $r ($(ipc visibleRowName "$r")) has no decoded thumbnail"
             lit=$(lit_in_rect "$evidence_dir/views-$pass-thumbs.png" $(ipc rowThumbRect "$r"))
             (( lit > 30 )) || fail "$mode: row $r's thumbnail box painted $lit lit pixels"
         done
@@ -10330,8 +14008,9 @@ case_views() {
             read -r wx wy _ww _wh < <(window_box) || fail "native window coordinates unavailable"
             omarchy-drive click "$((wx + fx))" "$((wy + fy))" right >/dev/null
             sleep 1
-            [[ "$(ipc path)" == "$dir/sub" && "$(ipc rowAt "$(ipc cursor)")" == s2.txt\|* && "$(ipc contextMenuVisible)" == "true" ]] \
-                || fail "columns: a right click on a peeked row: path $(ipc path), cursor row $(ipc rowAt "$(ipc cursor)" | cut -d'|' -f1), menu $(ipc contextMenuVisible)"
+            # The hidden list has model 0 in columns, so rowAt reads loading there; visibleRowName reads the shown view.
+            [[ "$(ipc path)" == "$dir/sub" && "$(ipc visibleRowName "$(ipc cursor)")" == s2.txt && "$(ipc contextMenuVisible)" == "true" ]] \
+                || fail "columns: a right click on a peeked row: path $(ipc path), cursor row $(ipc visibleRowName "$(ipc cursor)"), menu $(ipc contextMenuVisible)"
             key -k Escape >/dev/null
             settle
             key -k Backspace >/dev/null
@@ -10556,8 +14235,8 @@ case_formats() {
     lit=$(lit_in_rect "$evidence_dir/formats-sample-lines.png" $(ipc columnLinesRect))
     (( lit > 50 )) || fail "formats: sample.txt's lines box painted $lit lit pixels"
     column_expect notes.md text
-    for _attempt in $(seq 1 40); do [[ "$(ipc columnTextLines)" == "# Notes"* ]] && break; sleep 0.1; done
-    [[ "$(ipc columnTextLines)" == "# Notes"* ]] || fail "formats: notes.md's lines read '$(ipc columnTextLines)'"
+    for _attempt in $(seq 1 40); do [[ "$(ipc columnMarkdownText)" == "Notes"* ]] && break; sleep 0.1; done
+    [[ "$(ipc columnMarkdownText)" == "Notes"* ]] || fail "formats: notes.md's rendered text reads '$(ipc columnMarkdownText)'"
     column_expect empty.txt text
     column_expect big.txt text
     for _attempt in $(seq 1 40); do [[ "$(ipc columnTextLines)" == "too large" ]] && break; sleep 0.1; done
@@ -10786,9 +14465,210 @@ case_previewviews() {
 . "$repo/tests/ui-trash.sh"
 . "$repo/tests/ui-menus.sh"
 . "$repo/tests/ui-rename-design.sh"
+. "$repo/tests/ui-rename-far.sh"
 . "$repo/tests/ui-railpointer.sh"
 . "$repo/tests/ui-openwith-design.sh"
 . "$repo/tests/ui-providers.sh"
+# Native minipc checks two owned windows, surviving owners, GTK files and disabled text-only Paste inside a marked root.
+case_clipboard() {
+    command -v wl-copy >/dev/null || fail "clipboard: wl-copy is missing"
+    command -v wl-paste >/dev/null || fail "clipboard: wl-paste is missing"
+    local dir="$fixture_root/clipboard" adir bdir textdir apid aid bpid bid types offer start_ns elapsed_ns state
+    local cut_clear_deadline_ns=1000000000 offer_read_timeout_s=3
+    local batchdir="$dir/fresh-window" batch_file_count=3 clipboard_wait_timeout_s=5 clipboard_poll_interval_s=0.05 deadline file
+    sandbox_scratch "$dir"
+    adir="$dir/a"
+    bdir="$dir/b"
+    textdir="$dir/text-only"
+    mkdir -p "$adir" "$bdir"
+    printf 'first\n' > "$adir/f1"
+    printf 'second\n' > "$adir/f2"
+    printf 'third\n' > "$adir/f3"
+    printf 'GTK\n' > "$dir/gtk"
+    trap 'case_xwdrag_cleanup' EXIT
+    trap xwdrag_signal_cleanup HUP INT TERM
+    launch "$adir"
+    wait_listing 3
+    apid=$(flea_pid) || fail "clipboard: no owned first window"
+    aid=$(xwdrag_qsid "$apid") || fail "clipboard: no first instance id"
+    xwdrag_launch_second "$bdir"
+    bpid=$XW_SECOND_PID
+    bid=$XW_SECOND_ID
+
+    clipboard_press "$apid" -k y
+    clipboard_wait "$bid" copy "$adir/f1"
+    types=$(timeout "$offer_read_timeout_s" wl-paste --list-types) || fail "clipboard: no offered types"
+    for type in x-special/gnome-copied-files text/uri-list text/plain; do
+        grep -Fx "$type" <<< "$types" >/dev/null || fail "clipboard: missing $type"
+    done
+    [[ "$(timeout "$offer_read_timeout_s" wl-paste -t text/plain)" == "$adir/f1" ]] || fail "clipboard: plain path differs"
+    printf 'CLIPBOARD types ok\n'
+    clipboard_press "$bpid" -k p
+    xwdrag_wait_path "$bdir/f1" present || fail "clipboard: cross-window copy never arrived"
+    cmp "$adir/f1" "$bdir/f1" || fail "clipboard: copy differs or removed its source"
+    xwdrag_row_point "$bid" "$bpid" f1 >/dev/null || fail "clipboard: copied row never appeared"
+    clipboard_press "$bpid" -k m
+    clipboard_menu_wait "$bid" true
+    state=$(clipboard_ipc "$bid" menuState) || fail "clipboard: no menu model"
+    # Sample input: {"entries":[{"action":"paste","disabled":false}]}
+    jq -e 'any(.entries[]; .action == "paste" and .disabled == false)' <<< "$state" >/dev/null \
+        || fail "clipboard: file copy left Paste disabled or missing"
+    clipboard_press "$bpid" -k Escape
+    clipboard_menu_wait "$bid" false
+    printf 'CLIPBOARD copy ok\n'
+
+    # This fresh-window multi-file Ctrl+V leg owns the headless menu hunt's system Paste destinations, count and bytes.
+    mkdir -p "$batchdir"
+    clipboard_press "$apid" -M ctrl -k a -m ctrl -k y
+    deadline=$((SECONDS + clipboard_wait_timeout_s))
+    while :; do
+        state=$(clipboard_ipc "$aid" fileClipboard) || fail "clipboard: no source multi-file clipboard"
+        jq -e --arg first "$adir/f1" --arg second "$adir/f2" --arg third "$adir/f3" \
+            '.paths == [$first, $second, $third] and .moving == false and (.token | length) > 0' <<< "$state" >/dev/null && break
+        (( SECONDS < deadline )) || fail "clipboard: multi-file Copy never published"
+        sleep "$clipboard_poll_interval_s"
+    done
+    xwdrag_kill_second "$bpid"
+    XW_SECOND_PID=""
+    xwdrag_launch_second "$batchdir"
+    bpid=$XW_SECOND_PID
+    bid=$XW_SECOND_ID
+    deadline=$((SECONDS + clipboard_wait_timeout_s))
+    while :; do
+        state=$(clipboard_ipc "$bid" fileClipboard) || fail "clipboard: no fresh-window clipboard"
+        jq -e --arg first "$adir/f1" --arg second "$adir/f2" --arg third "$adir/f3" \
+            '.paths == [$first, $second, $third] and .moving == false' <<< "$state" >/dev/null && break
+        (( SECONDS < deadline )) || fail "clipboard: fresh window never read all copied paths"
+        sleep "$clipboard_poll_interval_s"
+    done
+    clipboard_press "$bpid" -M ctrl -k v -m ctrl
+    for file in f1 f2 f3; do
+        xwdrag_wait_path "$batchdir/$file" present || fail "clipboard: fresh-window destination lacks $file"
+        [[ -f "$batchdir/$file" && ! -L "$batchdir/$file" ]] || fail "clipboard: fresh-window $file is not a regular copy"
+        cmp "$adir/$file" "$batchdir/$file" || fail "clipboard: fresh-window $file bytes differ or its source went"
+    done
+    xwdrag_row_point "$bid" "$bpid" f3 >/dev/null || fail "clipboard: fresh-window copied rows never appeared"
+    [[ "$(clipboard_ipc "$bid" total)" == "$batch_file_count" ]] || fail "clipboard: fresh-window Paste listed the wrong file count"
+    printf 'CLIPBOARD fresh-window multi-file copy ok\n'
+    xwdrag_navigate_second "$bdir"
+    clipboard_press "$apid" -k Escape -k g -k g
+
+    clipboard_press "$apid" -k j -k x
+    clipboard_wait "$bid" cut "$adir/f2"
+    [[ "$(clipboard_ipc "$aid" rowClipMark 1)" == scissors ]] || fail "clipboard: source has no scissors mark"
+    xwdrag_focus "$bpid"
+    xwdrag_assert_focus "$bpid"
+    local baddr
+    baddr=$(xwdrag_addr "$bpid") || fail "clipboard: no destination address"
+    [[ -n "$baddr" ]] || fail "clipboard: empty destination address"
+    start_ns=$(date +%s%N)
+    xwdrag_key "$baddr" -k p >/dev/null || fail "clipboard: cut paste key failed"
+    while :; do
+        state=$(clipboard_ipc "$aid" fileClipboard 2>/dev/null || true)
+        if jq -e '.paths == [] and .moving == false' <<< "$state" >/dev/null 2>&1; then break; fi
+        elapsed_ns=$(( $(date +%s%N) - start_ns ))
+        (( elapsed_ns < cut_clear_deadline_ns )) || fail "clipboard: source cut remained past 1 s"
+        sleep 0.02
+    done
+    elapsed_ns=$(( $(date +%s%N) - start_ns ))
+    (( elapsed_ns <= cut_clear_deadline_ns )) || fail "clipboard: source cut cleared too late"
+    xwdrag_wait_path "$bdir/f2" present || fail "clipboard: cut never arrived"
+    xwdrag_wait_path "$adir/f2" absent || fail "clipboard: cut left its source"
+    [[ "$(clipboard_ipc "$aid" rowClipMark 1)" != scissors ]] || fail "clipboard: source still draws scissors"
+    printf 'CLIPBOARD cut ok\n'
+
+    xwdrag_wait_row_gone "$aid" f2 || fail "clipboard: source still lists f2"
+    clipboard_press "$apid" -k End -k y
+    clipboard_wait "$bid" copy "$adir/f3"
+    xwdrag_kill_second "$apid"
+    types=$(timeout "$offer_read_timeout_s" wl-paste --list-types) || fail "clipboard: source close left no compositor offer"
+    grep -Fx text/uri-list <<< "$types" >/dev/null || fail "clipboard: source close lost the URI offer"
+    offer=$(timeout "$offer_read_timeout_s" wl-paste -t text/uri-list) || fail "clipboard: source close lost the URI list"
+    # Sample input: text/uri-list offers file:///.../a/f3 followed by a CRLF terminator.
+    [[ "$(tr -d '\r' <<< "$offer")" == "file://$adir/f3" ]] || fail "clipboard: source close no longer offers f3"
+    clipboard_press "$bpid" -k p
+    xwdrag_wait_path "$bdir/f3" present || fail "clipboard: source close lost its copy"
+    cmp "$adir/f3" "$bdir/f3" || fail "clipboard: surviving copy differs"
+    printf 'CLIPBOARD owner-close ok\n'
+
+    printf 'copy\nfile://%s' "$dir/gtk" | timeout "$offer_read_timeout_s" wl-copy -t x-special/gnome-copied-files \
+        || fail "clipboard: GTK ownership failed"
+    clipboard_wait "$bid" copy "$dir/gtk"
+    clipboard_press "$bpid" -k p
+    xwdrag_wait_path "$bdir/gtk" present || fail "clipboard: GTK copy never arrived"
+    cmp "$dir/gtk" "$bdir/gtk" || fail "clipboard: GTK copy differs"
+    printf 'CLIPBOARD GTK ok\n'
+
+    mkdir -p "$textdir"
+    printf 'unchanged\n' > "$textdir/sentinel"
+    xwdrag_navigate_second "$textdir"
+    timeout "$offer_read_timeout_s" wl-copy hello || fail "clipboard: text ownership failed"
+    clipboard_wait "$bid" none ""
+    clipboard_press "$bpid" -k m
+    clipboard_menu_wait "$bid" true
+    state=$(clipboard_ipc "$bid" menuState) || fail "clipboard: no menu model"
+    # Sample input: {"entries":[{"action":"paste","disabled":true}]}
+    jq -e 'any(.entries[]; .action == "paste" and .disabled == true)' <<< "$state" >/dev/null \
+        || fail "clipboard: text-only clipboard left Paste enabled or missing"
+    clipboard_press "$bpid" -k Escape
+    clipboard_menu_wait "$bid" false
+    clipboard_text_no_paste "$bid" "$bpid" "$textdir"
+    printf 'CLIPBOARD text-only ok\n'
+    xwdrag_kill_second "$bpid"
+    XW_SECOND_PID=""
+    printf 'clipboard: 7 checks, 0 failed\n'
+}
+
+clipboard_ipc() {
+    timeout -k "$ipc_call_kill_after" "$ipc_call_timeout" qs ipc -i "$1" call flea "${@:2}"
+}
+clipboard_press() {
+    local pid="$1" addr
+    shift
+    xwdrag_focus "$pid"
+    xwdrag_assert_focus "$pid"
+    addr=$(xwdrag_addr "$pid") || fail "clipboard: no address for $pid"
+    [[ -n "$addr" ]] || fail "clipboard: empty address for $pid"
+    xwdrag_key "$addr" "$@" >/dev/null || fail "clipboard: key failed for $pid"
+}
+clipboard_menu_wait() {
+    local id="$1" visible="$2" state
+    local menu_wait_timeout_s=5 menu_poll_interval_s=0.05
+    local deadline=$((SECONDS + menu_wait_timeout_s))
+    while (( SECONDS <= deadline )); do
+        state=$(clipboard_ipc "$id" contextMenuVisible) || fail "clipboard: no menu visibility"
+        [[ "$state" == "$visible" ]] && return
+        sleep "$menu_poll_interval_s"
+    done
+    fail "clipboard: menu never became $visible"
+}
+clipboard_text_no_paste() {
+    local id="$1" pid="$2" dest="$3" before after state
+    local observe_timeout_s=2 observe_poll_interval_s=0.05
+    before=$(find "$dest" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort) || fail "clipboard: cannot list text destination"
+    clipboard_press "$pid" -k p
+    local deadline=$((SECONDS + observe_timeout_s))
+    while (( SECONDS <= deadline )); do
+        state=$(clipboard_ipc "$id" collideState) || fail "clipboard: no collision state"
+        # Sample input: {"opened":false}
+        jq -e '.opened == false' <<< "$state" >/dev/null || fail "clipboard: plain text opened a collision card"
+        after=$(find "$dest" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort) || fail "clipboard: cannot list text destination"
+        [[ "$before" == "$after" && ! -e "$dest/hello" ]] || fail "clipboard: plain text pasted a file"
+        sleep "$observe_poll_interval_s"
+    done
+}
+clipboard_wait() {
+    local id="$1" kind="$2" path="$3" deadline=$((SECONDS + 5)) state
+    while (( SECONDS <= deadline )); do
+        state=$(clipboard_ipc "$id" fileClipboard 2>/dev/null || true)
+        if jq -e --arg kind "$kind" --arg path "$path" \
+            'if $kind == "none" then .paths == [] and .moving == false
+             else .paths == [$path] and .moving == ($kind == "cut") end' <<< "$state" >/dev/null 2>&1; then return; fi
+        sleep 0.05
+    done
+    fail "clipboard: $id never mirrored $kind $path"
+}
+
 . "$repo/tests/ui-rail.sh"
 . "$repo/tests/ui-dropbox-roots.sh"
 . "$repo/tests/ui-settings-layout.sh"
@@ -10804,11 +14684,15 @@ case_previewviews() {
 . "$repo/tests/ui-dirsortstale.sh"
 . "$repo/tests/ui-makedefault.sh"
 . "$repo/tests/ui-noblank.sh"
+. "$repo/tests/ui-captures.sh"
 . "$repo/tests/ui-transfer-live.sh"
 . "$repo/tests/ui-columns-background.sh"
-
+. "$repo/tests/ui-colwatch.sh"
+. "$repo/tests/ui-captures-markdown.sh"
+# Native items ui:capsweep and ui:capsweeplow run only by name, outside the default wanted list; so do ui:cap_markdown, ui:cap_markdown_kinds, ui:cap_markdown_tables, ui:cap_markdown_picline and ui:cap_markdown_fences, sourced above.
+. "$repo/tests/ui-captures-sweep.sh"
 declare -a wanted=("$@")
-[[ ${#wanted[@]} -eq 0 ]] && wanted=(cursor scroll scrollbar terminal open rows click ctrlclick viewrestart dd ddclick collide sortrestart duallaunch dirsortstale editplace mute placemenu runscript unmounted sidebar menu background hidden selection watch optical select colour lifted icons thumbs hashcache stale nosweep oem header columnresize columnautofit overflow focus railpointer preview pdffocus network netmark networkauth networktimeout gvfs sharebrowser unmount phones trasharm eject rename renamelife taildrop providers grid columns columnsbackground operations tabs openterminal renderer settings makedefault scrolllane clickthrough wheelunder overlays views formats previewviews reclick colroot hangshare openwithdesign noblank previewswap transferlive)
+[[ ${#wanted[@]} -eq 0 ]] && wanted=(cursor scroll scrollbar terminal open rows click clickedge ctrlclick viewrestart dd ddclick collide sortrestart duallaunch dirsortstale editplace mute placemenu runscript unmounted sidebar menu background hidden xwsettings selection watch xwwatch reload optical select colour lifted icons thumbs hashcache stale nosweep oem header columnresize columnautofit overflow focus railpointer preview pdffocus network netmark networkauth networktimeout gvfs sharebrowser unmount phones trasharm eject poweroff rename renamefirst renamelife renamefar taildrop providers grid columns columnsbackground operations tabs tabdrag openterminal makeexec renderer settings makedefault scrolllane clickthrough wheelunder overlays views formats previewviews reclick colroot colwatch hangshare hanglisting hanginspect openwithdesign noblank previewswap transferlive recent middleclick opentab xwundo)
 
 : > "$run_log"
 : > "$flea_log"
@@ -10862,6 +14746,9 @@ vaapi_warning="VAAPITextureConverter: No rhi or non openGL based RHI"
 # case_formats and case_previewviews open a file with no permission bits on purpose; Qt names it, and this run's fixture path is the whole match.
 unreadable_warning="$fixture_root/formats/shut.jpg"
 unreadable_warning2="$fixture_root/previewviews/shut.jpg"
+# Both capture sweeps preview the same unreadable file in their own fixture roots.
+unreadable_warning3="$fixture_root/capsweep-current/previews/shut.jpg"
+unreadable_warning4="$fixture_root/capsweep-cool-dawn/previews/shut.jpg"
 # case_settings and case_networkauth chmod 000 a fixture ui.json on purpose, so Quickshell reports
 # that it cannot watch it. How many times it says so is the watch's business, not this suite's.
 unreadable_state_warning="/flea/ui.json) failed: (Permission denied)"
@@ -10873,8 +14760,13 @@ while read -r want warning; do
         failures=$((failures + 1))
     fi
 done < <(sort "$expected_warnings" | uniq -c)
+# Qt 6.11.2 prints one null connect warning per WorkerScript started with a source: they leave the grep below only when they equal the WORKER_STARTED lines.
+checked_log="$run_root/run-checked.log"
+if ! qslog_filter "native run" < "$run_log" 2>&1 > "$checked_log"; then
+    failures=$((failures + 1))
+fi
 if grep -F -v -e "$expected_warning" -e "$vaapi_warning" -e "$unreadable_warning" -e "$unreadable_warning2" \
-    -e "$unreadable_state_warning" "$run_log" \
+    -e "$unreadable_warning3" -e "$unreadable_warning4" -e "$unreadable_state_warning" "$checked_log" \
     | grep -F -v -f "$expected_warnings" | grep -E 'WARN|ERROR|TypeError|ReferenceError|Cannot open'; then
     printf 'FAIL log\n'
     failures=$((failures + 1))

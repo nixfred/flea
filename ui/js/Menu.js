@@ -2,6 +2,7 @@
 
 .import "Archive.js" as Archive
 .import "ExtThumbs.js" as ExtThumbs
+.import "Format.js" as Format
 .import "Sort.js" as Sort
 
 // Submenus carry an entry array, including an empty array while a provider is unavailable.
@@ -28,6 +29,8 @@ var OPEN_WITH_OTHER = "__another__"
 // One order for every menu: F file, B background, T Trash, P Places, R rail rows (never hideable, never in Settings > Menus).
 var INVENTORY = [
     ["open", "Open", "folder-open", "FTPR", "open"],
+    // Show original reveals a symlink's target in its own folder.
+    ["showOriginal", "Show original", "symlink", "F", "open", "showOriginal"],
     // MenuAdditions rule 3: a Places or Favorites row opens this menu for its own path, so the rows
     // it carries are the ones that take a path and not the clipboard, archive, send or destroy ones.
     ["openTab", "New tab", "plus", "P", "open"],
@@ -44,12 +47,18 @@ var INVENTORY = [
     ["cut", "Cut", "scissors", "F", "basic"],
     ["copy", "Copy", "copy", "F", "basic"],
     ["paste", "Paste", "clipboard", "FB", "basic"],
+    // MenuAdditions040: Paste as links, undoable, through the collision
+    // card; hidden, and holding only the three link rows.
+    ["pasteAs", "Paste as", "symlink", "FB", "basic", "pasteAs"],
     ["duplicate", "Duplicate", "file-plus", "F", "basic"],
     ["rename", "Rename", "rename", "FR", "basic"],
     // A saved place's own rows beside Rename; Edit address and Remove from Network are rail-only.
     ["editPlace", "Edit address", "sliders", "R", "basic"],
     ["remove", "Remove from Network", "minus", "R", "rremove"],
     ["selectAll", "Select all", "check", "B", "basic"],
+    // MenuAdditions040: Invert selection flips the marks over the rows the
+    // listing draws; hidden, present only while something is selected.
+    ["invertSelection", "Invert selection", "contrast", "B", "basic", "invertSelection"],
     ["compress", "Compress", "archive", "F", "archive"],
     ["extract", "Extract", "archive-out", "F", "archive"],
     ["convert", "Convert", "sliders", "F", "archive"],
@@ -68,8 +77,11 @@ var INVENTORY = [
     ["copyto", "Copy to", "copy", "F", "inspect", "copyTo"],
     ["properties", "Properties", "info", "F", "inspect"],
     ["permissions", "Permissions", "lock", "F", "inspect"],
-    ["copypath", "Copy path", "file-text", "FP", "inspect"],
-    // MenuAdditions rule 2: after Copy path, one row per executable in ~/.config/flea/scripts, and
+    // Both boards place Make executable in inspect, without a key, only on scripts missing every execute bit.
+    ["makeExecutable", "Make executable", "play", "F", "inspect", "makeExecutable"],
+    // MenuAdditions040: Copy as replaces the file menu's hidden Copy path row; a place keeps the flat Copy path behind the same switch.
+    ["copyAs", "Copy as", "file-text", "FP", "inspect", "copyAs"],
+    // MenuAdditions rule 2: after Copy as, one row per executable in ~/.config/flea/scripts, and
     // absent rather than greyed when that directory is missing or holds none.
     ["runScript", "Run script", "terminal", "F", "inspect"],
     ["addFavourite", "Add to Favorites", "star", "FBP", "inspect"],
@@ -94,7 +106,11 @@ function buildEntries(kind, p) {
     for (var i = 0; i < INVENTORY.length; i++) {
         var spec = INVENTORY[i]
         // Rail rows are never user-hideable: no switch governs them, so the stored set is not read here.
-        if (spec[3].indexOf(kind) < 0 || (kind !== "R" && isHidden(p.hiddenActions, spec[0]))) continue
+        if (spec[3].indexOf(kind) < 0) continue
+        // The background menu shows Open in terminal without reading the hidden set.
+        if (kind !== "R" && isHidden(p.hiddenActions, spec[0])) {
+            if (!(kind === "B" && spec[0] === "openTerminal")) continue
+        }
         var entry = { id: spec[0], action: spec[5] || spec[0], label: spec[1], glyph: spec[2] }
         if (!availableEntry(entry, p, kind)) continue
         if (out.length && group !== spec[4]) out.push({ separator: true })
@@ -117,14 +133,34 @@ function availableEntry(e, p, kind) {
         return (e.id === "removeFavourite") === (p.placeFavourite === true)
     if (e.action === "addFavourite" && kind === "F")
         e.disabled = count !== 1 || ((Number(p.rowMode) || 0) & 0o170000) !== 0o040000
-    if (e.action === "paste") e.disabled = p.clipboardAvailable !== true
+    if (e.action === "paste") e.disabled = p.clipboardAvailable !== true && p.clipboardWatchFailed !== true
+    // MenuAdditions040: Show original is visible but only on a symlink.
+    if (e.action === "showOriginal" && p.rowIsSymlink !== true) return false
+    // Paste as keeps its disabled row without a chevron until files are known.
+    if (e.action === "pasteAs") {
+        // A filesystem that holds no links offers no link rows at all.
+        if (p.canLink === false) return false
+        e.disabled = p.clipboardAvailable !== true
+        if (p.clipboardAvailable === true)
+            e.submenu = pasteAsEntries()
+    }
+    // Every Copy as variant covers the whole selection, one path per line; no board draws a place menu with it, so a place keeps 0.3.7's flat Copy path.
+    if (e.action === "copyAs") {
+        if (kind === "P") { e.id = e.action = "copypath"; e.label = "Copy path" }
+        else e.submenu = copyAsEntries()
+    }
+    // MenuAdditions040: Invert selection flips over the rows the listing
+    // draws, so with nothing selected there is nothing to flip from.
+    if (e.action === "invertSelection" && count === 0) return false
     if (["duplicate", "rename", "properties"].indexOf(e.action) >= 0)
         e.disabled = count !== 1
     if (e.action === "permissions") {
-        var permission = permissionsEntry(p.rowMode, count)
+        var permission = permissionsEntry(p.rowMode, count, p.selectionModes)
         e.disabled = permission.disabled
         if (permission.errored) e.errored = true
     }
+    // Only a cursor-row script without any execute bit qualifies; its two-byte probe runs once at menu open.
+    if (e.action === "makeExecutable" && !canMakeExecutable(p.rowMode, count, p.hasShebang, p.cursorIsTarget)) return false
     if (e.action === "runScript") {
         if (!(p.scripts || []).length) return false
         e.submenu = p.scripts.map(function (script) { return { id: script.id, label: script.label } })
@@ -136,6 +172,9 @@ function availableEntry(e, p, kind) {
     // Issue 133: a mount with no trash directory never offers the row, rather than offering one that
     // fails; ui/js/Mounts.js trashable is the one reader of what the path says about that.
     if (e.action === "trash" && p.canTrash === false) return false
+    // A read-only folder turns its write rows off; the listing's own w flag decides, never the mode.
+    if (p.dirWritable === false && ["newFolder", "newFile", "paste", "pasteAs", "duplicate",
+            "rename", "trash", "deletePermanently"].indexOf(e.action) >= 0) e.disabled = true
     if (e.action === "extract" && !Archive.extractEntry(e, p, count)) return false
     if (e.action === "convert" && !(p.rowIsImage && p.canConvert && count === 1)) return false
     // OpenWith.html: the desktop's current default is first and carries the muted caption "default"
@@ -226,10 +265,88 @@ function availableRail(e, entry) {
 
 // The mode describes the selected object itself, so a symlink never grants access to its unseen target.
 // Issue 193, GM's ruling of 2026-09-24: a row that cannot act reads red with no sentence, as a provider does.
-function permissionsEntry(mode, count) {
-    var kind = (Number(mode) || 0) & 0o170000
-    var allowed = count === 1 && (kind === 0o100000 || kind === 0o040000)
+// MenuAdditions040: Permissions takes the whole selection, so one bad row
+// among modes refuses the row; the dialog inspects each file in turn.
+function permissionsEntry(mode, count, modes) {
+    if (modes !== undefined && modes !== null && modes.length > 0) {
+        for (var i = 0; i < modes.length; i++) {
+            var kind = (Number(modes[i]) || 0) & Format.S_IFMT
+            if (!(kind === Format.S_IFREG || kind === 0o040000))
+                return { label: "Permissions", action: "permissions", glyph: "lock", disabled: true, errored: true }
+        }
+        return { label: "Permissions", action: "permissions", glyph: "lock", disabled: false, errored: false }
+    }
+    var kind = (Number(mode) || 0) & Format.S_IFMT
+    var allowed = count >= 1 && (kind === Format.S_IFREG || kind === 0o040000)
     return { label: "Permissions", action: "permissions", glyph: "lock", disabled: !allowed, errored: !allowed }
+}
+
+// Only a single cursor-row regular file with a shebang and no execute bit.
+function canMakeExecutable(mode, count, hasShebang, cursorIsTarget) {
+    if (count !== 1 || hasShebang !== true || cursorIsTarget !== true) return false
+    var bits = Number(mode) || 0
+    if ((bits & Format.S_IFMT) !== Format.S_IFREG) return false
+    return (bits & Format.ANY_EXECUTE_BIT) === 0
+}
+
+// The Copy as flyout: six leaves in board order, letters on keyHint.
+function copyAsEntries() {
+    return [
+        { id: "copyPath", label: "Path", glyph: "file-text", keyHint: "p" },
+        { id: "copyName", label: "Name", glyph: "type", keyHint: "n" },
+        { id: "copyStem", label: "Name without extension", glyph: "type", keyHint: "e" },
+        { id: "copydirpath", label: "Folder path", glyph: "folder", keyHint: "f" },
+        { id: "copyUri", label: "File URI", glyph: "globe", keyHint: "u" },
+        { id: "copyQuoted", label: "Shell-quoted", glyph: "terminal", keyHint: "s" }
+    ]
+}
+
+// MenuAdditions040: the Paste as flyout. Link is relative from the
+// destination, Absolute link stores the full path; l and h open and close a
+// flyout, so the letters are L, a and H.
+function pasteAsEntries() {
+    return [
+        { id: "pasteLink", label: "Link", glyph: "symlink", keyHint: "L" },
+        { id: "pasteAbsoluteLink", label: "Absolute link", glyph: "symlink", keyHint: "a" },
+        { id: "pasteHardLink", label: "Hard link", glyph: "copy", keyHint: "H" }
+    ]
+}
+
+// A hidden row still opens its flyout, built from the action.
+function flyoutEntries(action) {
+    if (action === "copyAs")
+        return copyAsEntries()
+    if (action === "pasteAs")
+        return pasteAsEntries()
+    return []
+}
+// The sentence an empty Paste as refuses with, the same one ui/Pane.qml shows.
+var EMPTY_CLIPBOARD = "There is nothing to paste; y copies and x cuts."
+// Sample input: submenuFor("pasteAs", [], false) answers refuse.
+function submenuFor(action, entries, clipboardAvailable) {
+    if (flyoutEntries(action).length === 0)
+        return { kind: "none" }
+    for (var i = 0; i < entries.length; i++) {
+        if (entries[i].action === action) {
+            if (entries[i].disabled === true || !hasSubmenu(entries[i]))
+                return { kind: "refuse" }
+            return { kind: "row", index: i }
+        }
+    }
+    if (action === "pasteAs" && clipboardAvailable !== true)
+        return { kind: "refuse" }
+    return { kind: "lone" }
+}
+// Sample input: loneChoice("copyAs", "copyPath", false, false, true, "a", "a") fires "copyAs:copyPath".
+function loneChoice(action, id, forRail, forHeader, hasRow, openedIdentity, selectionIdentity) {
+    var leaves = flyoutEntries(action)
+    var known = false
+    for (var i = 0; i < leaves.length; i++)
+        if (leaves[i].separator !== true && leaves[i].id === id) known = true
+    var moved = !forRail && !forHeader && hasRow && openedIdentity !== selectionIdentity
+    if (moved) return { kind: "moved" }
+    if (!known) return { kind: "unknown" }
+    return { kind: "fire", fired: action + ":" + id }
 }
 
 

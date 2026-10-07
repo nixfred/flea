@@ -10,12 +10,12 @@ import "js/GridGeometry.js" as GridGeometry
 import "js/Tap.js" as Tap
 import "js/Thumbs.js" as Thumbs
 
-// The grid view. Same rows, same marks, same thumbnails as the list; only the geometry differs, so
-// the viewport maths is the list's own with a tile row standing in for a text row.
+// Grid shares the list's rows, marks, thumbnails and viewport plan, scaled to tile rows.
 GridView {
     id: root
 
     property var pane: null
+    readonly property bool fileDragActive: dragSession.Drag.active
     property var menu: null
 
     property real zoomTravel: 0
@@ -103,6 +103,13 @@ GridView {
     model: (root.visible || root.pane.renamingIndex >= 0) ? pane.shownTotal : 0
     currentIndex: Filter.viewOf(root.pane.shown, root.pane.renamingIndex >= 0 ? root.pane.renamingIndex : root.pane.cursorIndex)
     clip: true
+    // Qt's own tracking scrolls a flush-parked end to the footer's end on a cursor move; revealCursor's Contain leaves a whole tile alone.
+    highlightFollowsCurrentItem: false
+    onCurrentIndexChanged: root.revealCursor()
+    function revealCursor() {
+        if (root.visible && !root.hiddenHeld && root.count > 0 && root.currentIndex >= 0)
+            root.positionViewAtIndex(root.currentIndex, GridView.Contain)
+    }
     // One gap of bare ground along the left and the top; GridTile's hairline inset stays.
     leftMargin: Theme.spacing.gap
     topMargin: Theme.spacing.gap
@@ -154,6 +161,7 @@ GridView {
         selected: root.pane.isSelected(listingIndex)
         dropTarget: dragSession.dropIndex >= 0 && listingIndex === dragSession.dropIndex
         dropCopying: dragSession.dragCopy
+        dropLinking: dragSession.dragLink
         thumb: Thumbs.allowed(row, ViewState.thumbnailMode) ? Thumbs.fileFor(root.pane.thumbState, listingIndex) : ""
         renaming: listingIndex >= 0 && listingIndex === root.pane.renamingIndex
         renamePane: root.pane
@@ -170,13 +178,24 @@ GridView {
         TapHandler {
             id: tap
             enabled: !cell.renaming
-            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+            // A press held past the interval must not fire while the button is
+            // still down on a row about to be dragged; the release still arms.
+            onPressedChanged: if (pressed) root.pane.pressSlowClick()
             onTapped: function (eventPoint, button) {
                 if (cell.listingIndex < 0) return
-                if (button === Qt.RightButton)
+                if (button === Qt.MiddleButton)
+                    Tap.tappedTab(root.pane.rowFor(cell.listingIndex), root.pane.path, root.pane)
+                else if (button === Qt.RightButton)
                     Tap.tappedMenu(cell.listingIndex, eventPoint, root.pane, root.menu)
-                else
+                else {
+                    var wasSole = root.pane.slowClickWasSole(cell.listingIndex)
                     Tap.tapped(cell.listingIndex, tap.tapCount, tap.point.modifiers, root.pane)
+                    // The slow click renames on the pane's timer; a double click opens through tapped() above instead.
+                    if (tap.tapCount === 2) root.pane.cancelSlowClick()
+                    else if (tap.tapCount === 1 && Tap.onName(cell.captionItem, cell, eventPoint.position, true)) root.pane.armSlowClick(cell.listingIndex, tap.point.modifiers, dragSession.Drag.active, wasSole)
+                    else root.pane.cancelSlowClick()
+                }
             }
         }
 
@@ -289,6 +308,7 @@ GridView {
     onCountChanged: {
         if (root.hiddenHeld && root.visible && root.count > 0)
             root.restoreCursorView()
+        else root.revealCursor()
     }
     function restoreCursorView() {
         // A queued turn arriving after the hold ended is stale.

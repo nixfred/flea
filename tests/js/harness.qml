@@ -4,15 +4,22 @@ import "background.js" as BackgroundSuite
 import "buttons.js" as ButtonsSuite
 import "collide.js" as CollideSuite
 import "clipmarks.js" as ClipMarksSuite
+import "clipboard.js" as ClipboardSuite
 import "columns.js" as ColumnsSuite
+import "columnskeep.js" as ColumnsKeepSuite
+import "watchgate.js" as WatchGateSuite
 import "contrast.js" as ContrastSuite
+import "copyas.js" as CopyAsSuite
+import "invert.js" as InvertSuite
 import "crumbs.js" as CrumbsSuite
 import "ddtarget.js" as DdtargetSuite
 import "dirsizes.js" as DirSizesSuite
 import "drag.js" as DragSuite
+import "dragout.js" as DragOutSuite
 import "dst.js" as DstSuite
 import "errors.js" as ErrorsSuite
 import "facts.js" as FactsSuite
+import "figureservice.js" as FigureServiceSuite
 import "filter.js" as FilterSuite
 import "filter-cursor.js" as FilterCursorSuite
 import "foldersorts.js" as FolderSortsSuite
@@ -29,15 +36,37 @@ import "jump.js" as JumpSuite
 import "jump-heldout.js" as JumpHeldoutSuite
 import "keymap.js" as KeymapSuite
 import "localsend.js" as LocalSendSuite
+import "markdown.js" as MarkdownSuite
+import "mdprepared.js" as MdPreparedSuite
+import "mdstructure.js" as MdStructureSuite
+import "mdlineends.js" as MdLineEndsSuite
+import "mdliteral.js" as MdLiteralSuite
+import "mdspecfix.js" as MdSpecFixSuite
+import "mddraw.js" as MdDrawSuite
+import "mdnest.js" as MdNestSuite
+import "mdhtml.js" as MdHtmlSuite
+import "mdhtmlgh.js" as MdHtmlGhSuite
+import "mdhead.js" as MdHeadSuite
+import "mdhtmlrow.js" as MdHtmlRowSuite
+import "mdgates.js" as MdGatesSuite
+import "mdr7.js" as MdR7Suite
+import "mdtable.js" as MdTableSuite
+import "mdround4.js" as MdRound4Suite
+import "mdprogress.js" as MdProgressSuite
+import "mdslice.js" as MdSliceSuite
+import "markdownpictures.js" as MarkdownPicturesSuite
 import "listbudget.js" as ListBudgetSuite
 import "marks.js" as MarksSuite
 import "match.js" as MatchSuite
+import "motion.js" as MotionSuite
 import "menu.js" as MenuSuite
+import "xwnewfile.js" as XwNewFileSuite
 import "openwith.js" as OpenWithSuite
 import "devices.js" as DevicesSuite
 import "mounts.js" as MountsSuite
 import "names.js" as NamesSuite
 import "nav.js" as NavSuite
+import "navmouse.js" as NavMouseSuite
 import "network.js" as NetworkSuite
 import "ops.js" as OpsSuite
 import "opstrash.js" as OpsTrashSuite
@@ -52,13 +81,22 @@ import "placemenu.js" as PlaceMenuSuite
 import "protocols.js" as ProtocolsSuite
 import "railkeys.js" as RailKeysSuite
 import "recent.js" as RecentSuite
+import "recentmode.js" as RecentModeSuite
 import "recentdates.js" as RecentDatesSuite
 import "reclick.js" as ReclickSuite
 import "renderer.js" as RendererSuite
 import "rowcells.js" as RowCellsSuite
 import "scroll.js" as ScrollSuite
+import "scrolloff.js" as ScrollOffSuite
+import "menuscroll.js" as MenuScrollSuite
 import "search.js" as SearchSuite
 import "selection.js" as SelectionSuite
+import "reload.js" as ReloadSuite
+import "slowclick.js" as SlowClickSuite
+import "slowop.js" as SlowOpSuite
+import "shiftranges.js" as ShiftRangesSuite
+import "sheetquery.js" as SheetQuerySuite
+import "sheetcandidates.js" as SheetCandidatesSuite
 import "scripts.js" as ScriptsSuite
 import "settings.js" as SettingsSuite
 import "settingsmenus.js" as SettingsMenusSuite
@@ -80,13 +118,20 @@ import "trash.js" as TrashSuite
 import "tap.js" as TapSuite
 import "marquee.js" as MarqueeSuite
 import "tabs.js" as TabsSuite
+import "tabcatcher.js" as TabCatcherSuite
 import "tabs-switch.js" as TabsSwitchSuite
+import "tabmove.js" as TabMoveSuite
+import "tabrestore.js" as TabRestoreSuite
 import "shelfmodel.js" as ShelfModelSuite
 import "thumbs.js" as ThumbsSuite
 import "extthumbs.js" as ExtThumbsSuite
 import "uistate.js" as UiStateSuite
 import "update.js" as UpdateSuite
 import "watch.js" as WatchSuite
+import "xwwatch.js" as XwWatchSuite
+import "xwanchor-races.js" as XwAnchorRacesSuite
+import "renameview.js" as RenameViewSuite
+import "xwrl4.js" as Xwrl4Suite
 import "gvfsbridge.js" as GvfsBridgeSuite
 
 Item {
@@ -103,33 +148,37 @@ Item {
         }
 
         var suites = [
-            ["archive", ArchiveSuite], ["background", BackgroundSuite], ["buttons", ButtonsSuite], ["collide", CollideSuite], ["clipmarks", ClipMarksSuite], ["columns", ColumnsSuite], ["contrast", ContrastSuite],
-            ["dirsizes", DirSizesSuite], ["drag", DragSuite], ["dst", DstSuite], ["ddtarget", DdtargetSuite],
+            ["clipboard", ClipboardSuite],
+            ["archive", ArchiveSuite], ["background", BackgroundSuite], ["buttons", ButtonsSuite], ["collide", CollideSuite], ["clipmarks", ClipMarksSuite], ["columns", ColumnsSuite], ["columnskeep", ColumnsKeepSuite], ["watchgate", WatchGateSuite], ["contrast", ContrastSuite],
+            ["dirsizes", DirSizesSuite], ["drag", DragSuite], ["dragout", DragOutSuite], ["dst", DstSuite], ["ddtarget", DdtargetSuite],
+            ["copyas", CopyAsSuite], ["invert", InvertSuite],
             ["edmonton", DstSuite],
-            ["errors", ErrorsSuite], ["facts", FactsSuite], ["filter", FilterSuite], ["filter-cursor", FilterCursorSuite],
+            ["errors", ErrorsSuite], ["facts", FactsSuite], ["figureservice", FigureServiceSuite], ["filter", FilterSuite], ["filter-cursor", FilterCursorSuite],
             ["focus", FocusSuite], ["focus-grid", FocusGridSuite], ["focus-forward", FocusForwardSuite],
             ["foldersorts", FolderSortsSuite],
             ["gridgeometry", GridGeometrySuite], ["density", DensitySuite],
             ["focus-lines", FocusLinesSuite], ["focus-wrap", FocusWrapSuite],
             ["format", FormatSuite], ["icons", IconsSuite],
-            ["jump", JumpSuite], ["jump-heldout", JumpHeldoutSuite], ["keymap", KeymapSuite], ["localsend", LocalSendSuite], ["listbudget", ListBudgetSuite], ["match", MatchSuite], ["menu", MenuSuite],
-            ["marks", MarksSuite],             ["mounts", MountsSuite], ["names", NamesSuite], ["nav", NavSuite], ["crumbs", CrumbsSuite], ["devices", DevicesSuite], ["network", NetworkSuite],
+            ["jump", JumpSuite], ["jump-heldout", JumpHeldoutSuite], ["keymap", KeymapSuite], ["localsend", LocalSendSuite], ["listbudget", ListBudgetSuite], ["match", MatchSuite], ["menu", MenuSuite], ["xwnewfile", XwNewFileSuite],
+            ["marks", MarksSuite], ["markdown", MarkdownSuite], ["mdstructure", MdStructureSuite], ["mdlineends", MdLineEndsSuite], ["mdliteral", MdLiteralSuite], ["mdspecfix", MdSpecFixSuite], ["mddraw", MdDrawSuite], ["mdnest", MdNestSuite], ["mdhtml", MdHtmlSuite], ["mdhtmlgh", MdHtmlGhSuite], ["mdhead", MdHeadSuite], ["mdhtmlrow", MdHtmlRowSuite], ["mdr7", MdR7Suite], ["mdround4", MdRound4Suite], ["mdprogress", MdProgressSuite], ["mdslice", MdSliceSuite], ["markdownpictures", MarkdownPicturesSuite], ["mounts", MountsSuite], ["motion", MotionSuite], ["names", NamesSuite], ["nav", NavSuite], ["crumbs", CrumbsSuite], ["devices", DevicesSuite], ["network", NetworkSuite], ["navmouse", NavMouseSuite], ["mdtable", MdTableSuite],
             ["openwith", OpenWithSuite], ["ops", OpsSuite], ["opstrash", OpsTrashSuite],
             ["palette", PaletteSuite], ["pathbar", PathBarSuite], ["places", PlacesSuite], ["placemenu", PlaceMenuSuite], ["rail", RailSuite], ["scripts", ScriptsSuite],
             ["phones", PhonesSuite],
             ["picker", PickerSuite],
-            ["previewkeys", PreviewKeysSuite], ["previewswap", PreviewSwapSuite],
+            ["previewkeys", PreviewKeysSuite], ["mdprepared", MdPreparedSuite], ["previewswap", PreviewSwapSuite],
             ["protocols", ProtocolsSuite], ["railkeys", RailKeysSuite],
             ["recent", RecentSuite],
+            ["recentmode", RecentModeSuite],
             ["recentdates", RecentDatesSuite],
             ["reclick", ReclickSuite],
             ["renderer", RendererSuite], ["rowcells", RowCellsSuite],
-            ["scroll", ScrollSuite], ["search", SearchSuite],
-            ["selection", SelectionSuite], ["settings", SettingsSuite], ["settingsmenus", SettingsMenusSuite], ["settingsshelf", SettingsShelfSuite], ["settingsabout", SettingsAboutSuite],
+            ["scroll", ScrollSuite], ["scrolloff", ScrollOffSuite], ["menuscroll", MenuScrollSuite], ["search", SearchSuite],
+            ["selection", SelectionSuite], ["shiftranges", ShiftRangesSuite], ["sheetquery", SheetQuerySuite], ["sheetcandidates", SheetCandidatesSuite], ["reload", ReloadSuite], ["slowclick", SlowClickSuite], ["slowop", SlowOpSuite], ["settings", SettingsSuite], ["settingsmenus", SettingsMenusSuite], ["settingsshelf", SettingsShelfSuite], ["settingsabout", SettingsAboutSuite],
             ["sort", SortSuite], ["swap", SwapSuite], ["startup", StartupSuite], ["trashdates", TrashDatesSuite], ["permissions", PermissionsSuite], ["status", StatusSuite], ["statusfix", StatusFixSuite], ["taildrop", TaildropSuite], ["textsize", TextSizeSuite],
-            ["trash", TrashSuite], ["tap", TapSuite], ["marquee", MarqueeSuite], ["tabs", TabsSuite], ["tabs-switch", TabsSwitchSuite], ["shelfmodel", ShelfModelSuite],
+            ["trash", TrashSuite], ["tap", TapSuite], ["marquee", MarqueeSuite], ["tabs", TabsSuite], ["tabcatcher", TabCatcherSuite], ["tabs-switch", TabsSwitchSuite], ["tabmove", TabMoveSuite], ["tabrestore", TabRestoreSuite], ["shelfmodel", ShelfModelSuite],
+            ["mdgates", MdGatesSuite],
             ["themes", ThemesSuite], ["thumbs", ThumbsSuite], ["extthumbs", ExtThumbsSuite], ["transfer", TransferSuite], ["uistate", UiStateSuite], ["update", UpdateSuite],
-            ["watch", WatchSuite], ["gvfsbridge", GvfsBridgeSuite]
+            ["watch", WatchSuite], ["xwwatch", XwWatchSuite], ["xwanchor-races", XwAnchorRacesSuite], ["renameview", RenameViewSuite], ["xwrl4", Xwrl4Suite], ["gvfsbridge", GvfsBridgeSuite]
         ]
         var argv = Qt.application.arguments
         var only = ""
@@ -165,7 +214,7 @@ Item {
         for (var i = 0; i < failures.length; i++) {
             console.log("FAIL " + failures[i])
         }
-        console.log(checked + " checks, " + failures.length + " failed")
+        console.log((hasOnly ? only : "js") + ": " + checked + " checks, " + failures.length + " failed")
         Qt.exit(failures.length === 0 ? 0 : 1)
     }
 }

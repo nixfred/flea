@@ -80,7 +80,7 @@ fn menu_workers_refuse_replacement_sources_before_helpers_or_mutations() {
     run_trash(vec![path.to_string_lossy().into()], tx, Some(captured.clone()));
     let results: Vec<_> = rx.iter().collect();
     assert!(results.iter().any(|message| matches!(message, OpMsg::Meta { line } if line.contains("changed"))));
-    assert!(results.iter().any(|message| matches!(message, OpMsg::Trashed { ok: 0, failed: 1, entry } if entry.steps.is_empty())));
+    assert!(results.iter().any(|message| matches!(message, OpMsg::Trashed { ok: 0, failed: 1, entry, .. } if entry.steps.is_empty())));
     let destination = d.join("output.zip");
     assert!(destination.is_absolute() && destination.starts_with(d.path()));
     let (tx, rx) = channel();
@@ -117,7 +117,8 @@ fn every_operation_line_matches_the_shape_the_operations_design_names() {
     assert_eq!(transferdone_line(12, 1, 1, 0, false, &[], false, ""), r#"{"t":"transferdone","id":12,"ok":1,"failed":1,"skipped":0,"cancelled":false,"retryPaths":[],"durable":false,"note":""}"#);
     assert_eq!(transferdone_line(12, 1, 0, 0, false, &[], true, ""), r#"{"t":"transferdone","id":12,"ok":1,"failed":0,"skipped":0,"cancelled":false,"retryPaths":[],"durable":true,"note":""}"#);
     assert_eq!(transferdone_line(12, 1, 0, 0, false, &[], false, crate::backend::durable::DIR_UNCONFIRMED), r#"{"t":"transferdone","id":12,"ok":1,"failed":0,"skipped":0,"cancelled":false,"retryPaths":[],"durable":false,"note":"copied, but the drive did not confirm the folder"}"#);
-    assert_eq!(trashed_line(1, 0), r#"{"t":"trashed","ok":1,"failed":0}"#);
+    assert_eq!(trashed_line(1, 0, ""), r#"{"t":"trashed","ok":1,"failed":0}"#);
+    assert_eq!(trashed_line(0, 1, "Trash took too long to answer"), r#"{"t":"trashed","ok":0,"failed":1,"err":"Trash took too long to answer"}"#);
     assert_eq!(renamed_line(true, "/home/gm/new.txt"), r#"{"t":"renamed","ok":true,"path":"/home/gm/new.txt"}"#);
     assert_eq!(
         duplicated_line(true, "/home/gm/photo copy.jpg"),
@@ -125,6 +126,15 @@ fn every_operation_line_matches_the_shape_the_operations_design_names() {
     );
     assert_eq!(made_line(true, "/home/gm/New Folder"), r#"{"t":"made","ok":true,"path":"/home/gm/New Folder"}"#);
     assert_eq!(undone_line("move", true), r#"{"t":"undone","op":"move","ok":true}"#);
+}
+
+#[test]
+fn a_skipped_link_rides_the_note_and_never_the_item_tally() {
+    assert_eq!(super::join_link_note(0, ""), "");
+    assert_eq!(super::join_link_note(1, ""), "1 link skipped");
+    assert_eq!(super::join_link_note(10, ""), "10 links skipped");
+    assert_eq!(super::join_link_note(2, "copied, but the drive did not confirm the folder"),
+        "2 links skipped · copied, but the drive did not confirm the folder");
 }
 
 #[test]
@@ -147,6 +157,19 @@ fn a_destination_that_is_not_an_existing_directory_is_refused_before_any_item_is
     assert_eq!(error.path, missing.to_string_lossy());
     assert_eq!(error.msg, "file or folder not found");
     assert!(!missing.exists(), "Flea does not create the destination");
+}
+
+#[test]
+fn a_relative_source_is_refused_rather_than_read_from_the_working_directory() {
+    let d = TestDir::new("relative-source");
+    let dest = d.dir("dest");
+    let (tx, rx) = channel();
+    run_transfer_checked(1, false, vec!["relative/a.txt".to_string()], dest.clone(),
+        Arc::new(AtomicBool::new(false)), tx, None, None, Policy::default());
+    let results: Vec<_> = rx.iter().collect();
+    assert!(results.iter().any(|message| matches!(message, OpMsg::Item { ok: false, err, .. } if err == "a source must be an absolute path")));
+    assert!(results.iter().any(|message| matches!(message, OpMsg::TransferDone { ok: 0, failed: 1, .. })));
+    assert!(!dest.join("a.txt").exists(), "a refused source lands nothing");
 }
 
 #[test]

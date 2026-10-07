@@ -99,4 +99,85 @@ function run(check) {
           Source.source("ui/ViewportScrollBar.qml").indexOf("TRACK_LINE"), -1)
     check("no hairline element survives in the bar",
           Source.source("ui/ViewportScrollBar.qml").indexOf("hairline"), -1)
+
+    // GM 2026-10-01: touchpad input answers Finder's feel; the wheel notch above is unchanged.
+    check("phase 0 is a wheel, any other phase is a touchpad", Scroll.isTouchpad(0), false)
+    check("begin is a touchpad", Scroll.isTouchpad(1), true)
+    check("update is a touchpad", Scroll.isTouchpad(2), true)
+    check("end is a touchpad", Scroll.isTouchpad(3), true)
+    check("touchpad pixels gain GTK4's 2.5", Scroll.touchDistance(-10), -25)
+    check("zero pixels travel zero", Scroll.touchDistance(0), 0)
+    check("a notch through the handler's distance helper is still 288",
+          Scroll.distance(0, -120, 3, 24, 4), -288)
+    // The lift is the stroke's last 100 ms; fingers paused before it give no tail.
+    check("a pause before the lift gives no tail",
+          Scroll.liftVelocity([{ t: 0, x: -50, y: 0 }], 500).vx, 0)
+    check("a steady stroke reads its own rate",
+          Scroll.liftVelocity([{ t: 0, x: 0, y: 0 }, { t: 50, x: -100, y: 0 }], 50).vx, -2)
+    check("three 25 px frames at 8 ms read 3.125 off the stale Begin anchor",
+          Scroll.liftVelocity([{ t: 0, x: 0, y: 0 }, { t: 8, x: 25, y: 0 }, { t: 16, x: 25, y: 0 }, { t: 24, x: 25, y: 0 }], 104).vx, 3.125)
+    check("two events in one millisecond take the 16 ms floor",
+          Scroll.liftVelocity([{ t: 100, x: 25, y: 0 }, { t: 100, x: 25, y: 0 }], 100).vx, 3.125)
+    check("the lift caps at the named maximum",
+          Scroll.liftVelocity([{ t: 0, x: 500, y: 0 }, { t: 90, x: 500, y: 0 }], 90).vx, 6)
+    check("below the stop speed there is no tail", Scroll.tailTotal(0.02), 0)
+    check("above it the tail lives", Scroll.tailLive(1, 0), true)
+    check("at rest it does not", Scroll.tailLive(0.02, 0), false)
+    var steppedV = 2, steppedDt = 16.7, steppedSum = 0, steppedGuard = 0
+    while (Scroll.tailLive(steppedV, 0) && steppedGuard < 10000) {
+        var stepped = Scroll.tailStep(steppedV, steppedDt)
+        steppedSum += stepped.dx
+        steppedV = stepped.v
+        steppedGuard += 1
+    }
+    check("the stepped tail equals the closed form within 1 px",
+          Math.abs(steppedSum - Scroll.tailTotal(2)) < 1, true)
+    check("a tail past the end still lands on the last page",
+          Scroll.bounded(600 + Scroll.tailTravel(2, 500), 0, 1000, 400), 600)
+    // Elastic edges: resisted overscroll, the return landing on its bound, wheel never leaving it.
+    check("no raw travel past the bound shows no overscroll",
+          typeof Scroll.overResist === "function" && Scroll.overResist(0, 400) === 0, true)
+    check("a small push past shows a smaller resisted one",
+          typeof Scroll.overResist === "function"
+          && Scroll.overResist(100, 400) > 0 && Scroll.overResist(100, 400) < 100, true)
+    check("more raw travel shows more, never past the viewport",
+          typeof Scroll.overResist === "function"
+          && Scroll.overResist(200, 400) > Scroll.overResist(100, 400)
+          && Scroll.overResist(100000, 400) < 400, true)
+    check("no viewport shows none",
+          typeof Scroll.overResist === "function" && Scroll.overResist(100, 0) === 0, true)
+    check("the return starts where the lift left it",
+          typeof Scroll.returnAt === "function" && Scroll.returnAt(80, 0, 0, 200) === 80, true)
+    check("the return reaches its bound",
+          typeof Scroll.returnAt === "function" && Scroll.returnAt(80, 0, 200, 200) === 0, true)
+    check("a wheel notch past the top stays on the bound, never past it",
+          Scroll.bounded(0 - 288, 0, 1000, 400), 0)
+    check("a wheel notch past the end stays on the last page",
+          Scroll.bounded(600 + 288, 0, 1000, 400), 600)
+    // tp2-r2: margins move the rest, dead axes take no delta, the tail brakes past the bound.
+    check("a gap margin rests below the origin",
+          typeof Scroll.limits === "function" && Scroll.limits(0, 1000, 400, 8, 0).min === -8, true)
+    check("a gap margin keeps the last page",
+          typeof Scroll.limits === "function" && Scroll.limits(0, 1000, 400, 8, 0).max === 600, true)
+    check("margins default to the old bounds",
+          typeof Scroll.limits === "function"
+          && Scroll.limits(0, 1000, 400).min === 0 && Scroll.limits(0, 1000, 400).max === 600, true)
+    check("a bounded write honours the margins",
+          typeof Scroll.limits === "function" && Scroll.bounded(-8, 0, 1000, 400, 8, 0) === -8, true)
+    check("a vertical list has no X range",
+          typeof Scroll.rangesX === "function" && Scroll.rangesX({ contentWidth: -1, width: 400 }) === false, true)
+    check("a fitting content has no Y range",
+          typeof Scroll.rangesY === "function" && Scroll.rangesY({ contentHeight: 100, height: 400 }) === false, true)
+    check("an overflowing content ranges",
+          typeof Scroll.rangesY === "function" && Scroll.rangesY({ contentHeight: 1000, height: 400 }), true)
+    check("the past-bound brake is strong but nonzero",
+          typeof Scroll.overDecel === "function"
+          && Scroll.overDecel(6, 16.7) > 0 && Scroll.overDecel(6, 16.7) < 6 * Math.pow(0.998, 16.7), true)
+    check("the handler resists touchpad edges and returns with Omarchy motion",
+          Source.source("ui/FastScrollHandler.qml").indexOf("overResist") >= 0
+          && Source.source("ui/FastScrollHandler.qml").indexOf("startReturn") >= 0
+          && Source.source("ui/FastScrollHandler.qml").indexOf("Motion.durMs.open") >= 0
+          && Source.source("ui/FastScrollHandler.qml").indexOf("Theme.reducedMotion") >= 0, true)
+    check("the handler routes a touchpad by phase",
+          Source.source("ui/FastScrollHandler.qml").indexOf("Scroll.isTouchpad") >= 0, true)
 }

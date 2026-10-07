@@ -1,13 +1,17 @@
+.import "menuhunt.js" as MenuHunt
 .import "../../ui/js/Menu.js" as Menu
 .import "../../ui/js/MenuRefresh.js" as MenuRefresh
 .import "../../ui/js/LockedMenu.js" as LockedMenu
 .import "../../ui/js/Nav.js" as Nav
 .import "../../ui/js/Icons.js" as Icons
 .import "../../ui/js/Mounts.js" as Mounts
+.import "sourcefixture.js" as Source
 
 function state(changes) {
     var value = { hasRow: true, selectionCount: 1, rowMode: 0o100644, clipboardAvailable: false,
-        hiddenActions: ["delete", "openTerminal", "moveto", "copyto", "properties", "permissions", "copypath"],
+        rowIsSymlink: false,
+        hiddenActions: ["delete", "openTerminal", "moveto", "copyto", "properties", "permissions",
+            "copyAs", "pasteAs", "invertSelection"],
         archiveFormats: ["zip"], canExtract: true, rowIsArchive: false, rowIsImage: true, canConvert: true,
         taildropInstalled: true, taildropPeers: [{ id: "box", label: "Box" }],
         dropboxInstalled: true, dropboxPath: "/tmp/Dropbox", rowInDropbox: false }
@@ -22,18 +26,18 @@ function separated(rows) {
 }
 function run(check) {
     var file = Menu.listingEntries(state({}))
-    check("Menus and Places inventory has 45 actions", Menu.INVENTORY.length, 45)
+    check("Menus and Places inventory has 49 actions", Menu.INVENTORY.length, 49)
     check("Open with uses the authoritative cut geometry", Icons.pathFor("app-window"), "M3 4h18v16H3z M3 9h18 M6 6.5h.01 M9 6.5h.01")
     check("Restore all uses the authoritative undo geometry", Icons.pathFor("undo"), "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5")
-    check("inventory storage ids are unique", Object.keys(Menu.INVENTORY.reduce(function (out, row) { out[row[0]] = true; return out }, {})).length, 45)
+    check("inventory storage ids are unique", Object.keys(Menu.INVENTORY.reduce(function (out, row) { out[row[0]] = true; return out }, {})).length, 49)
     check("default image menu matches Menus specimen", actions(file),
           "open,openWith,cut,copy,paste,duplicate,rename,compress,convert,addToShelf,taildrop,dropbox,trash,addFavourite,toggleHidden")
-    check("empty clipboard leaves Paste visible and disabled", entry(file, "paste").disabled, true)
+    check("empty clipboard keeps Paste disabled", entry(file, "paste").disabled, true)
     check("populated clipboard enables Paste", entry(Menu.listingEntries(state({ clipboardAvailable: true })), "paste").disabled, false)
     check("folder omits conversion and extraction", actions(Menu.listingEntries(state({ rowMode: 0o040755, rowIsImage: false }))),
           "open,openWith,cut,copy,paste,duplicate,rename,compress,addToShelf,taildrop,dropbox,trash,addFavourite,toggleHidden")
     check("background menu includes real creation actions in order", actions(Menu.listingEntries(state({ hasRow: false }))),
-          "newFolder,newFile,paste,selectAll,addFavourite,sort,toggleHidden,settings")
+          "newFolder,newFile,paste,selectAll,openTerminal,addFavourite,sort,toggleHidden,settings")
     var background = Menu.listingEntries(state({ hasRow: false, updateVersion: "0.3.4" }))
     check("a known newer build adds Update Flea under Settings, in the same group, with the download mark",
           background.slice(-2).map(function (r) { return (r.separator ? "|" : r.action) + ":" + r.glyph }).join(","),
@@ -86,9 +90,14 @@ function run(check) {
           Icons.pathFor(openTabSpec[2]) === Icons.pathFor("file"), false)
     check("Add to shelf draws the shelf's own cut glyph, not the file fallback",
           Icons.pathFor(shelfSpec[2]) === Icons.pathFor("file"), false)
-    var all = Menu.listingEntries(state({ hiddenActions: [] }))
+    var all = Menu.listingEntries(state({ hiddenActions: [], clipboardAvailable: true, rowIsSymlink: true, hasShebang: true, cursorIsTarget: true }))
     check("stored delete id reaches permanent deletion action", entry(all, "deletePermanently").id, "delete")
-    check("all optional file controls exist", ["openWith", "moveTo", "copyTo", "properties", "permissions", "copypath", "openTerminal"].every(function (a) { return !!entry(all, a).action }), true)
+    check("all optional file controls exist", ["openWith", "moveTo", "copyTo", "properties", "permissions", "makeExecutable", "copyAs", "showOriginal", "pasteAs", "openTerminal"].every(function (a) { return !!entry(all, a).action }), true)
+    // Invert selection lives on the background menu beside Select all, never on a file row.
+    check("while Invert selection lives on the background menu",
+        entry(Menu.listingEntries(state({ hasRow: false, hiddenActions: [] })), "invertSelection").action, "invertSelection")
+    function shown(a) { return entry(Menu.listingEntries(state({ hiddenActions: [], rowIsSymlink: true })), a) }
+    check("Show original draws the link mark in the open group", shown("showOriginal").glyph, "symlink")
     check("permanent deletion carries danger role", entry(all, "deletePermanently").danger, true)
     // Issue 133: ui/Pane.qml hands the menu Mounts.trashable of the folder, and on a share the row that would fail is absent.
     var onShare = Menu.listingEntries(state({ hiddenActions: [], canTrash: Mounts.trashable("/run/user/1000/gvfs/smb-share:server=192.168.21.25,share=data") }))
@@ -96,9 +105,58 @@ function run(check) {
     check("while Delete permanently, which the share can do, stays and stays enabled",
           entry(onShare, "deletePermanently").action + "|" + entry(onShare, "deletePermanently").disabled, "deletePermanently|undefined")
     check("and a local file keeps Move to Trash", entry(Menu.listingEntries(state({ canTrash: Mounts.trashable("/home/gm/Downloads") })), "trash").action, "trash")
-    check("single-item actions stay present but disabled on multi-selection", ["openWith", "properties", "rename", "duplicate", "permissions"].every(function (a) {
+    check("single-item actions stay present but disabled on multi-selection", ["openWith", "properties", "rename", "duplicate"].every(function (a) {
         return entry(Menu.listingEntries(state({ hiddenActions: [], selectionCount: 2 })), a).disabled === true
     }), true)
+    // Permissions040: Permissions takes the whole selection, so it stays
+    // enabled where the single-item rows above grey out.
+    check("multi-selection keeps Permissions enabled on files",
+        entry(Menu.listingEntries(state({ hiddenActions: [], selectionCount: 2, selectionModes: [0o100644, 0o100644] })), "permissions").disabled, false)
+    // MenuAdditions040: Copy as holds six leaves, Paste as three, each with
+    // the board's own mark; the letters ride the menu keymap, not a hint.
+    var copyLeaves = entry(Menu.listingEntries(state({ hiddenActions: [] })), "copyAs").submenu
+    check("Copy as holds Path, Name, Stem, Folder path, URI and Shell-quoted",
+        copyLeaves.map(function (r) { return r.id }).join(","), "copyPath,copyName,copyStem,copydirpath,copyUri,copyQuoted")
+    check("and each leaf wears the board's mark",
+        copyLeaves.map(function (r) { return r.glyph }).join(","), "file-text,type,type,folder,globe,terminal")
+    var pasteLeaves = entry(Menu.listingEntries(state({ hiddenActions: [], clipboardAvailable: true })), "pasteAs").submenu
+    check("Paste as holds Link, Absolute link and Hard link",
+        pasteLeaves.map(function (r) { return r.id }).join(","), "pasteLink,pasteAbsoluteLink,pasteHardLink")
+    check("and Link shares Paste's mark rather than repeating it",
+        pasteLeaves.map(function (r) { return r.glyph }).join(","), "symlink,symlink,copy")
+    check("a linkless filesystem offers no Paste as rows at all",
+        entry(Menu.listingEntries(state({ hiddenActions: [], clipboardAvailable: true, canLink: false })), "pasteAs").action, undefined)
+    check("a read-only folder turns its background write rows off",
+        ["newFolder", "newFile", "paste"].map(function (a) {
+            return entry(Menu.listingEntries(state({ hasRow: false, hiddenActions: [], clipboardAvailable: true, dirWritable: false })), a).disabled
+        }).join(","), "true,true,true")
+    check("and its row write rows too",
+        ["duplicate", "rename", "trash"].map(function (a) {
+            return entry(Menu.listingEntries(state({ hiddenActions: [], dirWritable: false })), a).disabled
+        }).join(","), "true,true,true")
+    check("while a writable folder leaves them enabled",
+        ["newFolder", "duplicate", "trash"].map(function (a) {
+            var rows = a === "newFolder" ? Menu.listingEntries(state({ hasRow: false, hiddenActions: [], dirWritable: true }))
+                                         : Menu.listingEntries(state({ hiddenActions: [], dirWritable: true }))
+            return entry(rows, a).disabled === true
+        }).join(","), "false,false,false")
+    check("Show original is absent except on a symlink",
+        entry(Menu.listingEntries(state({ hiddenActions: [] })), "showOriginal").action, undefined)
+    check("and present on one",
+        entry(Menu.listingEntries(state({ hiddenActions: [], rowIsSymlink: true })), "showOriginal").action, "showOriginal")
+    check("Invert selection is absent with nothing selected",
+        entry(Menu.listingEntries(state({ hasRow: false, selectionCount: 0, hiddenActions: [] })), "invertSelection").action, undefined)
+    check("and present once something is",
+        entry(Menu.listingEntries(state({ hasRow: false, hiddenActions: [] })), "invertSelection").action, "invertSelection")
+    // MenuAdditions040 callout 9: the background shows Open in terminal at defaults, while file
+    // and place keep it behind the switch.
+    check("the background shows Open in terminal while it stays hidden",
+        entry(Menu.listingEntries(state({ hasRow: false })), "openTerminal").action, "openTerminal")
+    check("and the file menu hides it behind that same switch",
+        entry(Menu.listingEntries(state({})), "openTerminal").action, undefined)
+    check("with the switch off the file menu shows it too",
+        entry(Menu.listingEntries(state({ hiddenActions: ["delete"] })), "openTerminal").action, "openTerminal")
+    MenuHunt.executable(check, state, entry, actions)
     check("missing converter removes Convert", entry(Menu.listingEntries(state({ canConvert: false })), "convert").action, undefined)
     check("missing archiver removes Compress", entry(Menu.listingEntries(state({ archiveFormats: [] })), "compress").action, undefined)
     var noReader = entry(Menu.listingEntries(state({ rowIsArchive: true, canExtract: false, archiveFormats: ["zip", "tar"] })), "extract")
@@ -153,7 +211,10 @@ function run(check) {
     var perms = function (changes) { return entry(Menu.listingEntries(state(changes)), "permissions") }
     check("the menu row under a parent without execute reads red with no sentence",
           refusal(perms({ hiddenActions: [], rowMode: 0 })), "true|true|undefined")
-    check("the menu row for a multi-selection reads the same way", refusal(perms({ hiddenActions: [], selectionCount: 2 })), "true|true|undefined")
+    check("the menu row for a multi-selection reads plain on files",
+        refusal(perms({ hiddenActions: [], selectionCount: 2, selectionModes: [0o100644, 0o100644] })), "false|undefined|undefined")
+    check("and red when one of them is a link",
+        refusal(perms({ hiddenActions: [], selectionCount: 2, selectionModes: [0o100644, 0o120777] })), "true|true|undefined")
     check("the menu row for a symlink reads the same way", refusal(perms({ hiddenActions: [], rowMode: 0o120777 })), "true|true|undefined")
     check("the menu row for a folder it can change is plain", refusal(perms({ hiddenActions: [], rowMode: 0o040755 })), "false|undefined|undefined")
     check("permissions rejects missing metadata", Menu.permissionsEntry(undefined, 1).disabled, true)
@@ -187,12 +248,12 @@ function run(check) {
           refusal(entry(unreadable, "permissions")), "true|true|undefined")
     check("hiding Open in terminal takes it off the Locked tile as well",
           entry(LockedMenu.lockedEntries({ lockedMode: 0o040000, hiddenActions: ["openTerminal"] }), "openTerminal").action, undefined)
-    var shippedHidden = ["delete", "openTerminal", "placeMenu", "runScript", "moveto", "copyto", "properties", "permissions", "copypath", "extThumbs"]
+    var shippedHidden = ["delete", "openTerminal", "placeMenu", "runScript", "moveto", "copyto", "properties", "permissions", "copyAs", "extThumbs"]
     check("the shipped hidden set leaves the Locked tile with no row",
           LockedMenu.lockedEntries({ lockedMode: 0o040000, hiddenActions: shippedHidden }).length, 0)
     check("and it refuses with the Menus switch sentence",
           LockedMenu.lockedRefusal({ lockedMode: 0o040000, hiddenActions: shippedHidden }),
-          "Open in terminal, Permissions and Copy path are hidden in Settings > Menus.")
+          "Open in terminal, Permissions and Copy as are hidden in Settings > Menus.")
     check("one row shown yields that row alone",
           actions(LockedMenu.lockedEntries({ lockedMode: 0o040000, hiddenActions: ["openTerminal", "permissions"] })), "copypath")
     check("and it refuses nothing then",
@@ -270,4 +331,185 @@ function providerRefresh(check) {
     function lockedAs(path, asked, state) { return Nav.lockedTarget({ path: path, listingPath: asked, listingState: state }) }
     check("refused hop names the ask, re-read names itself, ready and error name nothing", lockedAs("/d", "/d/locked", "locked") + "|" + lockedAs("/d", "/d", "locked") + "|" + lockedAs("/d", "/d", "ready") + "|" + lockedAs("/d", "/d", "error"), "/d/locked|/d||")
     check("a refused bookmark with a trailing slash names the folder without it", lockedAs("/d", "/root/", "locked"), "/root")
+
+    // A hidden row still opens its flyout, built from the action.
+    var hiddenRows = Menu.listingEntries(state({ clipboardAvailable: true }))
+    check("the shipped defaults hide the Copy as row", entry(hiddenRows, "copyAs").action || "absent", "absent")
+    check("and the Paste as row", entry(hiddenRows, "pasteAs").action || "absent", "absent")
+    check("yet Copy as still builds its flyout from the action",
+          Menu.flyoutEntries("copyAs").map(function (l) { return l.id }).join(","),
+          "copyPath,copyName,copyStem,copydirpath,copyUri,copyQuoted")
+    check("and Paste as builds its own",
+          Menu.flyoutEntries("pasteAs").map(function (l) { return l.id }).join(","),
+          "pasteLink,pasteAbsoluteLink,pasteHardLink")
+    check("while any other action builds no flyout", Menu.flyoutEntries("trash").length, 0)
+    // Lone flyout opens only with no row and an available action; otherwise it refuses.
+    check("Menu decides lone vs refuse in one place", typeof Menu.submenuFor === "function", true)
+    var loneFor = Menu.submenuFor || function () { return { kind: "none" } }
+    var loneHidden = Menu.listingEntries(state({ clipboardAvailable: true }))
+    check("hidden Copy as with clipboard opens lone", loneFor("copyAs", loneHidden, true).kind, "lone")
+    check("hidden Paste as with clipboard opens lone", loneFor("pasteAs", loneHidden, true).kind, "lone")
+    var loneEmpty = Menu.listingEntries(state({ clipboardAvailable: false }))
+    check("hidden Paste as with empty clipboard refuses", loneFor("pasteAs", loneEmpty, false).kind, "refuse")
+    check("and names the empty-clipboard sentence", Menu.EMPTY_CLIPBOARD || "", "There is nothing to paste; y copies and x cuts.")
+    var shownEmpty = Menu.listingEntries(state({ clipboardAvailable: false, hiddenActions: [] }))
+    check("shown Paste as with empty clipboard refuses", loneFor("pasteAs", shownEmpty, false).kind, "refuse")
+    var shownFull = Menu.listingEntries(state({ clipboardAvailable: true, hiddenActions: [] }))
+    check("shown Paste as with clipboard opens its row", loneFor("pasteAs", shownFull, true).kind, "row")
+    check("shown Copy as opens its row", loneFor("copyAs", shownFull, true).kind, "row")
+    check("an action with no flyout opens nothing", loneFor("trash", shownFull, true).kind, "none")
+    check("Menu decides a lone leaf in one place", typeof Menu.loneChoice === "function", true)
+    var lonePick = Menu.loneChoice || function () { return { kind: "none" } }
+    check("a known leaf with no move fires", lonePick("copyAs", "copyPath", false, false, true, "a", "a").kind, "fire")
+    check("and names the fired action with its leaf", lonePick("copyAs", "copyPath", false, false, true, "a", "a").fired, "copyAs:copyPath")
+    check("an unknown leaf refuses", lonePick("copyAs", "bogus", false, false, true, "a", "a").kind, "unknown")
+    check("a moved selection refuses", lonePick("copyAs", "copyPath", false, false, true, "a", "b").kind, "moved")
+    // A moved selection outranks an unknown leaf, the order chooseSub carried.
+    check("a moved selection outranks an unknown leaf", lonePick("copyAs", "bogus", false, false, true, "a", "b").kind, "moved")
+    check("a rail move never counts as moved", lonePick("copyAs", "copyPath", true, false, true, "a", "b").kind, "fire")
+    // Pane root carries the cursor sequence Filter and Marks bump, so QML must declare it.
+    var paneSrc = Source.source("ui/Pane.qml")
+    check("Pane declares cursorSeq beside cursorIndex", paneSrc.indexOf("property int cursorSeq: 0") >= 0, true)
+    check("Pane declares recentSortBy", paneSrc.indexOf('property string recentSortBy: ""') >= 0, true)
+    check("Pane declares recentSortDesc", paneSrc.indexOf("property bool recentSortDesc: false") >= 0, true)
+    // QML routes through the same decision, so a revert goes red here.
+    var contextSrc = Source.source("ui/ContextMenu.qml")
+    check("ContextMenu opens through Menu.submenuFor", contextSrc.indexOf("Menu.submenuFor(action, root.entries, root.clipboardAvailable)") >= 0, true)
+    check("ContextMenu chooses through Menu.loneChoice", contextSrc.indexOf("Menu.loneChoice(root.loneFlyoutAction, id,") >= 0, true)
+    check("its refusal names the empty-clipboard sentence", contextSrc.indexOf("root.refused(Menu.EMPTY_CLIPBOARD)") >= 0, true)
+    var pasteBody = Source.slice(paneSrc, "function openPasteAs()", "function invertSelection")
+    check("Pane.openPasteAs closes and says empty on refuse", pasteBody.indexOf("menu.close()") >= 0 && pasteBody.indexOf("There is nothing to paste; y copies and x cuts.") >= 0, true)
+    // Show original answers only its own pending id, so a late reply never yanks a navigation.
+    // One brace scan serves every shipped body below; an inline copy beside it is the defect this pins.
+    // Sample input: functionBody("head function f(a) { return a } tail", "function f(") answers " return a ".
+    function functionBody(sourceText, mark) {
+        var at = sourceText.indexOf(mark)
+        if (at < 0)
+            throw new Error("sourcefixture: missing " + mark)
+        var brace = sourceText.indexOf("{", at)
+        var scan = brace + 1, depth = 1, quote = "", comment = false
+        while (depth > 0 && scan < sourceText.length) {
+            var ch = sourceText.charAt(scan)
+            if (comment) {
+                if (ch === "\n") comment = false
+            } else if (quote.length > 0) {
+                if (ch === quote) quote = ""
+            } else if (ch === "/" && sourceText.charAt(scan + 1) === "/") comment = true
+            else if (ch === '"' || ch === "'") quote = ch
+            else if (ch === "{") depth += 1
+            else if (ch === "}") depth -= 1
+            scan += 1
+        }
+        if (depth > 0)
+            throw new Error("sourcefixture: unterminated " + mark)
+        return sourceText.substring(brace + 1, scan - 1)
+    }
+    var selfText = Source.source("tests/js/menu.js")
+    var chooseSub = eval("(function (root, id) {" + functionBody(contextSrc, "function chooseSub(") + "})")
+    var refusalBody = contextSrc.indexOf("function refuseLone(") >= 0
+        ? functionBody(contextSrc, "function refuseLone(") : ""
+    var refuseLone = eval("(function (root, kind) {" + refusalBody + "})")
+    var validateChoice = eval("(function (root, action, subId, includeHidden) {" + functionBody(contextSrc, "function validateChoice(") + "})")
+    var refusalCases = [
+        { id: "copyPath", identity: "changed", reason: "Selected items changed; reopen the menu." },
+        { id: "unknown", identity: "original", reason: "That action is no longer available; reopen the menu." }
+    ]
+    refusalCases.forEach(function (test) {
+        var menu = { entries: [], openSubmenuRow: -1, loneFlyoutAction: "copyAs", forRail: false,
+            forHeader: false, hasRow: true, openedIdentity: "original", selectionIdentity: test.identity,
+            opened: true, validations: 0, reasons: [], fired: [] }
+        menu.close = function () { menu.opened = false }
+        menu.refused = function (reason) { menu.reasons.push(reason) }
+        menu.chosen = function (action) { menu.fired.push(action) }
+        menu.refuseLone = function (kind) { refuseLone(menu, kind) }
+        menu.validateChoice = function () {
+            menu.validations += 1
+            return true
+        }
+        chooseSub(menu, test.id)
+        check("lone " + test.id + " closes without validator side effects", menu.opened, false)
+        check("lone " + test.id + " refuses with its named reason", menu.reasons.join("|"), test.reason)
+        check("lone " + test.id + " never validates an already refused choice", menu.validations, 0)
+        check("lone " + test.id + " fires nothing", menu.fired.length, 0)
+        menu.opened = true
+        menu.reasons = []
+        menu.buildEntries = function () { return [] }
+        check("normal " + test.id + " validation refuses", validateChoice(menu, "copyAs", test.id), false)
+        check("normal " + test.id + " shares the lone refusal sentence", menu.reasons.join("|"), test.reason)
+        check("normal " + test.id + " validation closes", menu.opened, false)
+    })
+    var buildArgs = []
+    var sheetMenu = { entries: [], forRail: false, forHeader: false, hasRow: true, openedIdentity: "a", selectionIdentity: "a",
+        close: function () {}, refused: function () {}, refuseLone: function () {},
+        buildEntries: function (flyout, include) { buildArgs.push(include); return [{ action: "permissions" }] } }
+    check("a sheet choice validates against the rows it listed", validateChoice(sheetMenu, "permissions", "", true), true)
+    validateChoice(sheetMenu, "permissions", "")
+    check("only the sheet asks the build for hidden rows", buildArgs.join("|"), "true|")
+    check("the brace scan lives in one helper, not three inline loops", selfText.split("Depth +=" + " 1").length - 1, 0)
+    var linkText = Source.source("ui/PaneWire.qml")
+    var onLinkTarget = eval("(function (pane, path, directory, name, id) {"
+        + functionBody(linkText, "function onLinkTarget(") + "})")
+    function linkPane(pending) {
+        var p = {linkTargetPendingId: pending, pendingSelect: "", said: [], opened: []}
+        p.message = function (text) { p.said.push(text) }
+        p.open = function (target) { p.opened.push(target) }
+        return p
+    }
+    var live = linkPane(7)
+    onLinkTarget(live, "/a/l", "/b", "f.txt", 7)
+    check("its own id reveals the target folder", live.opened.join("|"), "/b")
+    check("and selects the target row there", live.pendingSelect, "/b/f.txt")
+    check("and spends the pending id", live.linkTargetPendingId, 0)
+    var foreign = linkPane(7)
+    onLinkTarget(foreign, "/a/l", "/b", "f.txt", 8)
+    check("a foreign id opens nothing", foreign.opened.length, 0)
+    check("and keeps the pending id for the real reply", foreign.linkTargetPendingId, 7)
+    var idle = linkPane(0)
+    onLinkTarget(idle, "/a/l", "/b", "f.txt", 0)
+    check("with nothing pending even id 0 opens nothing", idle.opened.length, 0)
+    var paneText = Source.source("ui/Pane.qml")
+    check("Show original mints its pending id from the backend counter", paneText.indexOf("root.backend.nextLinkTargetId()") >= 0, true)
+    check("and the request carries that id", paneText.indexOf("id: root.linkTargetPendingId") >= 0, true)
+    check("and no pane mints an id of its own", paneText.indexOf("linkTargetPendingId += 1") < 0, true)
+    // The counter never resets, so an id is never handed out twice in one process.
+    var backText = Source.source("ui/Backend.qml")
+    check("the backend owns the linktarget counter", backText.indexOf("linkTargetSeq") >= 0, true)
+    check("and nothing ever resets it", backText.indexOf("linkTargetSeq = 0") < 0, true)
+    var nextLinkTargetId = eval("(function (root) {" + functionBody(backText, "function nextLinkTargetId(") + "})")
+    var sharedBackend = { linkTargetSeq: 0 }
+    check("the counter rises forever", nextLinkTargetId(sharedBackend) + "|" + nextLinkTargetId(sharedBackend), "1|2")
+    // Both entrances send through here, so the test runs the shipped body, not a copy.
+    var requestLinkTarget = eval("(function (root, path) {" + functionBody(paneText, "function requestLinkTarget(") + "})")
+    function linkRequester() {
+        var stub = { linkTargetPendingId: 0, pendingSelect: "", said: [], opened: [], sent: [] }
+        stub.message = function (text) { stub.said.push(text) }
+        stub.open = function (target) { stub.opened.push(target) }
+        stub.backend = { send: function (line) { stub.sent.push(line) } }
+        stub.backend.nextLinkTargetId = function () { return nextLinkTargetId(sharedBackend) }
+        return stub
+    }
+    var firstPane = linkRequester()
+    var secondPane = linkRequester()
+    requestLinkTarget(firstPane, "/a/first")
+    requestLinkTarget(secondPane, "/b/first")
+    check("two panes sharing one backend get different ids", firstPane.linkTargetPendingId === secondPane.linkTargetPendingId, false)
+    check("and each request carries its pending id", firstPane.sent[0].id === firstPane.linkTargetPendingId && secondPane.sent[0].id === secondPane.linkTargetPendingId, true)
+    // Exactly one request stands when the navigation lands, so a per-pane counter would hand its id out again.
+    var navPane = linkRequester()
+    requestLinkTarget(navPane, "/a/second")
+    var staleId = navPane.sent[0].id
+    // A navigation drops the wait, which is what ui/js/Nav.js openWithoutHistory writes.
+    navPane.linkTargetPendingId = 0
+    requestLinkTarget(navPane, "/a/third")
+    var freshId = navPane.linkTargetPendingId
+    check("a navigation and a new request never reuse an id", staleId === freshId, false)
+    onLinkTarget(navPane, "/a/second", "/b", "f.txt", staleId)
+    check("a reply for the older id opens nothing", navPane.opened.length, 0)
+    check("and keeps waiting for the new one", navPane.linkTargetPendingId, freshId)
+    onLinkTarget(navPane, "/a/third", "/c", "g.txt", freshId)
+    check("the new reply still reveals its folder", navPane.opened.join("|"), "/c")
+    // Show original has one route out, so a raw send cannot bypass the pending id.
+    var pmaText = Source.source("ui/PaneMenuActions.qml")
+    check("Show original sends through requestLinkTarget", pmaText.indexOf("requestLinkTarget") >= 0, true)
+    check("and sends no raw linktarget", pmaText.indexOf('"linktarget"') < 0, true)
 }

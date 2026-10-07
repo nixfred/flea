@@ -1,4 +1,6 @@
 .import "../../ui/js/Nav.js" as Nav
+.import "../../ui/js/Anchor.js" as Anchor
+.import "../../ui/js/SlowClick.js" as SlowClick
 
 // Nav.js had no suite at all, so nothing loaded it outside the running app and a broken .import in
 // it would first have been seen on the box. These are its two pure functions, which ui/ColumnsArea.qml
@@ -23,6 +25,9 @@ function pane() {
         cursorIndex: 7,
         pendingSelect: "",
         renamingIndex: 4,
+        slowClickIndex: 0,
+        slowClickAt: 1000,
+        cancelled: 0,
         trashArmedAt: 12345,
         listingState: "ready",
         stateMessage: "something",
@@ -37,6 +42,8 @@ function pane() {
     }
     p.clearSelection = function () { p.cleared += 1 }
     p.message = function (text, isError) { p.said.push(text) }
+    // ui/Pane.qml cancelSlowClick stops the timer and clears the tap record.
+    p.cancelSlowClick = function () { p.cancelled += 1; SlowClick.cancel(p) }
     p.listArea = { primeSettle: function () {} }
     // ui/PaneSwap.qml with nothing held, so the reset runs at the request; tests/js/swap.js holds.
     p.swap = { hold: function () { return false } }
@@ -73,6 +80,7 @@ function entered(row) {
     p.join = function (base, name) { return base + "/" + name }
     p.open = function (target) { went[0] = target }
     p.preview = { open: function (path, icon, size) { went[1] = path + " " + icon + " " + size } }
+    p.quickLook = function () { return p.preview }
     Nav.openCursor(p, { open: function (path) { went[2] = path } })
     return went.join("|")
 }
@@ -133,6 +141,22 @@ function run(check) {
     // editor over whatever file arrived at that row, and in the parent it was a directory.
     check("and forgets the open rename, whose row is about to be a different file",
           fresh.renamingIndex, -1)
+    // A re-list puts a different file at the tapped index, so the slow-click record goes with the rename.
+    check("and clears the slow-click tap record", fresh.slowClickIndex, -2)
+    check("and stops its timer through the pane", fresh.cancelled, 1)
+    // The direct reset PaneSwap.release runs on a re-read: same clearing by name.
+    var tapped = pane()
+    tapped.slowClickIndex = 0
+    Nav.forget(tapped)
+    check("a re-list clears the slow-click record to SlowClick's cleared value",
+          tapped.slowClickIndex, -2)
+    check("and calls the pane's cancel", tapped.cancelled, 1)
+    // A fixture pane without a slow-click timer is still forgotten, not crashed.
+    var bare = pane()
+    bare.cancelSlowClick = undefined
+    bare.slowClickIndex = 0
+    Nav.forget(bare)
+    check("a pane without the timer is still forgotten", bare.total + "|" + bare.cursorIndex, "0|0")
 
     // The in-flight guard is what stops a second Enter queueing a listing behind one already asked
     // for, and nothing may be forgotten on a navigation that was refused.
@@ -203,6 +227,15 @@ function run(check) {
     Nav.mouseBack(cardUp)
     check("mouse back behind an open collision card goes nowhere at all",
           cardUp.path + "|" + cardUp.sent.length + "|" + cardUp.history.join(","), "/home/gm/Work|0|/home/gm")
+    // Show original's pending id belongs to the listing being left, so leaving it drops the reveal.
+    var waiting = pane()
+    waiting.linkTargetPendingId = 7
+    Nav.openWithoutHistory(waiting, "/home/gm/Elsewhere")
+    check("a navigation elsewhere drops a waiting Show original", waiting.linkTargetPendingId, 0)
+    var staying = pane()
+    staying.linkTargetPendingId = 7
+    Nav.openWithoutHistory(staying, "/home/gm")
+    check("a same-path re-read keeps it", staying.linkTargetPendingId, 7)
     var noHistory = browsing([])
     noHistory.collide = { opened: true }
     Nav.mouseBack(noHistory)
@@ -296,4 +329,34 @@ function run(check) {
           lockedUp("/home/gm/Downloads", "/root"), "/ /root")
     check("up from a Locked tile of a bookmark with a trailing slash trims it first",
           lockedUp("/home/gm/Downloads", "/root/"), "/ /root")
+
+    // Defect 30: a new item is selected by the name the backend lists, so an NFC name on
+    // hfsplus finds the NFD row it actually listed rather than missing it by bytes.
+    var nfc = "Café"
+    var nfd = nfc.normalize("NFD")
+    check("the fixture really has two spellings", nfc === nfd, false)
+    check("an exact row still matches first", Anchor.selectMatch([{ n: "a.txt" }, { n: "b.txt" }], "/d/b.txt", "/d"), 1)
+    check("an NFC target finds its NFD row", Anchor.selectMatch([{ n: nfd }, { n: "other" }], "/d/" + nfc, "/d"), 0)
+    check("an NFD target finds its NFC row", Anchor.selectMatch([{ n: nfc }], "/d/" + nfd, "/d"), 0)
+    check("a name that is nowhere matches nothing", Anchor.selectMatch([{ n: "a.txt" }], "/d/nope.txt", "/d"), -1)
+    check("a target outside the folder matches nothing", Anchor.selectMatch([{ n: "a.txt" }], "/elsewhere/a.txt", "/d"), -1)
+    check("an equal-length sibling folder matches nothing", Anchor.selectMatch([{ n: "a.txt" }], "/e/a.txt", "/d"), -1)
+    check("a USB1 row never matches a USB2 target", Anchor.selectMatch([{ n: "untitled folder" }], "/run/media/gm/USB2/untitled folder", "/run/media/gm/USB1"), -1)
+    check("the root folder still matches its row", Anchor.selectMatch([{ n: "a.txt" }], "/a.txt", "/"), 0)
+    check("an exact later row wins over an earlier NFC-only row", Anchor.selectMatch([{ n: nfd }, { n: nfc }], "/d/" + nfc, "/d"), 1)
+
+    // Defect 26: past the wait a navigation starts clean instead of refusing forever.
+    function waitingPane() {
+        return { listInFlight: true, listingState: "waiting", stateMessage: "stale", path: "/mnt/dead",
+                 history: [], said: [], message: function (t) { this.said.push(t) },
+                 openWithoutHistory: function () {} }
+    }
+    var waiting = waitingPane()
+    check("clearing a waiting pane ends its flight", Anchor.clearWaiting(waiting), true)
+    check("its flight flag is gone", waiting.listInFlight, false)
+    check("its state is loading again", waiting.listingState, "loading")
+    check("its stale sentence is gone", waiting.stateMessage, "")
+    var settled = { listInFlight: true, listingState: "loading", stateMessage: "" }
+    check("a loading pane is left alone", Anchor.clearWaiting(settled), false)
+    check("and keeps its flight", settled.listInFlight, true)
 }

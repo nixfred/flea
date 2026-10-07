@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Sourced by ui.sh; every state and listing path belongs to its marked fixture root.
+# Sidebar040 built-in group, then the Rail group of directives 38, 74 and 77, then the Trash group.
+PLACES_ROW_LABELS='["Built in","Home","Recent","Network","Devices","Trash","Rail","Show drive size","Show Trash count","Show unmounted drives","Auto-hide sidebar","Show sidebar","Sidebar width","Trash","Empty after 30 days"]'
 rail_assert_details() {
     local enabled="$1" count="$2" state background surface foreground muted rest
     state=$(ipc railDetails) || fail "rail: native detail observations unavailable"
@@ -59,7 +61,7 @@ rail_details_native() {
     rail_assert_details false 0
     settings_open_key; settle
     settings_section places
-    ipc settingsModel | jq -e '.[0].label == "Favorites" and ([.[-3:][] | .label] == ["Show drive size", "Show Trash count", "Sidebar width"])' >/dev/null \
+    ipc settingsModel | jq -e --argjson want "$PLACES_ROW_LABELS" '.[0].label == "Favorites" and ([.[] | .label] | index("Built in") as $built | .[$built:] == $want)' >/dev/null \
         || fail "rail: Places labels/control order differ from the ruled board"
     trash_shot settings-places-details-off
     for flag in driveSize trashCount; do
@@ -626,7 +628,8 @@ case_settingsplaces() {
     index=$(ipc railEntries | jq -er 'map(.kind) | index("favourite")')
     click_rail_row "$index" right; settle
     places_require_store
-    places_click_menu Remove
+    # A rail favourite's menu is the folder menu, so its row is Remove from Favorites.
+    places_click_menu 'Remove from Favorites'
     expected=$(jq -c 'del(.[0])' <<< "$expected")
     places_wait_records "$expected"
     launch "$dir/listing"; wait_listing 3

@@ -55,6 +55,9 @@ magick "$photos/seed0.jpg" -resize 256x "$photos/thumb.png" \
     || { echo "preview-decode.sh: thumbnail generation failed"; exit 1; }
 magick -size 6016x3900 xc:gray50 -fill black -draw 'rectangle 0,0 3007,3899' "$photos/big.png" \
     || { echo "preview-decode.sh: rest-row generation failed"; exit 1; }
+# The heldbad phase needs its own slow original: reopening big.png leaves the image source unchanged, so no decode starts and Quick Look never reads loading.
+cp "$photos/big.png" "$photos/big2.png" \
+    || { echo "preview-decode.sh: heldbad fixture generation failed"; exit 1; }
 for i in $(seq 0 49); do
     cp "$photos/seed$((i % 2)).jpg" "$photos/s$i.jpg" || exit 1
     cp "$photos/thumb.png" "$photos/t$i.png" || exit 1
@@ -71,6 +74,9 @@ magick -size 3000x100 xc:gray60 "$photos/banner.png" \
     || { echo "preview-decode.sh: banner generation failed"; exit 1; }
 magick -size 120x68 xc:gray40 "$photos/small.png" \
     || { echo "preview-decode.sh: small fixture generation failed"; exit 1; }
+# The interim's own cache files: the small one draws at the original's pixels, the large one at 256 wide.
+cp "$photos/small.png" "$photos/smallcache.png" \
+    || { echo "preview-decode.sh: small cache generation failed"; exit 1; }
 
 # Sample input: 'OPEN|t12.png' is a cache file, 'OPEN|s12.jpg' or 'OPEN|big.png' an original, 'CREATE|sentinel-rest' a phase boundary.
 inotifywait -m -e open -e create --format '%e|%f' "$photos" > "$watchlog" 2>&1 &
@@ -79,7 +85,7 @@ watcher=$!
 ( env -u DISPLAY -u WAYLAND_DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE \
     HOME="$test_root" XDG_RUNTIME_DIR="$runtime" TMPDIR="$test_root" \
     XDG_CONFIG_HOME="$test_root/.config" XDG_STATE_HOME="$test_root/.local/state" XDG_CACHE_HOME="$test_root/.cache" \
-    QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_QPA_UPDATE_IDLE_TIME=1 \
+    QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=generic QT_QUICK_BACKEND=software QT_QPA_UPDATE_IDLE_TIME=1 \
     QT_FORCE_STDERR_LOGGING=1 \
     PREVIEW_UI="$PWD/ui" PREVIEW_PHOTOS="$photos" \
     timeout 120 qs -p "$config_dir" > "$log" 2>&1 )
@@ -93,9 +99,9 @@ wait 2>/dev/null
 if grep -q 'PREVIEW FAIL' "$log" || ! grep -q 'PREVIEW DONE' "$log"; then
     bad "the harness did not finish (qs exit $status): $(grep -a 'PREVIEW FAIL' "$log" | head -1) (log $log)"
 else
-    # Sample input, one inotifywait line per event: 'OPEN|t50.png' is the rest row's cache file and 'CREATE|sentinel-rest' opens the rest window once the sweep one closes.
+    # Sample input, one inotifywait line per event: 'OPEN|t0.png' is the first swept row's cache file, 'OPEN|t50.png' the rest row's, and 'CREATE|sentinel-rest' opens the rest window once the sweep one closes.
     got_sweep=0; got_rest=0; got_done=0; phase=0
-    sweep_opens=0; sweep_names=""; rest_big=0; rest_cache=0; rest_sweep=0
+    sweep_t0=0; sweep_other=0; sweep_other_names=""; rest_big=0; rest_cache=0; rest_sweep=0
     events=""; name=""
     while IFS='|' read -r events name || [ -n "$events" ]; do
         case "$events" in
@@ -106,11 +112,12 @@ else
             fi
             ;;
         *OPEN*)
-            # v0.3.4's settle outlasts a 30 ms repeat, so a sweep loads no row: any open but a sentinel's own is a load.
+            # e80 loads a lone move at once: the sweep starts idle, so it loads t0.png only; repeats trail. One load opens t50.png rest_cache times, so t0.png may open at most that often.
             if [ "$phase" -eq 1 ]; then
                 case "$name" in
                 sentinel-*) ;;
-                *) sweep_opens=$((sweep_opens + 1)); [ "$sweep_opens" -le 3 ] && sweep_names="$sweep_names $name" ;;
+                t0.png) sweep_t0=$((sweep_t0 + 1)) ;;
+                *) sweep_other=$((sweep_other + 1)); [ "$sweep_other" -le 3 ] && sweep_other_names="$sweep_other_names $name" ;;
                 esac
             elif [ "$phase" -eq 2 ]; then
                 case "$name" in
@@ -125,10 +132,14 @@ else
     if [ "$got_sweep" != 1 ] || [ "$got_rest" != 1 ] || [ "$got_done" != 1 ]; then
         bad "a phase sentinel never arrived (sweep=$got_sweep rest=$got_rest done=$got_done) (log $log)"
     else
-        if [ "$sweep_opens" -eq 0 ]; then
-            ok "50 moves at key-repeat rate opened no file at all, cache file or original"
+        if [ "$sweep_other" -ne 0 ]; then
+            bad "the sweep opened other row(s):$sweep_other_names besides t0.png (log $log)"
+        elif [ "$sweep_t0" -eq 0 ]; then
+            bad "the sweep opened no file, want the first row t0.png (log $log)"
+        elif [ "$sweep_t0" -gt "$rest_cache" ]; then
+            bad "the sweep opened t0.png $sweep_t0 time(s), more than one load opens t50.png $rest_cache time(s) (log $log)"
         else
-            bad "the sweep opened $sweep_opens file(s), first:$sweep_names (log $log)"
+            ok "the sweep opened only the first row t0.png $sweep_t0 time(s), within one load"
         fi
         if [ "$rest_cache" -ge 1 ]; then
             ok "a rest drew the rested row's cache file"
@@ -158,7 +169,85 @@ else
         "120x68 120x68") ok "and a 120x68 PNG at its own size, never enlarged" ;;
         *) bad "Quick Look drew the small PNG as '$small', not 120x68 (log $log)" ;;
     esac
+    # The interim draws the cache file under the full decode within a pixel, adding no open.
+    im_line() { grep -a -n "CREATE|sentinel-$1" "$watchlog" | head -1 | cut -d: -f1; }
+    rect_ok() { IFS=, read -r -a a <<<"$1"; IFS=, read -r -a b <<<"$2"; [ "${#a[@]}" -eq 4 ] && [ "${#b[@]}" -eq 4 ] || return 1; for i in 0 1 2 3; do d=$((a[i]-b[i])); [ "${d#-}" -le 1 ] || return 1; done; }
+    for spec in "small small.png smallcache.png" "large seed0.jpg thumb.png"; do
+        set -- $spec
+        label=$1; orig=$2; cache=$3
+        # Sample input: 'PREVIEW INTERIM small irect=317,201,120,68 frect=317,201,120,68'
+        line=$(grep -a "PREVIEW INTERIM $label " "$log" | head -1)
+        irect=$(printf '%s' "$line" | sed -n 's/.* irect=\([0-9,]*\).*/\1/p')
+        frect=$(printf '%s' "$line" | sed -n 's/.* frect=\([0-9,]*\).*/\1/p')
+        if [ -z "$irect" ] || [ -z "$frect" ]; then
+            bad "the interim never reported $label (log $log)"
+            continue
+        fi
+        if rect_ok "$irect" "$frect"; then
+            ok "the $label interim lands on the final's rect ($irect)"
+        else
+            bad "the $label interim drew $irect against the final $frect (log $log)"
+        fi
+        if grep -a -q "PREVIEW INTERIMSTACK $label ok" "$log"; then
+            ok "the $label interim draws above the ground and below the final picture"
+        else
+            bad "the $label interim is not stacked between the ground and the final picture (log $log)"
+        fi
+        s0=$(im_line "istart-$label"); s1=$(im_line "iend-$label")
+        if [ -z "$s0" ] || [ -z "$s1" ]; then
+            bad "an interim sentinel never arrived for $label (log $log)"
+            continue
+        fi
+        oopens=$(sed -n "${s0},${s1}p" "$watchlog" | grep -c "^OPEN|$orig\$")
+        copens=$(sed -n "${s0},${s1}p" "$watchlog" | grep -c "^OPEN|$cache\$")
+        if [ "$oopens" -eq 1 ]; then
+            ok "and opened its original once, the interim adding none"
+        else
+            bad "the $label original opened $oopens time(s), want exactly 1 (log $log)"
+        fi
+        if [ "$copens" -eq 1 ]; then
+            ok "and drew its cache file"
+        else
+            bad "the $label interim opened $cache $copens time(s), want exactly 1 (log $log)"
+        fi
+    done
+    # Sample input: 'PREVIEW HELD held shown=true ready=true status=loading' is a Ready cache releasing Quick Look while the final still decodes.
+    held=$(grep -a "PREVIEW HELD held " "$log" | head -1)
+    case "$held" in
+        *"shown=true ready=true status=loading"*) ok "a Ready cache shows the interim and releases Quick Look while the final loads" ;;
+        *) bad "the held phase did not release on the interim: '$held' (log $log)" ;;
+    esac
+    # Sample input: 'PREVIEW HELD heldbad shown=false ready=false status=loading' is a missing cache file holding Quick Look on loading.
+    heldbad=$(grep -a "PREVIEW HELD heldbad " "$log" | head -1)
+    case "$heldbad" in
+        *"shown=false ready=false status=loading"*) ok "a missing cache file shows no interim and Quick Look keeps waiting on the final" ;;
+        *) bad "the heldbad phase did not wait on the final: '$heldbad' (log $log)" ;;
+    esac
+    # e81f-r3: the interim meta-row guards, one PREVIEW GUARD line each.
+    if grep -a -q "PREVIEW GUARD1 PASS" "$log"; then
+        ok "the interim refuses a meta reply for a row that drifted onto another file"
+    else
+        bad "guard 1 did not pass: a drifted row's reply must not size the interim (log $log)"
+    fi
+    if grep -a -q "PREVIEW GUARD2 PASS" "$log"; then
+        ok "a drifted capture re-asks at the cursor row and takes that reply"
+    else
+        bad "guard 2 did not pass: the ask must move to the cursor row (log $log)"
+    fi
+    if grep -a -q "PREVIEW GUARD3 PASS" "$log"; then
+        ok "no row naming the file means no ask and no interim sizing"
+    else
+        bad "guard 3 did not pass: nothing may be asked when no row names the file (log $log)"
+    fi
+    if grep -a -q "PREVIEW GUARD4 PASS" "$log"; then
+        ok "the captured row keeps the ask when the cursor sits elsewhere"
+    else
+        bad "guard 4 did not pass: the ask must stay at the captured row (log $log)"
+    fi
 fi
 
 printf 'preview-decode: %s check(s), %s failed\n' "$((pass + fail))" "$fail"
+if [ "$fail" -ne 0 ]; then
+    grep -a -E 'TypeError|ReferenceError|ERROR|INTERIM|GUARD' "$log" | head -20
+fi
 [ "$fail" -eq 0 ]

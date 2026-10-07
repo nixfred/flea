@@ -419,11 +419,11 @@ Item {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         onVisibleChanged: contentY = 0
-        Flea.ViewportScrollBar {
+        Flea.FastScrollHandler {
             parent: detailView
-            anchors { top: parent.top; right: parent.right }
             flickable: detailView
         }
+        // No bar and no lane: the detail fills the strip and still scrolls by wheel and touchpad.
         Text {
             id: detailText
             x: Theme.spacing.rowPaddingX

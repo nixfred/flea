@@ -4,6 +4,7 @@ use crate::jsondoc::{self, Json};
 // docs/flea-0.1.4-build-handoff.md section 1's shape and defaults, but density compact (0.3.2), showUnmounted on (0.3.3).
 pub const DEFAULTS: &str = r#"{
   "view": "list",
+  "pickerView": "list",
   "density": "compact",
   "columns": ["name", "size", "date"],
   "columnsLimit": 3,
@@ -19,16 +20,20 @@ pub const DEFAULTS: &str = r#"{
   "hiddenLast": false,
   "highlightToday": false,
   "wrapAtEnds": false,
+  "escapeUp": false,
+  "openMode": "double",
+  "clickRename": true,
   "keyHints": false,
   "startIn": "home",
   "startFolder": "",
   "lastPath": "",
+  "lastTabs": {"paths": [], "index": 0},
   "newTab": "current",
   "trashAutoEmpty": false,
   "trashSweptOn": 0,
   "places": {
     "favourites": [],
-    "showHome": true, "showNetwork": true,
+    "showHome": true, "showRecent": false, "showNetwork": true,
     "showDevices": true, "showTrash": true,
     "driveSize": false, "trashCount": false, "showUnmounted": true, "rail": "shown", "autoHide": false, "sidebarWidth": 192
   },
@@ -45,9 +50,10 @@ pub const DEFAULTS: &str = r#"{
   "keys": "default",
   "display": { "textSize": { "mode": "system" }, "hyprlandIcons": false },
   "menu": { "hidden": ["delete", "openTerminal", "placeMenu", "runScript",
-            "moveto", "copyto", "properties", "permissions", "copypath", "extThumbs"] },
+            "moveto", "copyto", "properties", "permissions", "copyAs", "pasteAs",
+            "invertSelection", "extThumbs"] },
   "updates": { "autoCheck": true },
-  "stateVersion": 1
+  "stateVersion": 2
 }"#;
 
 // The list row's optional columns in the order ui/js/Columns.js lays them out; name is never optional.
@@ -67,6 +73,8 @@ pub enum Rule {
     Favourites,
     // One place, or "" for a folder the operator has not chosen and a path nothing has recorded yet.
     Place,
+    // Tabs040 callout 2: every open tab's folder in order, with the current tab's index.
+    LastTabs,
     SidebarWidth,
     // dual.paths is the pair handoff 5a specifies, or the empty array that means nothing remembered.
     Pair,
@@ -97,6 +105,8 @@ pub const SORT: &[(&str, Rule)] = &[("key", Rule::Word(&SORT_KEYS)), ("reverse",
 
 // A folder's own sort in sort's own shape; the map holds the 500 most recent folders, oldest first.
 pub const SORT_KEYS: [&str; 4] = ["name", "size", "date", "kind"];
+// Tabs040 callout 2: at most one entry per tab ui/js/Tabs.js MAX allows, in tab order.
+pub const MAX_LAST_TABS: usize = 9;
 pub const MAX_FOLDER_SORTS: usize = 500;
 
 pub const DUAL: &[(&str, Rule)] = &[("paths", Rule::Pair), ("focus", Rule::Count(0.0, 1.0))];
@@ -104,6 +114,8 @@ pub const DUAL: &[(&str, Rule)] = &[("paths", Rule::Pair), ("focus", Rule::Count
 pub const PLACES: &[(&str, Rule)] = &[
     ("favourites", Rule::Favourites),
     ("showHome", Rule::Bool),
+    // Sidebar040: the Recent place ships off, so a shared screen never names recent files.
+    ("showRecent", Rule::Bool),
     ("showNetwork", Rule::Bool),
     ("showDevices", Rule::Bool),
     ("showTrash", Rule::Bool),
@@ -154,6 +166,9 @@ pub const UPDATES: &[(&str, Rule)] = &[("autoCheck", Rule::Bool)];
 
 pub const SCHEMA: &[(&str, Rule)] = &[
     ("view", Rule::Word(&["list", "columns", "grid", "dual"])),
+    // The file chooser's own last-used view, separate from the main window's: a grid
+    // picker must not flip the browser, and a list browser must not flip the picker.
+    ("pickerView", Rule::Word(&["list", "grid"])),
     ("density", Rule::Word(&["tight", "compact", "normal", "comfortable"])),
     ("columns", Rule::Columns),
     // ColumnsWidth board: 2 to 5 columns from the window width, capped here, shipping at 3.
@@ -170,6 +185,11 @@ pub const SCHEMA: &[(&str, Rule)] = &[
     ("hiddenLast", Rule::Bool),
     ("highlightToday", Rule::Bool),
     ("wrapAtEnds", Rule::Bool),
+    // ClickAndRefresh: Escape climbs when on, the pointer's open mode, and the
+    // slow-click rename it greys. Single click and Escape-up ship off, slow click ships on.
+    ("escapeUp", Rule::Bool),
+    ("openMode", Rule::Word(&["double", "single"])),
+    ("clickRename", Rule::Bool),
     // The Menus section's "Show keyboard hints" row: every menu's key column and the empty
     // directory's own tip, off until it is switched on.
     ("keyHints", Rule::Bool),
@@ -178,6 +198,7 @@ pub const SCHEMA: &[(&str, Rule)] = &[
     ("startIn", Rule::Word(&["home", "last", "folder"])),
     ("startFolder", Rule::Place),
     ("lastPath", Rule::Place),
+    ("lastTabs", Rule::LastTabs),
     ("newTab", Rule::Word(&["current", "home", "start"])),
     // Settings > Places > Trash. The sweep is off until the operator switches it on, and the day it
     // last ran is whole days since the epoch, which is what keeps it to once a day across launches.
@@ -246,15 +267,16 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "view", "density", "columns", "columnsLimit", "columnWidths", "addressBar", "sort", "rememberSort", "folderSorts",
-                "dual", "foldersFirst", "groupByKind", "hidden", "hiddenLast", "highlightToday", "wrapAtEnds", "keyHints", "startIn", "startFolder",
-                "lastPath", "newTab", "trashAutoEmpty", "trashSweptOn", "places", "shelf",
+                "view", "pickerView", "density", "columns", "columnsLimit", "columnWidths", "addressBar", "sort", "rememberSort", "folderSorts",
+                "dual", "foldersFirst", "groupByKind", "hidden", "hiddenLast", "highlightToday", "wrapAtEnds", "escapeUp", "openMode", "clickRename", "keyHints", "startIn", "startFolder",
+                "lastPath", "lastTabs", "newTab", "trashAutoEmpty", "trashSweptOn", "places", "shelf",
                 "preview", "keys",
                 "display", "menu", "updates", "stateVersion"
             ]
         );
-        assert_eq!(d.get(STATE_VERSION).and_then(Json::as_f64), Some(1.0), "a fresh document is already stamped");
+        assert_eq!(d.get(STATE_VERSION).and_then(Json::as_f64), Some(2.0), "a fresh document is already stamped");
         assert_eq!(d.get("view").and_then(Json::as_str), Some("list"));
+        assert_eq!(d.get("pickerView").and_then(Json::as_str), Some("list"));
         assert_eq!(d.get("density").and_then(Json::as_str), Some("compact"));
         assert_eq!(d.get("addressBar").and_then(Json::as_str), Some("breadcrumb"));
         assert_eq!(d.get("keys").and_then(Json::as_str), Some("default"));
@@ -264,10 +286,16 @@ mod tests {
         assert_eq!(d.get("hiddenLast").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("highlightToday").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("wrapAtEnds").and_then(Json::as_bool), Some(false));
+        // Escape stays put and a double click opens as in 0.3.4; slow click renames, on by the defaults ledger.
+        assert_eq!(d.get("escapeUp").and_then(Json::as_bool), Some(false));
+        assert_eq!(d.get("openMode").and_then(Json::as_str), Some("double"));
+        assert_eq!(d.get("clickRename").and_then(Json::as_bool), Some(true));
         assert_eq!(d.get("keyHints").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("startIn").and_then(Json::as_str), Some("home"));
         assert_eq!(d.get("startFolder").and_then(Json::as_str), Some(""));
         assert_eq!(d.get("lastPath").and_then(Json::as_str), Some(""));
+        assert_eq!(d.get("lastTabs").and_then(|t| t.get("paths")).and_then(Json::as_array).map(<[Json]>::len), Some(0));
+        assert_eq!(d.get("lastTabs").and_then(|t| t.get("index")).and_then(Json::as_f64), Some(0.0));
         assert_eq!(d.get("newTab").and_then(Json::as_str), Some("current"));
         assert_eq!(d.get("trashAutoEmpty").and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("trashSweptOn").and_then(Json::as_f64), Some(0.0));
@@ -297,6 +325,8 @@ mod tests {
         assert_eq!(d.get("places").and_then(|p| p.get("autoHide")).and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("places").and_then(|p| p.get("driveSize")).and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("places").and_then(|p| p.get("trashCount")).and_then(Json::as_bool), Some(false));
+        // Sidebar040: Recent ships off, so a fresh rail names no recent file.
+        assert_eq!(d.get("places").and_then(|p| p.get("showRecent")).and_then(Json::as_bool), Some(false));
         // GM's 0.3.3 ruling: unmounted drives are on the rail unless the operator switches them off.
         assert_eq!(d.get("places").and_then(|p| p.get("showUnmounted")).and_then(Json::as_bool), Some(true));
         assert_eq!(d.get("preview").and_then(|p| p.get("loadOn")).and_then(Json::as_str), Some("automatic"));
@@ -306,6 +336,8 @@ mod tests {
         assert_eq!(d.get("preview").and_then(|p| p.get("thumbNetwork")).and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("preview").and_then(|p| p.get("thumbPhone")).and_then(Json::as_bool), Some(false));
         assert_eq!(d.get("preview").and_then(|p| p.get("thumbUsb")).and_then(Json::as_bool), Some(true));
+        // GM 2026-10-03: the Markdown view is not a stored choice, so no leaf for it ships.
+        assert!(d.get("preview").and_then(|p| p.get("markdownView")).is_none());
         assert_eq!(d.get("display").and_then(|p| p.get("textSize")).and_then(|t| t.get("mode")).and_then(Json::as_str), Some("system"));
         let display: Vec<&str> = d.get("display").and_then(Json::as_object).expect("display").iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(display, ["textSize", "hyprlandIcons"], "the compositor owns opacity, icons and shadows");
@@ -330,7 +362,7 @@ mod tests {
             hidden,
             // Directive 38: every feature this release adds ships with its own id hidden, so a fresh
             // ui.json behaves as 0.2.1 did. placeMenu is the Places rows' own menu.
-            ["delete", "openTerminal", "placeMenu", "runScript", "moveto", "copyto", "properties", "permissions", "copypath", "extThumbs"]
+            ["delete", "openTerminal", "placeMenu", "runScript", "moveto", "copyto", "properties", "permissions", "copyAs", "pasteAs", "invertSelection", "extThumbs"]
         );
     }
 
@@ -379,11 +411,16 @@ mod tests {
 
     // The rules nothing else reached: an exact stop, a non-empty path, and the four shipped presets.
     #[test]
-    fn the_stop_the_preset_and_the_favourites_rules_each_bite_at_their_own_edge() {        let current = crate::uistate::from_file("{}");
+    fn the_stop_the_preset_and_the_favourites_rules_each_bite_at_their_own_edge() {
+        let current = crate::uistate::from_file("{}");
         let takes = |patch: &str| crate::uistate::patched(&current, &jsondoc::parse(patch).expect("patch parses"));
         for good in [r#"{"display":{"textSize":{"mode":"system"}}}"#, r#"{"display":{"textSize":{"mode":9}}}"#,
                      r#"{"keys":"default"}"#, r#"{"keys":"vim"}"#,
                      r#"{"keys":"mac"}"#, r#"{"keys":"windows"}"#,
+                     r#"{"pickerView":"list"}"#, r#"{"pickerView":"grid"}"#,
+                     r#"{"escapeUp":true}"#, r#"{"escapeUp":false}"#,
+                     r#"{"openMode":"double"}"#, r#"{"openMode":"single"}"#,
+                     r#"{"clickRename":true}"#, r#"{"clickRename":false}"#,
                      r#"{"places":{"favourites":[]}}"#,
                      r#"{"places":{"driveSize":true,"trashCount":true}}"#,
                      r#"{"places":{"driveSize":false,"trashCount":false}}"#,
@@ -399,7 +436,11 @@ mod tests {
                              (r#"{"display":{"opacity":1.0}}"#, "display.opacity"),
                              (r#"{"display":{"shadows":true}}"#, "display.shadows"),
                              (r#"{"menu":{"basic":false}}"#, "menu.basic"),
+                             (r#"{"escapeUp":"yes"}"#, "escapeUp"),
+                             (r#"{"openMode":"triple"}"#, "openMode"),
+                             (r#"{"clickRename":1}"#, "clickRename"),
                              (r#"{"keys":"emacs"}"#, "keys"),
+                             (r#"{"pickerView":"columns"}"#, "pickerView"),
                              (r#"{"language":"en"}"#, "language"),
                              (r#"{"places":{"favourites":"/a"}}"#, "places.favourites"),
                              (r#"{"places":{"driveSize":1}}"#, "places.driveSize"),
@@ -412,6 +453,43 @@ mod tests {
             let message = takes(bad).expect_err("the patch must be refused");
             assert!(message.contains(named), "{} should name {}, got {}", bad, named, message);
         }
+    }
+
+    // Tabs040 callout 2: a bounded list of places in tab order, with the current tab's index
+    // inside it. A file carrying a bad one costs that key its default, the way a bad place does.
+    #[test]
+    fn last_tabs_hold_every_tab_folder_with_its_current_index() {
+        let current = crate::uistate::from_file("{}");
+        let takes = |patch: &str| crate::uistate::patched(&current, &jsondoc::parse(patch).expect("patch parses"));
+        for good in [r#"{"lastTabs":{"paths":[],"index":0}}"#,
+                     r#"{"lastTabs":{"paths":["/home/gm/Work"],"index":0}}"#,
+                     r#"{"lastTabs":{"paths":["/a","smb://nas/isos","/b"],"index":2}}"#] {
+            assert!(takes(good).is_ok(), "{} is a value its key takes", good);
+        }
+        for (bad, named) in [(r#"{"lastTabs":[]}"#, "lastTabs"),
+                             (r#"{"lastTabs":{"paths":[],"index":1}}"#, "lastTabs"),
+                             (r#"{"lastTabs":{"paths":["/a"],"index":1}}"#, "lastTabs"),
+                             (r#"{"lastTabs":{"paths":["/a"],"index":-1}}"#, "lastTabs"),
+                             (r#"{"lastTabs":{"paths":["/a"],"index":0.5}}"#, "lastTabs"),
+                             (r#"{"lastTabs":{"paths":["Work"],"index":0}}"#, "lastTabs"),
+                             (r#"{"lastTabs":{"paths":[""],"index":0}}"#, "lastTabs"),
+                             (r#"{"lastTabs":{"paths":["/a"],"index":0,"by":"x"}}"#, "lastTabs"),
+                             (r#"{"lastTabs":{"paths":"/a","index":0}}"#, "lastTabs")] {
+            let message = takes(bad).expect_err("the patch must be refused");
+            assert!(message.contains(named), "{} should name {}, got {}", bad, named, message);
+        }
+        let mut big = String::from(r#"{"lastTabs":{"paths":["#);
+        for i in 0..MAX_LAST_TABS + 1 {
+            if i > 0 {
+                big.push(',');
+            }
+            big.push_str(&format!(r#""/d{:03}""#, i));
+        }
+        big.push_str(r#"],"index":0}}"#);
+        let message = takes(&big).expect_err("past the tab cap the patch must be refused");
+        assert!(message.contains("lastTabs"), "got {}", message);
+        let read = crate::uistate::from_file(r#"{"lastTabs":{"paths":["/a"],"index":3}}"#);
+        assert_eq!(read.get("lastTabs").and_then(|t| t.get("paths")).and_then(Json::as_array).map(<[Json]>::len), Some(0));
     }
 
     #[test]

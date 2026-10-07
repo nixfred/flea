@@ -1,7 +1,12 @@
 .import "../../ui/js/Picker.js" as Picker
 .import "../../ui/js/Sort.js" as Sort
+.import "../../ui/js/Keymap.js" as Keymap
+.import "sourcefixture.js" as Source
+
+.import "pickerkeys.js" as PickerKeys
 
 function run(check) {
+    PickerKeys.run(check)
     // The shape tools/flea-portal writes for an OpenFile with two filters, taken from its request_for().
     var asked = JSON.stringify({
         mode: "open", title: "Send to unraid", app: "", accept: "Send", multiple: true,
@@ -52,6 +57,7 @@ function run(check) {
     check("what is checked and what it weighs", Picker.statusLine(3, 2100000), "3 selected · 2.1 MB")
     check("and a four-figure check groups", Picker.statusLine(1204, 2100000), "1,204 selected · 2.1 MB")
     check("the open hints name Space and Enter", Picker.hints(req), "Space select · Enter open/send · Esc cancel")
+    check("one-file hints advertise no marking", Picker.hints(Picker.request("{}")), "Enter open · Esc cancel")
     check("the save hints name neither", Picker.hints(Picker.request('{"mode":"save"}')), "Enter save · Esc cancel")
 
     var chips = Picker.chips(req)
@@ -128,21 +134,34 @@ function run(check) {
     check("S reverses an inherited kind order rather than refusing it",
           order(Sort.reverseOrder("kind", true)), "kind asc")
 
-    // A file double click marks the row when unmarked, then accepts; a multiple accept sends every mark.
+    // One-file double clicks accept; several-file double clicks toggle the file's mark.
     var single = Picker.request('{"mode":"open","multiple":false}')
     var multi = Picker.request('{"mode":"open","multiple":true}')
     var file = {d: false, p: 0, s: 1, m: 1, i: "text"}
     var folder = {d: true, p: 0, s: 0, m: 1, i: "folder"}
     check("a double click on an unmarked file marks then sends it", Picker.doubleAction(single, file, "/a/b.txt", "/a/b.txt", []), "markAccept")
     check("a double click on a marked file sends it", Picker.doubleAction(single, file, "/a/b.txt", "/a/b.txt", [{path: "/a/b.txt", bytes: 3}]), "accept")
-    check("a multiple double click on an unmarked file marks then sends", Picker.doubleAction(multi, file, "/a/c.txt", "/a/c.txt", [{path: "/a/b.txt", bytes: 3}]), "markAccept")
-    check("a multiple double click on a marked file sends the marks", Picker.doubleAction(multi, file, "/a/b.txt", "/a/b.txt", [{path: "/a/b.txt", bytes: 3}]), "accept")
+    check("a multiple double click on an unmarked file toggles its mark", Picker.doubleAction(multi, file, "/a/c.txt", "/a/c.txt", [{path: "/a/b.txt", bytes: 3}]), "mark")
+    check("a multiple double click on a marked file toggles its mark", Picker.doubleAction(multi, file, "/a/b.txt", "/a/b.txt", [{path: "/a/b.txt", bytes: 3}]), "mark")
     check("a double click on a folder still opens it", Picker.doubleAction(single, folder, "/a/sub", "/a/sub", []), "open")
+    check("a multiple double click on a folder still opens it", Picker.doubleAction(multi, folder, "/a/sub", "/a/sub", []), "open")
+    check("a multiple second tap on another path changes nothing", Picker.doubleAction(multi, file, "/a/b.txt", "/a/c.txt", []), "none")
     check("a folder request never sends on double click", Picker.doubleAction(Picker.request('{"directory":true}'), file, "/a/b.txt", "/a/b.txt", []), "none")
     check("save mode never sends on double click", Picker.doubleAction(Picker.request('{"mode":"save"}'), file, "/a/b.txt", "/a/b.txt", []), "none")
+    check("savefiles mode never sends on double click", Picker.doubleAction(Picker.request('{"mode":"savefiles","multiple":true}'), file, "/a/b.txt", "/a/b.txt", []), "none")
     check("a second tap on another row sends nothing", Picker.doubleAction(single, file, "/a/b.txt", "/a/c.txt", []), "none")
     check("a double click with no first tap sends nothing", Picker.doubleAction(single, file, "/a/b.txt", "", []), "none")
     check("a double click on no row sends nothing", Picker.doubleAction(single, null, "/a/b.txt", "/a/b.txt", []), "none")
+
+    // Issue #191: the picker reopens in the last used view, and only a moving switch owes a write.
+    check("a remembered grid reopens as grid", Picker.rememberedView("grid"), "grid")
+    check("a remembered list reopens as list", Picker.rememberedView("list"), "list")
+    check("a word the picker cannot draw opens the list", Picker.rememberedView("columns"), "list")
+    check("an empty stored view opens the list", Picker.rememberedView(""), "list")
+    check("a switch to the other view is owed", Picker.viewSwitch("list", "grid"), "grid")
+    check("a switch back is owed too", Picker.viewSwitch("grid", "list"), "list")
+    check("a repeat press owes nothing", Picker.viewSwitch("grid", "grid"), "")
+    check("a word the picker cannot draw owes nothing", Picker.viewSwitch("list", "columns"), "")
 
     // Issue #221: a second tap on another path is a single tap.
     check("a second tap on the same path counts as a double", Picker.sameTap("/a/b.txt", "/a/b.txt"), true)
@@ -154,4 +173,97 @@ function run(check) {
     check("chips take room first and the path keeps its minimum", Picker.chipStripWidth(300, 400, 96), 204)
     check("a strip wider than the free width still scrolls", Picker.chipStripWidth(200, 400, 96), 104)
     check("no free width leaves the path whole", Picker.chipStripWidth(50, 400, 96), 0)
+
+    // Issue #225: the Mac preset's Return/Enter looks up as rename yet still activates.
+    var none = Qt.NoModifier
+    function looked(preset, key, text) {
+        return Keymap.lookupFor(preset, key, text, none, "listing", "gui")
+    }
+    check("default Return looks up as open", looked("default", Qt.Key_Return, ""), "open")
+    check("default Enter looks up as open", looked("default", Qt.Key_Enter, ""), "open")
+    check("default Return activates", Picker.activates(looked("default", Qt.Key_Return, ""), Qt.Key_Return), true)
+    check("default Enter activates", Picker.activates(looked("default", Qt.Key_Enter, ""), Qt.Key_Enter), true)
+    check("default r looks up as rename", looked("default", 0, "r"), "rename")
+    check("default r does not activate", Picker.activates("rename", 0), false)
+    check("default F2 looks up as rename", looked("default", Qt.Key_F2, ""), "rename")
+    check("default F2 does not activate", Picker.activates("rename", Qt.Key_F2), false)
+    check("mac Return looks up as rename", looked("mac", Qt.Key_Return, ""), "rename")
+    check("mac Enter looks up as rename", looked("mac", Qt.Key_Enter, ""), "rename")
+    check("mac Return activates", Picker.activates(looked("mac", Qt.Key_Return, ""), Qt.Key_Return), true)
+    check("mac Enter activates", Picker.activates(looked("mac", Qt.Key_Enter, ""), Qt.Key_Enter), true)
+    check("mac r does not activate", Picker.activates(looked("mac", 0, "r"), 0), false)
+    check("mac r looks up as rename", looked("mac", 0, "r"), "rename")
+    check("mac F2 does not activate", Picker.activates(looked("mac", Qt.Key_F2, ""), Qt.Key_F2), false)
+    check("mac F2 looks up as rename", looked("mac", Qt.Key_F2, ""), "rename")
+    check("open activates", Picker.activates("open", Qt.Key_Return), true)
+    check("pageForward activates", Picker.activates("pageForward", Qt.Key_Right), true)
+    check("parent never activates", Picker.activates("parent", Qt.Key_Left), false)
+    check("escape never activates", Picker.activates("escape", Qt.Key_Escape), false)
+
+    // Issue #191: single grid steps past an end stay; page steps clamp through pageTarget.
+    check("a down step moves one tile row", Picker.gridTarget(5, 5, 5, 12), 10)
+    check("an up step moves one tile row", Picker.gridTarget(7, -5, 5, 12), 2)
+    check("a left step off its row stays", Picker.gridTarget(5, -1, 5, 12), 5)
+    check("a right step off its row stays", Picker.gridTarget(9, 1, 5, 12), 9)
+    check("a step inside its row moves", Picker.gridTarget(6, 1, 5, 12), 7)
+    check("a step past the end stays", Picker.gridTarget(11, 5, 5, 12), 11)
+    check("a step past the top stays", Picker.gridTarget(1, -5, 5, 12), 1)
+    check("a page past the end clamps to the last tile", Picker.pageTarget(85, 20, 100), 99)
+    check("a page past the top clamps to the first tile", Picker.pageTarget(11, -20, 12), 0)
+    check("a page inside the listing lands", Picker.pageTarget(5, 20, 100), 25)
+
+    // The grid's visible tiles as listing rows: the tile-row viewport times the column count.
+    var range = Picker.tileRange(0, 198, 4, 5, 100)
+    check("a settled grid starts at its first tile", range.first, 0)
+    check("a settled grid ends at its last visible tile", range.last, 19)
+    var scrolled = Picker.tileRange(198, 198, 4, 5, 100)
+    check("a scrolled grid starts one tile row down", scrolled.first, 5)
+    var tail = Picker.tileRange(0, 198, 4, 5, 12)
+    check("a short listing clamps to its last row", tail.last, 11)
+    check("the shared window covers the wider grid screen", Picker.windowSize(10, 4, 5), 100)
+    check("a wide list still sizes the window", Picker.windowSize(30, 2, 5), 120)
+    check("a 160-tile screen fits inside its window lead", Picker.windowSize(37, 10, 16) * 0.75 > 160, true)
+    // Sample input: Source.source("ui/PickerWindow.qml") holds the windowSize binding.
+    var winSrc = Source.source("ui/PickerWindow.qml")
+    check("the window sizes through the shared function",
+        winSrc.indexOf("Picker.windowSize(list.visibleRows, grid.visibleTileRows, grid.columns)") >= 0, true)
+    check("a view switch reshows the grid", winSrc.indexOf('if (next === "grid") grid.reshow(') >= 0, true)
+    check("and the list", winSrc.indexOf("else list.reshow(") >= 0, true)
+
+    // Sample input: function paths(rows, request) queues local tokens before writing protocol requests.
+    var listingSrc = Source.source("ui/PickerListing.qml")
+    var pathsSrc = Source.slice(listingSrc, "    function paths(rows", "    // Storage class")
+    var requestPaths = new Function("current", "quitting", "rows", "request",
+        pathsSrc.slice(pathsSrc.indexOf("{") + 1, pathsSrc.lastIndexOf("}")))
+    var worker = {running: true, obsolete: false, pathRequests: [], writes: [],
+        write: function(line) { this.writes.push(JSON.parse(line)) }}
+    check("F33 first paths request starts", requestPaths(worker, false, [0], 1), true)
+    check("F33 retry paths request starts", requestPaths(worker, false, [1], 2), true)
+    check("F33 worker retains reply tokens in order", JSON.stringify(worker.pathRequests), "[1,2]")
+    check("F33 local tokens do not change backend protocol", JSON.stringify(worker.writes),
+        '[{"c":"paths","rows":[0]},{"c":"paths","rows":[1]}]')
+    // Sample input: onRead receives {"t":"paths","paths":["/b/late"]} before the retry's paths reply.
+    var parserMarker = "                onRead: function(line) {"
+    var parserSrc = Source.slice(listingSrc, parserMarker, "                }\n            }\n            onExited:")
+    var readReply = new Function("root", "process", "line", parserSrc.slice(parserMarker.length))
+    var listing = {current: worker, quitting: false, replies: [], messages: [],
+        pathsResolved: function(paths, request) { this.replies.push([request, paths]) },
+        message: function(message) { this.messages.push(message) },
+        failed: function(reason) { throw new Error(reason) }}
+    readReply(listing, worker, '{"t":"paths","paths":["/b/late"]}')
+    readReply(listing, worker, '{"t":"paths","paths":["/b/fresh"]}')
+    check("F33 late and fresh replies keep their own tokens", JSON.stringify(listing.replies),
+        '[[1,["/b/late"]],[2,["/b/fresh"]]]')
+    readReply(listing, worker, '{"t":"paths","paths":["/b/unsolicited"]}')
+    check("F33 unsolicited reply gets no selection token", listing.replies.length, 2)
+    readReply(listing, worker, '{"t":"listed","n":2}')
+    check("F33 other listing messages still forward", JSON.stringify(listing.messages), '[{"t":"listed","n":2}]')
+    // Queue a live request so only the obsolete guard can block its late reply.
+    var obsoleteRequest = 3
+    check("F43 paths request starts before worker becomes obsolete", requestPaths(worker, false, [0], obsoleteRequest), true)
+    check("F43 obsolete reply has a queued token", JSON.stringify(worker.pathRequests), JSON.stringify([obsoleteRequest]))
+    worker.obsolete = true
+    readReply(listing, worker, '{"t":"paths","paths":["/b/obsolete"]}')
+    check("F43 obsolete worker forwards nothing", listing.replies.length, 2)
+    check("F33 obsolete worker accepts no paths request", requestPaths(worker, false, [0], obsoleteRequest), false)
 }

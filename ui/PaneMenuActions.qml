@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import "." as Flea
 import "js/LocalSend.js" as LocalSendJs
+import "js/CopyAs.js" as CopyAs
 import "js/Menu.js" as Menu
 import "js/Ops.js" as Ops
 
@@ -29,7 +30,7 @@ Loader {
     }
 
     // A menu opened without a selection carries no paths, so a row action means the row under the
-    // cursor, which is what Copy path has always read and what the send rows read now.
+    // cursor, which is what the path copy has always read and what the send rows read now.
     function targets(paths) {
         if (paths && paths.length) return paths
         return root.pane.cursorRow ? [root.pane.join(root.pane.path, root.pane.cursorRow.n)] : []
@@ -59,13 +60,48 @@ Loader {
         }
     }
 
+    // MenuAdditions040: every Copy as variant covers the whole selection, one
+    // path per line, through wl-copy. The menu's snapshot carries paths a
+    // window cannot hold, so the leaves read them rather than the cursor row.
+    property var copyKinds: ({ copyPath: "path", copyName: "name", copyStem: "stem",
+        copydirpath: "dirpath", copyUri: "uri", copyQuoted: "quoted" })
+    function copyVariant(action, paths) {
+        var leaf = action.indexOf("copyAs:") === 0 ? action.substring("copyAs:".length) : action
+        var kind = copyKinds[leaf]
+        if (kind === undefined) return false
+        var taken = root.targets(paths)
+        if (taken.length === 0) return true
+        root.pane.opener.copyText(CopyAs.lines(taken, kind))
+        return true
+    }
+
     function perform(action, menuId, paths) {
         if (action.indexOf("runScript:") === 0) { Flea.Scripts.run(action.substring("runScript:".length), paths || []); return }
         if (action.indexOf("localsend:") === 0) { LocalSendJs.send(root.pane, localSend, root.pane.backend.providers.localsend, action.substring("localsend:".length), root.targets(paths)); return }
         if (action.indexOf("taildrop:") === 0) { root.pane.sendTaildrop(action.substring("taildrop:".length), root.targets(paths).length === 1 ? root.targets(paths)[0] : ""); return }
         if (action === "addToShelf") { root.shelve(root.targets(paths)); return }
         if (action === "sharelink") { root.pane.copyShareLink(paths && paths.length === 1 ? paths[0] : ""); return }
+        // The listing menu's Copy path row, kept as the alias the Places and
+        // Locked menus still spell while they move onto the Copy as leaves.
         if (action === "copypath") { root.pane.opener.copyText(paths && paths.length ? paths[0] : root.pane.join(root.pane.path, root.pane.cursorRow.n)); return }
+        if (copyVariant(action, paths)) return
+        // MenuAdditions040: Show original reveals the link's target in its own
+        // folder, the same path Show in folder uses.
+        if (action === "showOriginal") {
+            var taken = root.targets(paths)
+            if (taken.length > 0) root.pane.requestLinkTarget(taken[0])
+            return
+        }
+        // MenuAdditions040: Paste as links, undoable, through the collision card.
+        // The source is the file clipboard, never the snapshot the menu took:
+        // pasting links the rows y copied or x cut, wherever they were taken.
+        if (action.indexOf("pasteAs:") === 0) {
+            var leaf = action.substring("pasteAs:".length)
+            var kind = leaf === "pasteAbsoluteLink" ? "absolute" : leaf === "pasteHardLink" ? "hard" : "relative"
+            root.pane.pasteLink(kind, null)
+            return
+        }
+        if (action === "invertSelection") { root.pane.invertSelection(); return }
         if (action.indexOf("col:") === 0) { ViewState.toggleColumn(action.substring("col:".length)); return }
         root.pane.act(action, menuId, paths)
     }
@@ -89,8 +125,12 @@ Loader {
     property string pendingAction: ""
     property bool pendingActivation: false
     property bool activationUsed: false
+    // The request a keymap sheet activation runs under, which lists hidden rows; the next snapshot moves requestId past it.
+    property int sheetRequest: 0
     // Which row a keyboard rename was asked for, so its reply cannot open the editor over another.
     property int pendingRenameIndex: -1
+    // The pointer rename's own reveal context beside it, so a slow click never scrolls; -1 keeps the keyboard's.
+    property int pendingRenameContext: -1
     property int launchingId: 0
     // OpenWith.html's flyout: the registry for the cursor row, asked for as the menu opens so the
     // submenu is populated by the time the row is reached. The flyout writes nothing; the dialog
@@ -167,7 +207,19 @@ Loader {
         pane.backend.send({c: "menuaction", op: "snapshot", id: requestId,
             rows: rows !== undefined ? rows : Ops.targetIndices(pane), cursor: pane.cursorIndex})
     }
-    function open(action, menuId) {
+    // A ready snapshot over the same selection opens the editor at once, one still in flight takes the F2 route, and a moved selection refuses as activate does.
+    function openRenameFromMenu() {
+        if (pane.renamePending) { pane.message("Rename is still finishing.", false); return }
+        if (deleting || survivorId) { pane.message("The deletion is still finishing.", false); return }
+        var route = Ops.menuRenameRoute(ready, identity, pane.menuSelectionIdentity)
+        if (route === "stale") { pane.message("Selected items changed; reopen the menu.", true); return }
+        if (route === "now" && pane.contextMenu().validateChoice("rename", "")) {
+            show("rename")
+            return
+        }
+        open("rename")
+    }
+    function open(action, menuId, context) {
         if (opened) return
         if (action === "rename" && pane.renamePending) { pane.message("Rename is still finishing.", false); return }
         if (deleting || survivorId) { pane.message("The deletion is still finishing.", false); return }
@@ -179,7 +231,10 @@ Loader {
         }
         // The row the editor will open over, captured now: the cursor can move between this request
         // and its reply, and the editor used to open over wherever it had got to by then.
-        if (action === "rename" && !menuId) pendingRenameIndex = pane.cursorIndex
+        if (action === "rename" && !menuId) {
+            pendingRenameIndex = pane.cursorIndex
+            pendingRenameContext = context === 0 ? 0 : -1
+        }
         if (!requestId || identity !== pane.menuSelectionIdentity || (action === "rename" && !menuId))
             snapshot(action === "rename" && !menuId ? [pane.cursorIndex] : undefined)
         pendingAction = action
@@ -213,7 +268,7 @@ Loader {
         pendingActivation = false
         var split = action.indexOf(":")
         if (providerAction(action) && !pane.contextMenu().validateChoice(split < 0 ? action : action.substring(0, split),
-                split < 0 ? "" : action.substring(split + 1))) return
+                split < 0 ? "" : action.substring(split + 1), sheetRequest === requestId)) return
         // OpenWith.html rule 2: the flyout is a one-off override that writes nothing, so a chosen
         // application launches through the same registry op the dialog submits, and the tail row is
         // the only way into the dialog, which stays the one place a default is written.
@@ -229,7 +284,12 @@ Loader {
     }
     function show(action) {
         pendingAction = ""
-        if (action === "rename") { Ops.startRename(pane, requestId, pendingRenameIndex); pendingRenameIndex = -1; return }
+        if (action === "rename") {
+            Ops.startRename(pane, requestId, pendingRenameIndex, pendingRenameContext === 0 ? 0 : undefined)
+            pendingRenameIndex = -1
+            pendingRenameContext = -1
+            return
+        }
         dialogFor = action
         active = true
         item.open(action, requestId, folder, pane.listArea)
@@ -351,7 +411,7 @@ Loader {
                 var split = message.action.indexOf(":")
                 var action = split < 0 ? message.action : message.action.substring(0, split)
                 var subId = split < 0 ? "" : message.action.substring(split + 1)
-                if (root.pane.contextMenu().validateChoice(action, subId)) {
+                if (root.pane.contextMenu().validateChoice(action, subId, root.sheetRequest === message.id)) {
                     if (action === "addFavourite") {
                         if (!message.paths || message.paths.length !== 1) { root.pane.message("The selected folder could not be read.", true); return }
                         root.addFavourite(message.paths[0])

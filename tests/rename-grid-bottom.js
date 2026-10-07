@@ -160,11 +160,14 @@ function pendingRetirementStep(turn) {
     }
     if (turn === 10) {
         editPane.renameRequest = null
-        editPane.renameError = "Permission denied."
+        editPane.said = []
+        Ops.refuseRename(editPane, "Permission denied.")
     }
     if (turn === 11) {
         probe.check(view.renameRetirement === null && editPane.renamingIndex === -1,
             "backend error without live editor releases unclaimed retirement")
+        probe.check(JSON.stringify(editPane.said) === JSON.stringify([["Permission denied.", true]]),
+            "backend error without live editor says the refusal in the status bar")
         editPane.renamingIndex = -1
         probe.restorePendingLoader()
         editPane.renamingIndex = 1201
@@ -265,9 +268,11 @@ write("flea/Util.qml", "pragma Singleton\nimport QtQuick\nQtObject { function al
 write("flea/Glyph.qml", "import QtQuick\nItem { property int maxSize: 128; property string name; property color color }\n");
 write("flea/ViewportScrollBar.qml", "import QtQuick\nItem { property var flickable; property var ctrlWheelAction }\n");
 write("flea/SelectionBand.qml", "import QtQuick\nItem { property var pane; property var flickable; property int columns; property real cellWidth; property real cellHeight }\n");
-write("flea/FileDrag.qml", "import QtQuick\nItem { property var pane; property int dropIndex: -1; property bool dragCopy: false }\n");
+write("flea/FileDrag.qml", "import QtQuick\nItem { property var pane; property int dropIndex: -1; property bool dragCopy: false; property bool dragLink: false }\n");
 write("flea/RowDrag.qml", "import QtQuick\nItem { property var session; property int listingIndex; property var row }\n");
 let fixture = fs.readFileSync(path.join(repo, "tests/rename-grid-bottom.qml"), "utf8");
+assert.ok(fixture.includes("TextSize.STOPS"), "tall step reads the top stop from TextSize.js");
+assert.ok(!fixture.includes("20 * 0.917") && !fixture.includes("20 * 0.833"), "tall step reads both ratios from TextSize.js, never bare");
 if (testCase !== "legacy") {
     const timer = fixture.indexOf("    Timer {\n        interval: 80"), finish = fixture.indexOf("    function finish()", timer);
     assert.ok(timer >= 0 && finish > timer);
@@ -295,6 +300,6 @@ const output = result.stdout + result.stderr;
 fs.writeFileSync(path.join(testRoot, "probe.log"), output);
 fs.writeSync(1, `rename-grid-bottom evidence: ${testRoot}\n${output.trim()}\n`);
 assert.equal(result.status, 0);
-assert.equal(output.split(`RENAME_GRID_BOTTOM CHECKS=${({legacy: 66, measurement: 10, pending: 24, focus: 26, owner: owner.checks})[testCase]}`).length - 1, 1);
+assert.equal(output.split(`RENAME_GRID_BOTTOM CHECKS=${({legacy: 66, measurement: 10, pending: 25, focus: 26, owner: owner.checks})[testCase]}`).length - 1, 1);
 assert.equal(output.split("RENAME_GRID_BOTTOM DONE failures=0").length - 1, 1);
 assert.doesNotMatch(output, /\bFAIL\b|\bWARN(?:ING)?\b|Error|error:|Binding loop|failed to load|Unable to assign|Cannot assign/i);

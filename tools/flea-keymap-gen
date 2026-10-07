@@ -99,7 +99,8 @@ def generate(data):
                 fail(f'shared listing key {caps(mods, key)} claims {seen[key]} and {row["action"]}')
             seen[key] = row['action']
             shared.append(dict(name='all', mods=mods, key=key, keys=row.get('keys', caps(mods, key)),
-                               action=row['action'], context='listing', frontend='all'))
+                               action=row['action'], context='listing', frontend='all',
+                               **({} if row.get('sheet', True) else {'sheet': False})))
     lines = ['.pragma library', '', '// Generated from keys.toml by tools/flea-keymap-gen. Do not edit.']
     def emit(name, value):
         lines.append('var ' + name + ' = ' + json.dumps(value, ensure_ascii=True, separators=(',', ':')))
@@ -130,7 +131,7 @@ def generate(data):
     listing_actions = {ARMS.get(row['action'], row['action']) for row in bindings + shared
                        if row['action'] and 'listing' in row['context'].split(',')}
     emit('SHEET_EXTRA', [dict(preset=row['name'], mods=row['mods'], keys=row['keys'],
-                              action=row['action'], label=row['label'])
+                              action=row['action'], label=row['label'], context=row['context'])
                          for row in bindings + shared
                          if row['action'] in claimed(data)
                          and ARMS.get(row['action'], row['action']) not in listing_actions
@@ -200,6 +201,11 @@ function hintFor(action) {
 // columns of a 300 unit card, so a cap past this elides and the wording beside it has nowhere to go.
 var SHEET_CAP_BUDGET = 16
 
+// Actions that answer each other show a second spelling on both members or on neither (width alone gave "]" beside "[ / ctrl-pageup").
+var SHEET_MIRRORS = [["cursorDown", "cursorUp"], ["cursorFirst", "cursorLast"], ["pageDown", "pageUp"],
+    ["historyBack", "historyForward"], ["tabNext", "tabPrevious"], ["tabMoveLeft", "tabMoveRight"],
+    ["zoomIn", "zoomOut"], ["textSizeUp", "textSizeDown"], ["extendDown", "extendUp"]]
+
 // An action id is not wording. A row the base sheet does not name printed its own identifier, so the
 // pane advertised "pageDown" and "textSizeReset" beside sentences like "hidden files".
 function spelledOut(action) {
@@ -214,7 +220,7 @@ function capRank(row, preset) {
 
 function sheetFor(name, frontend, dual) {
     var result = [], groups = {}
-    var rows = bindingRows(name, frontend || "gui").concat(SHEET_EXTRA)
+    var rows = bindingRows(name, frontend || "gui").concat(SHEET_EXTRA).filter(function (row) { return row.sheet !== false })
     for (var i = 0; i < rows.length; i++) {
         var row = rows[i], action = actionGroup(row.action)
         var group = groups[action]
@@ -235,6 +241,7 @@ function sheetFor(name, frontend, dual) {
         var spellings = result[g].spellings.slice()
         spellings.sort(function (left, right) { return capRank(left, name) - capRank(right, name) })
         var keys = spellings.length ? spellings[0].keys : ""
+        result[g].alone = keys
         for (var k = 1; k < spellings.length; k++) {
             var both = keys + " / " + spellings[k].keys
             if (spellings[k].keys === keys || both.length > SHEET_CAP_BUDGET) continue
@@ -242,7 +249,18 @@ function sheetFor(name, frontend, dual) {
             break
         }
         result[g].keys = keys
-        delete result[g].spellings
+    }
+    // A pair shows a second spelling only when both members have one that fits.
+    for (var m = 0; m < SHEET_MIRRORS.length; m++) {
+        var first = groups[SHEET_MIRRORS[m][0]], second = groups[SHEET_MIRRORS[m][1]]
+        if (!first || !second) continue
+        if ((first.keys !== first.alone) === (second.keys !== second.alone)) continue
+        first.keys = first.alone
+        second.keys = second.alone
+    }
+    for (var d = 0; d < result.length; d++) {
+        delete result[d].spellings
+        delete result[d].alone
     }
     if (dual && groups.focusNext) {
         groups.focusNext.keys = "tab"

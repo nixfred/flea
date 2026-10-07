@@ -91,3 +91,12 @@ function question(request, probe, id) {
 function transfer(request, choice, id) {
     return Object.assign({}, request, { collide: choice, collideId: id })
 }
+
+// Paste as links answers on the waiting request like a transfer; rows ride along only when named, so paths-only pastes skip listing checks.
+function link(request, choice, id) {
+    var out = { c: "link", op: request.op, paths: request.paths || [],
+                dest: request.dest, collide: choice, collideId: id }
+    if (request.rows && request.rows.length > 0) out.rows = request.rows
+    if (request.listing !== undefined) out.listing = request.listing
+    return out
+}

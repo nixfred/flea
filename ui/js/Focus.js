@@ -1,4 +1,5 @@
 .pragma library
+.import "Input.js" as Input
 .import "Eject.js" as Eject
 .import "Filter.js" as Filter
 .import "Grid.js" as Grid
@@ -9,10 +10,13 @@
 .import "Ops.js" as Ops
 .import "PreviewKeys.js" as PreviewKeys
 .import "RailKeys.js" as RailKeys
+.import "Reload.js" as Reload
+.import "RecentMode.js" as RecentMode
 .import "Status.js" as Status
 .import "Search.js" as Search
 .import "Sort.js" as Sort
 .import "Swap.js" as Swap
+.import "TextSize.js" as TextSize
 .import "Trash.js" as Trash
 .import "Tabs.js" as Tabs
 
@@ -68,7 +72,7 @@ function canUndo(pane, sidebar) {
 // filtering it here, not in Keymap.js, keeps the generated file a pure keys.toml mirror.
 // seekBack/seekForward get the same treatment, scoped to an open MEDIA preview instead of the rail.
 function lookup(event, root) {
-    var context = root.preview.active ? (root.preview.isPdf ? "pdf" : root.preview.isMedia ? "media" : "preview")
+    var context = (root.preview && root.preview.active) ? (root.preview.isPdf ? "pdf" : root.preview.isMedia ? "media" : "preview")
                   : shareBrowserHere(root) ? "menu" : root.focusView === RAIL ? "rail" : "listing"
     // Grid arrows address visual neighbours even when the preset uses them to open folders in List.
     // Issue 114, muellan: h and l are the arrows spelled as letters, so in the grid they mean what
@@ -87,12 +91,12 @@ function lookup(event, root) {
     // place the map binds either action now that the browsing pair is parent and browse-in; the grid
     // takes the bare arrows above, before the map is consulted.
     if (action === "seekBack" || action === "seekForward")
-        return root.preview.active && (root.preview.isMedia || root.preview.isPdf) ? action : ""
+        return root.preview && root.preview.active && (root.preview.isMedia || root.preview.isPdf) ? action : ""
     // Minus, plus and e mean nothing outside a PDF. l is h's forward: page, else enter or preview.
     if (action === "zoomOut" || action === "zoomIn" || action === "expand")
-        return (root.preview.active && root.preview.isPdf) ? action : ""
+        return (root.preview && root.preview.active && root.preview.isPdf) ? action : ""
     if (action === "pageForward") {
-        if (root.preview.active)
+        if (root.preview && root.preview.active)
             return root.preview.isPdf ? action : ""
         if (shareBrowserHere(root) || root.focusView === RAIL)
             return "open"
@@ -100,15 +104,18 @@ function lookup(event, root) {
         return row && (row.d || (Format.isSymlink(row.p) && row.i === "folder")) ? "open" : (row ? "preview" : "")
     }
     // The key follows the row: where gio has no Trash the refusal names trashRefused, never arming a d that can only fail.
-    if ((action === "trashArm" || action === "trash") && !Mounts.trashable(root.path))
+    if ((action === "trashArm" || action === "trash") && !Mounts.trashable(root.path, !root.backend || root.backend.dirWritable !== false))
         return "trashRefused"
-    // reveal only means something on a search result, so o is discarded everywhere else.
-    if (action === "reveal" && root.searchMode !== Search.RESULTS)
+    // reveal only means something on a search result or a recent row, so o is discarded everywhere else.
+    if (action === "reveal" && root.searchMode !== Search.RESULTS && root.recentMode !== RecentMode.RESULTS)
         return ""
     // A sort ends the running walk in the backend and the search strip hides the mark that would
     // show it happening, so both sort keys go quiet for as long as a search owns the header.
     if (action === "sortNext" || action === "sortReverse")
         return root.searchMode.length === 0 ? action : ""
+    // A reload re-lists the folder it is on, so it goes quiet where a walk owns the header.
+    if (action === "reload" && root.searchMode.length > 0)
+        return ""
     return action
 }
 
@@ -126,6 +133,7 @@ function act(action, root, menuId, paths) {
     case "pageDown": step(root, Math.max(1, Math.floor(root.visibleRows / 2))); Marks.follow(root); return
     case "pageUp": step(root, -Math.max(1, Math.floor(root.visibleRows / 2))); Marks.follow(root); return
     case "open": root.openCursor(); return
+    case "openTab": Tabs.openCursorTab(root); return
     case "parent": root.openParent(); return
     case "historyBack": root.goBack(); return
     case "historyForward": root.goForward(); return
@@ -141,9 +149,12 @@ function act(action, root, menuId, paths) {
     case "escape":
         if (root.filterTyping || root.filterQuery.length > 0) Filter.close(root)
         else if (root.searchMode.length > 0 && root.focusView === LIST) Search.cancel(root)
+        else if (root.recentMode.length > 0 && root.focusView === LIST) { if (root.listInFlight) root.message("A directory is already loading.", false); else RecentMode.close(root) }
         else if (root.statusBar && root.statusBar.escapePressed()) return
+        else if (escapeUp(root)) root.openParent()
         else root.escapePressed()
         return
+    case "reload": Reload.begin(root, root.wire); return
     case "preview": PreviewKeys.open(root); return
     case "toggleSelect": root.toggleSelect(); return
     case "extendDown": root.extendSelection(1); return
@@ -153,7 +164,7 @@ function act(action, root, menuId, paths) {
     // does: leaving it up would hide every result that did not happen to match it.
     case "search": Filter.close(root); Search.start(root); return
     case "filter": Filter.start(root); return
-    case "reveal": Search.reveal(root); return
+    case "reveal": if (root.recentMode.length > 0) { if (root.listInFlight) root.message("A directory is already loading.", false); else RecentMode.reveal(root) } else Search.reveal(root); return
     // The write operations; every one of them is reversible with undo, so none of them confirms.
     case "duplicate": Ops.duplicate(root, menuId); return
     case "trash": Ops.trash(root, menuId); return
@@ -162,16 +173,34 @@ function act(action, root, menuId, paths) {
     case "trashRefused": root.message(noTrashLine(), true); return
     case "copy": Ops.clip(root, false, paths); return
     case "copydirpath": root.copyDirPath(); return
+    // MenuAdditions040: c copies as, P pastes as, V flips the selection.
+    case "copyAs": root.openCopyAs(); return
+    case "pasteAs":
+        if (root.recentMode.length > 0) { root.message("This listing is a history, and cannot take a paste.", false); return }
+        root.openPasteAs(); return
+    case "invertSelection": root.invertSelection(); return
+    case "showOriginal": root.showOriginal(); return
+    case "makeExecutable": root.makeExecutable(paths); return
+    case "copyPath": Ops.copyAs(root, "path", paths); return
+    case "copyName": Ops.copyAs(root, "name", paths); return
+    case "copyStem": Ops.copyAs(root, "stem", paths); return
+    case "copyUri": Ops.copyAs(root, "uri", paths); return
+    case "copyQuoted": Ops.copyAs(root, "quoted", paths); return
+    case "pasteLink":
+    case "pasteAbsoluteLink":
+    case "pasteHardLink":
+        if (RecentMode.refusePaste(root)) return
+        root.pasteLink(action === "pasteAbsoluteLink" ? "absolute" : action === "pasteHardLink" ? "hard" : "relative"); return
     case "cut": Ops.clip(root, true, paths); return
-    case "paste": Ops.paste(root); return
+    // Recent is a history, not a directory: pasting or creating there would land in the root it stands on.
+    case "paste": if (root.recentMode.length > 0) { root.message("This listing is a history, and cannot take a paste.", false); return } Ops.paste(root); return
     case "movePaste":
-        if (root.clipboard.paths.length === 0) { root.message("The clipboard is empty.", false); return }
-        root.collide.ask({c: "transfer", op: "move", paths: root.clipboard.paths, dest: root.path}, null, true)
+        if (root.recentMode.length > 0) { root.message("This listing is a history, and cannot take a paste.", false); return }
+        Ops.paste(root, true)
         return
     case "undo": Ops.undo(root); return
     case "redo": root.backend.send({c: "redo"}); return
-    // m. Mounts.raiseMenu says why a favourite has no menu; here the pane says whether a row was
-    // under the cursor at all, and an empty or fully filtered listing gets the sentence, not silence.
+    // m opens the row menu, or says why no row was under the cursor.
     case "menu":
         if (!root.openCursorMenu())
             root.message("No row under the cursor to open a menu on.", false)
@@ -195,7 +224,7 @@ function act(action, root, menuId, paths) {
     case "viewList": root.chooseView("list"); return
     case "viewColumns": root.chooseView("columns"); return
     case "viewGrid": root.chooseView("grid"); return
-    case "newFolder": Ops.newFolder(root); return
+    case "newFolder": if (root.recentMode.length > 0) { root.message("This listing is a history, and cannot take a new folder.", false); return } Ops.newFolder(root); return
     // The directory being shown, not the row: the menu row and the chord both land here.
     case "openTerminal": root.openTerminal(); return
     // The background menu's Update Flea row, drawn only while an update is known, opens Omarchy's updater through the pane's opener.
@@ -213,10 +242,25 @@ function act(action, root, menuId, paths) {
         Sort.column(root, action.substring("sort:".length))
         return
     }
-    // Both keys the Tui board drew ahead of their features are built now, so neither answers with
-    // a sentence any more: tabs run here, and handleKey opens the path bar before the views see it.
+    // Tabs run here and handleKey opens the path bar, so neither answers unbuilt any more.
     if (action.indexOf("tab") === 0) { Tabs.act(action, root); return }
     root.message(action + " is not built yet.", false)
+}
+
+// Issue 29: Escape climbs only when nothing else owns it, so each unwound state keeps the key.
+function escapeUp(root) {
+    return root.escapeUp === true && root.searchMode.length === 0
+        && root.filterQuery.length === 0 && !root.filterTyping && !root.menuVisible
+        && !(root.collide && root.collide.opened) && !hasDeliberateMarks(root) && !root.listInFlight
+}
+
+// Only the row a navigation landed on never counts as a selection, so Escape keeps climbing.
+function hasDeliberateMarks(root) {
+    if (root.selectionCount() === 0)
+        return false
+    if (root.selection && root.selection.isLanded && root.selection.isLanded())
+        return false
+    return true
 }
 
 // Only a step from an end wraps; page overshoots and selection extensions retain their clamps.
@@ -252,15 +296,21 @@ function shareBrowserAct(action, root) {
 var LEAVES_LINE = ["cursorDown", "cursorUp", "cursorFirst", "cursorLast", "pageDown", "pageUp"]
 
 function leavesLine(event) {
-    if (event.text.length === 1 && event.text >= " ")
+    if (Input.isPrintable(event.text))
         return false
     return LEAVES_LINE.indexOf(Keymap.lookup(event.key, event.text, event.modifiers)) >= 0
 }
 
+// One stamp for a vim pair's seat, so Escape and the pair read the same identity.
+function stampOf(root) {
+    return JSON.stringify([root.path, root.cursorIndex, root.selectionVersion, root.viewMode])
+}
+// Only the second press of the same pair on the same selection fires.
+var ARMED_PAIRS = { copyArm: true, cutArm: true, pasteArm: true, cursorFirstArm: true }
 // Vim pairs are consecutive inputs on the same selection; pointer or navigation changes disarm them.
 function sequenceAction(action, root) {
     var pairs = { copyArm: "copy", cutArm: "cut", pasteArm: "paste", cursorFirstArm: "cursorFirst" }
-    var stamp = JSON.stringify([root.path, root.cursorIndex, root.selectionVersion, root.viewMode])
+    var stamp = stampOf(root)
     var paired = pairs[action] && root.keySequence === action && root.keySequenceIdentity === stamp
     root.keySequence = paired || !pairs[action] ? "" : action
     root.keySequenceIdentity = paired || !pairs[action] ? "" : stamp
@@ -274,20 +324,13 @@ function handleKey(event, root, sidebar) {
             root.selectionBand.cancel()
         return true
     }
-    // Guards a key that reaches the list before a rename field's own focus transfer lands, the OEM's
-    // "blocked:" lesson; the row editor and the rail's own field both need it. The index alone is not
-    // asked, because an editor released by a scroll or hidden by a view change left it set with
-    // nothing to give the keys to, and every later key was swallowed for the life of the window.
+    // A live rename editor owns keys; an index left behind by a hidden or recycled editor does not.
     if ((sidebar && sidebar.renameEditor() !== null) || root.renameEditor() !== null) {
         return true
     }
     root.inputAt = Date.now()
     root.rowsAt = 0
-    // Issue 12: a query line owns every key while it has the caret, which swallowed the cursor keys
-    // and left a listing with more than one match unreachable from the keyboard. A cursor key commits
-    // the line the way enter does and then goes on to mean what it means everywhere else: the filter
-    // is left standing over the rows it narrowed, and the search walks once for that press rather
-    // than once per keystroke, which is the sweep the design refused.
+    // Cursor keys commit a query before acting on its results; search walks once per commit.
     if ((root.searchMode === Search.TYPING || root.filterTyping) && leavesLine(event)) {
         if (root.filterTyping) Filter.commit(root)
         else Search.run(root)
@@ -301,13 +344,18 @@ function handleKey(event, root, sidebar) {
         return Filter.typeKey(event, root)
     }
     var action = lookup(event, root)
+    // A key that means an action ends a pending slow click, so its rename never lands after that key's result; a bare modifier means none.
+    if (action.length > 0 && root.cancelSlowClick) root.cancelSlowClick()
+    // With escape-up on Escape cancels an armed trash or a live vim pair and stops, with it off Escape disarms through the sequence and runs its own action.
+    var escapeCancelsArm = action === "escape" && root.escapeUp === true
+        && (root.trashArmedAt > 0 || (ARMED_PAIRS[root.keySequence] === true && root.keySequenceIdentity === stampOf(root)))
     action = sequenceAction(action, root)
     // Anything that is not the second d of the pair disarms it, so an arm never outlives the key
     // after it; ui/js/Trash.js re-stamps on its own, which is why it reads the stamp before writing.
     if (action !== "trashArm") {
         root.trashArmedAt = 0
     }
-    if (root.preview.active) {
+    if (root.preview && root.preview.active) {
         PreviewKeys.act(action, root)
         return true
     }
@@ -315,58 +363,72 @@ function handleKey(event, root, sidebar) {
         shareBrowserAct(action, root)
         return true
     }
+    if (windowAction(action, root, sidebar)) return true
+    if (root.focusView === RAIL && sidebar) {
+        RailKeys.act(action, root, sidebar)
+        return true
+    }
+    // An armed pair keeps Escape to cancel the arm instead of climbing.
+    if (action === "escape" && escapeCancelsArm) {
+        root.trashArmedAt = 0
+        root.keySequence = ""
+        root.keySequenceIdentity = ""
+        root.message("", false)
+        return true
+    }
+    // No row action runs against a listing still in flight.
+    if (Swap.swallows(root.listInFlight, action)) { root.message(Swap.LOADING, false); return true }
+    if (action === "undo" && !canUndo(root, sidebar)) return true
+    if (Grid.arrow(event, action, root)) return true
+    if (action.length > 0 || Keymap.lookup(event.key, event.text, event.modifiers).length > 0) {
+        if (action.length > 0) dispatchAction(action, root)
+        return true
+    }
+    // Unbound printable keys name the filter instead of jumping into destructive bindings.
+    if (root.shown === null && Input.isPrintable(event.text)) {
+        root.message("Press / to filter this listing by name.", false)
+        return true
+    }
+    return false
+}
+
+// Keys and query actions share the window's dispatcher before reaching pane actions.
+function dispatchAction(action, root) {
+    if (!windowAction(action, root)) root.act(action)
+}
+
+function windowAction(action, root, sidebar) {
     if (action === "focusNext" || action === "focusPrevious") {
         if (root.dualMode && root.focusView === LIST) root.switchPane()
-        else root.focusView = next(root.focusView, sidebar || root.railAvailable)
+        else root.focusView = next(root.focusView, sidebar || root.sidebar || root.railAvailable)
         return true
     }
     if (action === "focusPreview") {
         if (!root.dualMode) root.focusPreviewColumn()
         return true
     }
-    // The sheet is global, unlike addNetwork, so it answers from the rail as well as the list. It
-    // takes active focus itself, so nothing below has to route keys into it while it stands.
     if (action === "keymapSheet") {
         root.keymapSheet.open(root)
         return true
     }
-    // Tabs are window-level, so t, w and the digits answer from the rail as well as the list.
+    // Tabs answer from either view.
     if (action.indexOf("tab") === 0) {
         root.act(action)
         return true
     }
     // Issue 9: the text size belongs to the window, so it answers from either view.
     if (action.indexOf("textSize") === 0) {
-        root.textSizeRequested(action === "textSizeReset" ? 0 : (action === "textSizeUp" ? 1 : -1))
+        root.textSizeRequested(TextSize.direction(action))
         return true
     }
-    // The bar lives in the chrome above both views, so neither owns it; shell.qml holds the field.
+    // The chrome owns the path field.
     if (action === "pathBar") {
         root.pathBarRequested()
         return true
     }
     // These answer from the rail as well as the list, so they are taken before the rail's own keys.
-    if (action === "sidebar" || action === "openTerminal" || action === "settings" || action === "copydirpath") {
+    if (action === "windowNew" || action === "reload" || action === "sidebar" || action === "openTerminal" || action === "settings" || action === "copydirpath") {
         root.act(action)
-        return true
-    }
-    if (root.focusView === RAIL && sidebar) {
-        RailKeys.act(action, root, sidebar)
-        return true
-    }
-    // No key acts on a row while a listing is out, see AGENTS.md "The listing swap"; it says why instead.
-    if (Swap.swallows(root.listInFlight, action)) { root.message(Swap.LOADING, false); return true }
-    // Undo refuses through the gate it shares with the status bar's own click, saying nothing.
-    if (action === "undo" && !canUndo(root, sidebar)) return true
-    if (Grid.arrow(event, action, root)) return true
-    if (action.length > 0 || Keymap.lookup(event.key, event.text, event.modifiers).length > 0) {
-        if (action.length > 0) root.act(action)
-        return true
-    }
-    // An unbound printable key used to jump to a name, which only half worked because most letters
-    // are bound, and taught a habit that reached d and trashed the row. It names the filter instead.
-    if (root.shown === null && event.text.length === 1 && event.text >= " ") {
-        root.message("Press / to filter this listing by name.", false)
         return true
     }
     return false

@@ -28,6 +28,8 @@ LARGEST_BYTES=1000000
 # src/backend/thumbcache.rs honours XDG_CACHE_HOME, so this suite's thumbnails land inside its own
 # sandbox and the operator's real cache is never written to, read from, or cleaned up after.
 export XDG_CACHE_HOME="$SB/cache"
+# The shared undo journal stays hermetic: this suite's backends share one scratch runtime dir.
+export XDG_RUNTIME_DIR="$SB/runtime"
 fail=0
 
 setup() {
@@ -103,6 +105,21 @@ out=$(printf '{"c":"list","path":"%s","first":0}\n{"c":"fsinfo"}\n{"c":"quit"}\n
 check "a local fsinfo answers exactly one line" "1" "$(echo "$out" | grep -c '"t":"fsinfo"')"
 check "and that line names the directory's own filesystem, not unknown" "1" "$(echo "$out" | grep '"t":"fsinfo"' | grep -vc '"fs":""')"
 check "for the directory just listed" "1" "$(echo "$out" | grep -c "\"t\":\"fsinfo\",\"fs\":\"[^\"]*\",\"free\":[0-9]*,\"path\":\"$D\"")"
+
+# Shebang probe (src/backend/shebang.rs): the cursor row's two-byte read, answered off the loop, so stdin stays open until its lines land.
+printf '#!/bin/sh\necho hi\n' > "$D/run.sh"
+SHEBANG_REPLY="$SB/shebang-reply"
+{ printf '{"c":"shebang","path":"%s/run.sh","id":3}\n{"c":"shebang","path":"%s/three.txt","id":4}\n{"c":"shebang","path":"%s/gone.txt","id":5}\n' "$D" "$D" "$D"
+  for _ in $(seq 1 100); do
+    [ "$(grep -c '"t":"shebang"' "$SHEBANG_REPLY" 2>/dev/null)" = "3" ] && break
+    sleep 0.05
+  done
+  printf '{"c":"quit"}\n'; } | $BIN --backend > "$SHEBANG_REPLY"
+shebang_out=$(cat "$SHEBANG_REPLY")
+check "a script answers its shebang with its id" "1" "$(echo "$shebang_out" | grep -c "\"t\":\"shebang\",\"path\":\"$D/run.sh\",\"hasShebang\":true,\"id\":3")"
+check "a plain file answers false with its id" "1" "$(echo "$shebang_out" | grep -c "\"t\":\"shebang\",\"path\":\"$D/three.txt\",\"hasShebang\":false,\"id\":4")"
+check "a missing path answers false rather than an error" "1" "$(echo "$shebang_out" | grep -c "\"t\":\"shebang\",\"path\":\"$D/gone.txt\",\"hasShebang\":false,\"id\":5")"
+rm -f "$D/run.sh"
 
 # Task 11: rows carries a per-response Kind dictionary, read against the box's real freedesktop tables, see docs/protocol.md "rows".
 kind_out=$(printf '{"c":"list","path":"%s","first":10}\n{"c":"quit"}\n' "$D" | $BIN --backend)
@@ -952,6 +969,33 @@ check "jump answers each source's existing folders once, in order" \
 check "with no zoxide installed its source is empty and nothing else changes" \
   "{\"t\":\"jumped\",\"id\":7,\"favourites\":[\"$D/sub\"],\"zoxide\":[],\"recent\":[\"$D\"],\"frecency\":{}" \
   "$(jump_run "$NO_ZOXIDE")"
+
+# One zoxide run per open, one ranking for both asks; a second run answers another folder so a rerun shows in the rows.
+COUNT_BIN="$SB/count-bin"
+mkdir -p "$COUNT_BIN"
+cat > "$COUNT_BIN/zoxide" <<EOF
+#!/bin/sh
+echo run >> '$SB/zoxide-runs'
+[ "\$(wc -l < '$SB/zoxide-runs')" = 1 ] && printf '  %s %s\n' 9.5 '$D/ranked' || printf '  %s %s\n' 3.5 '$D/sub'
+EOF
+chmod +x "$COUNT_BIN/zoxide"
+# Each ask waits for the previous answer, as the client's whole ask waits for the provisional one.
+jump_pair() {
+  rm -f "$SB/zoxide-runs"
+  coproc BACKEND { PATH="$COUNT_BIN:$PATH" $BIN --backend 2>/dev/null; }
+  printf '{"c":"jump","id":7,"favourites":[],"recent":[]}\n' >&"${BACKEND[1]}"
+  IFS= read -r first <&"${BACKEND[0]}"
+  printf '%s\n' "$1" >&"${BACKEND[1]}"
+  IFS= read -r second <&"${BACKEND[0]}"
+  printf '{"c":"quit"}\n' >&"${BACKEND[1]}"
+  wait "$BACKEND_PID"
+  printf '%s\n%s\n' "$first" "$second"
+}
+pair_answers=$(jump_pair '{"c":"jump","id":8,"ranking":7,"favourites":[],"recent":[]}')
+check "a whole ask naming its provisional ask runs zoxide once" "1" "$(wc -l < "$SB/zoxide-runs" | tr -d ' ')"
+check "and both asks answer with the same ranking" "2" "$(printf '%s\n' "$pair_answers" | grep -c "\"zoxide\":\[\"$D/ranked\"\],\"recent\":\[\],\"frecency\":{\"$D/ranked\":9.5}")"
+jump_pair '{"c":"jump","id":8,"favourites":[],"recent":[]}' > /dev/null
+check "an ask naming no ranking runs zoxide itself" "2" "$(wc -l < "$SB/zoxide-runs" | tr -d ' ')"
 
 # No per-key cleanup: the cache is inside the sandbox, so it goes when the sandbox does.
 sandbox_remove "$SB"

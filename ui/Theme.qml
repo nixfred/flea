@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import QtQuick
 import qs.Commons
+import "js/Buttons.js" as Buttons
 import "js/Columns.js" as Columns
 import "js/Contrast.js" as Contrast
 import "js/Density.js" as Density
@@ -43,9 +44,14 @@ Singleton {
         executable: "#a6e3a1"
     })
 
+    // A palette role at or under this HSV saturation carries no colour (urgent falls back to the foreground, a grey accent cannot mark focus).
+    readonly property real hueFloor: 0.2
+
     readonly property QtObject color: QtObject {
         readonly property color background: Color.background
         readonly property color foreground: Color.foreground
+        // The heading ink: a brighter step of the foreground, applyColors derives it from the palette.
+        property color foregroundBright: Color.foreground
         property color muted: Qt.darker(Color.foreground, 1.4)
         readonly property color accent: Color.accent
         property color error: Color.urgent
@@ -57,6 +63,8 @@ Singleton {
         // The accent as a frame rather than as ink: on a card's own surface a frame is a graphical
         // object, so it is lifted to 3:1 there the way symlink and executable are lifted on the list.
         property color accentFrame: Color.accent
+        // True where the accent carries colour, so it can mark focus apart from the foreground and muted frames; kanagawa, solitude, vantablack and white do not.
+        property bool accentHasHue: Color.accent.hsvSaturation > root.hueFloor
     }
 
     readonly property QtObject font: QtObject {
@@ -114,6 +122,7 @@ Singleton {
         readonly property int pickerDate: Math.round(root.pickerDateBaseWidth * root.font.bodySmall / root.pickerDateBaseBodySmall)
         // Kind text varies too much for a character count, so its base is a pixel width scaled by the same ratio bodySmall already is.
         readonly property int kind: root.storedWidth("kind", Math.round(root.kindBaseWidth * root.font.bodySmall / 12))
+        readonly property int location: 150 // Sidebar040's fixed Recent column, shared by Header and Row.
         // Not a column: the floor under the name, which the four above drop one by one to protect.
         readonly property int nameMin: Math.round(root.nameMinChars * glyphMetrics.advanceWidth)
     }
@@ -137,7 +146,7 @@ Singleton {
     // WCAG 2.5.8 floor. Marks stay at their type-scale size; the hit box grows to this.
     readonly property int hitMin: 24
     // The wheel, see ui/FastScrollHandler.qml: a notch is the platform's lines times notchPx times the
-    // multiplier, and a touchpad's pixels move one to one. PR 16's pair, 4x calibrated on Omarchy Spotify.
+    // multiplier (PR 16's pair, 4x on Omarchy Spotify); touchpad pixels move times TOUCH_GAIN (GM 2026-10-01).
     readonly property QtObject scroll: QtObject {
         readonly property int notchPx: 24
         readonly property real multiplier: 4
@@ -167,6 +176,8 @@ Singleton {
     // What is left of the strip once its rule and both insets are taken off. The hit box stays the
     // whole strip, so a press still clears hitMin however small the frame gets.
     readonly property int chromeControlHeight: root.chromeHeight - root.spacing.hairline - 2 * root.chromeControlInset
+    // The room a clip leaves a button's 2 px ring, drawn outside its frame, so the ring ends one hairline inside the clip.
+    readonly property int ringClearance: Buttons.RING + root.spacing.hairline
     // The two steps of that fill, in whichever role the control carries: the pointer's and the
     // keyboard's. The second is the weight the rail's own active row and the segmented chooser's
     // active segment already take, so a control under the keyboard reads at the same strength.
@@ -218,6 +229,9 @@ Singleton {
 
     // GM's September 8 sizing override gives dialog cards more room without enlarging context menus.
     readonly property real dialogWidthRatio: 9 / 8
+    // A card's whole size inside its room and a whole centred origin, so no hairline of its frame lands on a half pixel.
+    function cardSpan(want, room) { return Math.max(0, Math.min(Math.ceil(want), Math.floor(room))) }
+    function cardOrigin(room, span) { return Math.round((room - span) / 2) }
 
     // The Settings board's anatomy, resolved at base-size 14: a border-box panel 560 wide whose two
     // outer hairlines leave 558 inside, split into a 150 rail and a 408 pane. 480 and 350 are those
@@ -241,15 +255,16 @@ Singleton {
     readonly property var columnTokens: ({
         rowPaddingX: root.spacing.rowPaddingX, gap: root.spacing.gap, iconSize: root.iconSize,
         nameMin: root.column.nameMin, mode: root.column.mode,
-        size: root.column.size, date: root.column.date, kind: root.column.kind
+        size: root.column.size, date: root.column.date, kind: root.column.kind, location: root.column.location
     })
-    function columnSet(dateWidth) { return dateWidth === undefined ? root.columnTokens : Object.assign({}, root.columnTokens, {date: dateWidth}); }
-    function columns(width, hidden, dateWidth) { return Columns.set(width, root.columnSet(dateWidth), hidden); }
-
-    // The same set as one string, which is what the seam in ui/Ipc.qml compares across the two.
-    function columnNames(width, hidden, dateWidth) {
-        return Columns.names(root.columns(width, hidden, dateWidth));
+    function columnSet(dateWidth, dual) {
+        if (dual)
+            return Object.assign({}, root.columnTokens, {iconSize: root.markSize,
+                nameMin: root.dualColumn.nameMin, size: root.dualColumn.size,
+                date: dateWidth === undefined ? root.dualColumn.date : dateWidth});
+        return dateWidth === undefined ? root.columnTokens : Object.assign({}, root.columnTokens, {date: dateWidth});
     }
+    function columns(width, hidden, dateWidth, recent, dual) { return recent ? Columns.recentSet(width, root.columnSet(dateWidth, dual), hidden, dual) : Columns.set(width, root.columnSet(dateWidth), hidden); }
 
     // Five callers plus the grid and settings tokens above: ConvertDialog, KeymapSheet, NetworkDialog, NetworkForm, TransferCard; every other spacing token is direct.
     function space(px) {
@@ -313,15 +328,19 @@ Singleton {
         // caption needs, rose-pine's at 1.48, so it is lifted the way the two ladder colours below are.
         root.color.muted = Contrast.ensureRatio(
             Palette.pick(found, ["muted"], Qt.darker(Color.foreground, 1.4)), bg, 3);
+        // Headings take the palette's bright foreground (the ANSI ring's color15 without one) when it has more contrast than the foreground.
+        var bright = Palette.pick(found, ["bright_foreground", "color15"], String(Color.foreground));
+        root.color.foregroundBright = Contrast.ratio(bright, bg) > Contrast.ratio(String(Color.foreground), bg) ? bright : Color.foreground;
         root.color.accentFrame = Contrast.ensureRatio(Color.accent, surface, 3);
+        root.color.accentHasHue = Color.accent.hsvSaturation > root.hueFloor;
         root.color.symlink = Contrast.ensureRatio(
             Palette.pick(found, ["cyan", "color6"], root.fallbackColor.symlink), bg, 4.5);
         root.color.executable = Contrast.ensureRatio(
             Palette.pick(found, ["green", "color2"], root.fallbackColor.executable), bg, 4.5);
         // Urgent is the palette's own red: seven of the 23 installed themes leave it under 4.5:1 on their own ground, so it is lifted the way symlink and executable are, and the three whose red carries no chroma at all (solitude, white, vantablack) fall back to the foreground, because a destructive row drawn in the same grey as an unavailable one reads as switched off rather than as dangerous.
-        root.color.error = Color.urgent.hsvSaturation > 0.2 ? Contrast.ensureRatio(Color.urgent, bg, 4.5) : String(Color.foreground);
+        root.color.error = Color.urgent.hsvSaturation > root.hueFloor ? Contrast.ensureRatio(Color.urgent, bg, 4.5) : String(Color.foreground);
         // The status bar draws that same ink on the surface, where four themes land under 4.5.
-        root.color.errorOnSurface = Color.urgent.hsvSaturation > 0.2 ? Contrast.ensureRatio(Color.urgent, surface, 4.5) : String(Color.foreground);
+        root.color.errorOnSurface = Color.urgent.hsvSaturation > root.hueFloor ? Contrast.ensureRatio(Color.urgent, surface, 4.5) : String(Color.foreground);
         // A body that parsed to nothing left every role on its fallback, so the flag says so rather
         // than reporting that the read happened: text() returns "" for a file that is not there.
         root.ready = Palette.isPalette(found);

@@ -56,10 +56,11 @@ FocusScope {
     }
     Rectangle {
         id: card
-        anchors.centerIn: parent
+        x: Theme.cardOrigin(root.width, width)
+        y: Theme.cardOrigin(root.height, height)
         // TrashSidebar's 340px content width excludes its two 16px paddings and hairlines.
-        width: Math.max(0, Math.min(Math.round(340 * root.referenceScale * Theme.dialogWidthRatio) + 2 * root.cardPadding + 2 * Theme.spacing.hairline, root.width - 2 * Theme.spacing.gap))
-        height: Math.max(0, Math.min(body.wanted + root.cardPadding + root.cardBottomPadding + 2 * Theme.spacing.hairline, root.height - 2 * Theme.spacing.gap))
+        width: Theme.cardSpan(Math.round(340 * root.referenceScale * Theme.dialogWidthRatio) + 2 * root.cardPadding + 2 * Theme.spacing.hairline, root.width - 2 * Theme.spacing.gap)
+        height: Theme.cardSpan(body.wanted + root.cardPadding + root.cardBottomPadding + 2 * Theme.spacing.hairline, root.height - 2 * Theme.spacing.gap)
         color: Theme.color.surface
         border.color: Theme.color.muted
         border.width: Theme.spacing.hairline
@@ -72,13 +73,14 @@ FocusScope {
         }
         Flea.CardScroll {
             id: body
+            bleed: Theme.ringClearance
             anchors.fill: parent
-            anchors.leftMargin: root.cardPadding + Theme.spacing.hairline
-            anchors.rightMargin: root.cardPadding + Theme.spacing.hairline
-            anchors.topMargin: root.cardPadding + Theme.spacing.hairline
-            anchors.bottomMargin: root.cardBottomPadding + Theme.spacing.hairline
+            anchors.leftMargin: root.cardPadding + Theme.spacing.hairline - Theme.ringClearance
+            anchors.rightMargin: root.cardPadding + Theme.spacing.hairline - Theme.ringClearance
+            anchors.topMargin: root.cardPadding + Theme.spacing.hairline - Theme.ringClearance
+            anchors.bottomMargin: root.cardBottomPadding + Theme.spacing.hairline - Theme.ringClearance
             Column {
-                width: body.width
+                width: body.holderWidth
                 spacing: Theme.spacing.gap
                 Row {
                     width: parent.width

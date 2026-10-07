@@ -2,6 +2,7 @@
 
 .import "Filter.js" as Filter
 .import "Marks.js" as Marks
+.import "Thumbs.js" as Thumbs
 
 // What the preview overlay does with a key, split out of Focus.js at its 300-line hard cap the
 // same way ui/js/Trash.js was: Focus.js decides which surface owns a key, and this is the surface.
@@ -33,11 +34,12 @@ function pdfAction(action, viewer) {
     else if (action === "cursorDown" || action === "cursorUp") viewer.scrollPage(action === "cursorDown" ? 1 : -1)
 }
 
-// A directory has no preview kind of its own, so Space on one is a silent no-op rather than an error.
+// Space on a folder is a silent no-op; a file carries its cached thumbnail so the overlay shows it at once.
 function open(root) {
     var row = root.rowFor(root.cursorIndex)
     if (row && !row.d)
-        root.preview.open(root.join(root.path, row.n), row.i, row.s, root.kindNames[row.k] || "")
+        root.quickLook().open(root.join(root.path, row.n), row.i, row.s, root.kindNames[row.k] || "",
+            root.thumbState && root.thumbState.file ? Thumbs.fileFor(root.thumbState, root.cursorIndex) : "")
 }
 
 // Preview open: j/k move the cursor and the preview follows; escape always closes, and so does a
@@ -75,6 +77,18 @@ function act(action, root) {
     case "expand": root.preview.toggleExpand(); return
     // MediaMute rule 5: the flag is the preview's to flip, and it silences without pausing.
     case "mute": root.preview.toggleMute(); return
+    // GM 2026-10-03: r flips the open Markdown Quick Look between rendered and source, guarded on kind.
+    case "markdownView":
+        if (root.preview.isMarkdown) root.preview.toggleMarkdownView()
+        return
+    // The Markdown bar's close mark is its one control: Tab and Shift+Tab take the keyboard onto it and off it, and Return on it closes.
+    case "focusNext":
+    case "focusPrevious":
+        if (root.preview.isMarkdown) root.preview.toggleMarkdownClose()
+        return
+    case "open":
+        if (root.preview.isMarkdown && root.preview.markdownCloseFocused) root.preview.close()
+        return
     }
 }
 
@@ -82,5 +96,6 @@ function act(action, root) {
 function follow(root) {
     var row = root.rowFor(root.cursorIndex)
     if (row && !row.d)
-        root.preview.follow(root.join(root.path, row.n), row.i, row.s, root.kindNames[row.k] || "")
+        root.preview.follow(root.join(root.path, row.n), row.i, row.s, root.kindNames[row.k] || "",
+            root.thumbState && root.thumbState.file ? Thumbs.fileFor(root.thumbState, root.cursorIndex) : "")
 }

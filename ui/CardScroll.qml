@@ -1,30 +1,43 @@
 import QtQuick
 import "." as Flea
 
-// A card body that can be taller than the window: the content keeps its own height, this viewport
-// clamps to what the card gave it and scrolls the rest, by wheel and by a focus move below the fold.
+// A card body taller than the window: this viewport clamps to the card and scrolls the rest by wheel,
+// touchpad, keys and focus moves, with no bar and no lane, since a card never lists files.
 Flickable {
     id: root
 
     default property alias content: holder.data
     // What the content wants, for the card to clamp against the window.
     readonly property real wanted: holder.childrenRect.height
+    // Menus step the highlight instead of pixel scrolling: one row a notch through stepBy, one
+    // row per stepRowHeight of gained touchpad travel, with no tail. See FastScrollHandler.
+    property bool highlightSteps: false
+    property real stepRowHeight: Theme.rowHeight
+    property var stepBy: null
+    // Room kept inside the clip on every side for a button's 2 px ring; callers grow their margins by the same, so nothing moves.
+    property int bleed: 0
+    // The two axes apart, for a body whose rows already run to the card's side edges.
+    property int bleedX: bleed
+    property int bleedY: bleed
+    // Room reveal() keeps between the row and a clip edge an overlay fade covers while more content lies past it; the content's own ends clamp it away.
+    property real revealClearY: 0
+    // The holder's drawn width, so a probe reads it without walking children.
+    readonly property real holderWidth: holder.width
 
     clip: true
-    // The lane kept clear at the right edge; menus pass 0 so rows use the whole frame.
-    property real gutter: Theme.spacing.rowPaddingX
-    // The holder's drawn width, so a probe reads the reserve without walking children.
-    readonly property real holderWidth: holder.width
     contentWidth: width
-    contentHeight: root.wanted
+    contentHeight: root.wanted + 2 * root.bleedY
     boundsBehavior: Flickable.StopAtBounds
+    // A highlight-stepped menu follows through reveal(); the Flickable takes no wheel itself.
+    interactive: !root.highlightSteps
 
-    // Tab into a field below the fold scrolls it into view, so a form is never typed into blind.
+    // Tab into a field below the fold scrolls it into view with bleedY of clearance, so a form is never typed into blind and a ring is never cut; the ends clamp to the content.
     function reveal(item) {
         if (!item || root.contentHeight <= root.height || !root.holds(item))
             return
-        var top = item.mapToItem(holder, 0, 0).y
-        var bottom = top + item.height
+        var y = item.mapToItem(root.contentItem, 0, 0).y
+        var top = y - root.bleedY - root.revealClearY
+        var bottom = y + item.height + root.bleedY + root.revealClearY
         if (top < root.contentY)
             root.contentY = Math.max(0, top)
         else if (bottom > root.contentY + root.height)
@@ -45,20 +58,22 @@ Flickable {
     }
 
     Flea.FastScrollHandler {
+        id: wheel
         parent: root
         flickable: root
+        stepMode: root.highlightSteps
+        stepRowHeight: root.stepRowHeight
+        stepBy: root.stepBy
     }
 
-    Flea.ViewportScrollBar {
-        parent: root
-        // parent, not root: declared in the Flickable it starts in contentItem, where root is no parent or sibling.
-        anchors { top: parent.top; right: parent.right }
-        flickable: root
-    }
+    // Drops every wheel remainder, so a menu opening never spends the last one's travel.
+    function resetSteps() { wheel.resetSteps() }
 
     Item {
         id: holder
-        // The scroll lane stays clear at the right edge, the same rule every listing follows.
-        width: Math.max(0, root.width - root.gutter)
+        // No lane: rows fill to the frame's padding on every surface using this.
+        x: root.bleedX
+        y: root.bleedY
+        width: Math.max(0, root.width - 2 * root.bleedX)
     }
 }

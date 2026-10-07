@@ -5,9 +5,11 @@ import "js/ClipMarks.js" as ClipMarks
 import "js/Filter.js" as Filter
 import "js/ExtThumbs.js" as ExtThumbs
 import "js/Scroll.js" as Scroll
+import "js/ScrollOff.js" as ScrollOff
 import "js/Tap.js" as Tap
 import "js/Thumbs.js" as Thumbs
 import "js/DirSizes.js" as DirSizes
+import "js/DragOut.js" as DragOut
 
 // One Miller column: a scrolling list of ColumnRows over either a peeked directory or the pane's
 // own listing window. It owns no state; the area above it decides which row is which.
@@ -45,7 +47,10 @@ Item {
     // isDir says which of the two things a neighbour column's row is: a directory the pane opens as
     // its own listing, or a file it hands to the opener. See keys.toml's [[pointer]] table.
     signal activated(string name, bool isDir)
-    signal picked(int index, int tapCount, int modifiers)
+    signal picked(int index, int tapCount, int modifiers, bool onName)
+    // A row press, so the columns view can stop the slow-click timer before a
+    // hold past the interval fires while the button is still down.
+    signal rowPressed(int index)
     // The row under a right click. Only the column carrying the pane's own listing answers it, because a peeked column's rows are another directory's and every menu action addresses the pane's cursor.
     signal menuRequested(int index, var eventPoint)
     // A right click that landed on no row, which only the pane's own column can answer for the same
@@ -55,6 +60,9 @@ Item {
     signal neighbourMenuRequested(string name)
     // A right click on a peek's empty space: the peek's drawn directory becomes the listing, and the background menu opens there once its rows land.
     signal neighbourBackgroundRequested(var eventPoint)
+    // A middle click on a directory row, in any of the three columns: ui/js/Tap.js tappedTab opens it in
+    // a new tab, and ui/ColumnsArea.qml supplies which directory this column is showing.
+    signal tabRequested(var row)
     // The thumbnail plan for this column's viewport, computed here and written by the pane, the grid's own contract.
     signal thumbsApplied(var work)
     signal dirSizesApplied(var ask)
@@ -63,6 +71,28 @@ Item {
     function positionViewAtIndex(index, mode) { view.positionViewAtIndex(index, mode) }
     function itemAtIndex(index) { return view.itemAtIndex(index) }
     function contentY() { return view.contentY }
+    // The scrolling list itself, for the anchor that puts the view back after a re-list; see ui/js/AnchorHold.js.
+    readonly property alias viewport: view
+    // A platform drag in flight, so a slow click never renames off one; ui/ColumnsArea.qml reads it.
+    readonly property bool fileDragActive: dragSession.Drag.active
+    // Cursor keeps three rows context above and below; wheel path follows viewport margin-free; click context 0 never moves list.
+    function showCursor(viewIndex, context) {
+        var rowH = Theme.fileRowHeight
+        // The pointer case answers in pixels in the originY space, clamped the way
+        // the row-grid path clamps: a cut row moves just enough to show it whole.
+        if (context === 0) {
+            var top = viewIndex * rowH
+            var rel = ScrollOff.containY(top, rowH, view.contentY - view.originY, view.height)
+            view.contentY = Math.max(view.originY, Math.min(view.contentHeight - view.height + view.originY, rel + view.originY))
+            return
+        }
+        var rel = view.contentY - view.originY
+        // No pane yet: the column's own rows are the listing, the same fallback its model uses.
+        var total = root.pane ? root.pane.shownTotal : root.rows.length
+        var to = ScrollOff.keyY(ScrollOff.fullyVisible(view.height, rowH), viewIndex, total, context, rowH, rel, view.height, view.contentHeight)
+        if (to !== rel)
+            view.contentY = view.originY + to
+    }
     readonly property alias scrollBar: verticalScroll
     function restartSettle() { settle.restart() }
     function restartCoalesce() { coalesce.restart() }
@@ -162,7 +192,8 @@ Item {
         anchors.fill: parent
         enabled: root.pane !== null && !root.pane.trash.opened && root.pane.searchMode === ""
         pane: root.pane
-        dest: root.pane ? root.pane.path : ""
+        dest: root.pane ? root.pane.dropPath : ""
+        refuseLoading: DragOut.refuseLoading(root.pane && root.pane.listInFlight, false, false)
         destDev: root.pane && root.pane.backend && !root.pane.listInFlight ? root.pane.backend.dirDev : 0
     }
 
@@ -174,6 +205,8 @@ Item {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         onContentYChanged: if (root.pane !== null) { coalesce.start(); settle.restart() }
+        // The error line's growth lands in contentHeight after layout, so the row is contained once then, never on a later scroll's estimate.
+        onContentHeightChanged: if (root.containRenameError) { root.containRenameError = false; view.positionViewAtIndex(root.renameViewIndex, ListView.Contain) }
         reuseItems: true
 
         // G7 needs an empty press target below the final row even when a long column fills the viewport.
@@ -233,22 +266,31 @@ Item {
             selected: root.pane !== null && root.pane.isSelected(listingIndex)
             dropTarget: dragSession.dropIndex >= 0 && listingIndex === dragSession.dropIndex
             dropCopying: dragSession.dragCopy
+            dropLinking: dragSession.dragLink
             // Read off the normalised row above: subscripting rows again hands a shrunk listing's undefined to a bool.
             lifted: root.liftedName.length > 0 && row !== null && row.n === root.liftedName
             dim: root.dim && !lifted
+            // The renaming row is always the cursor row; it hides its own name under the editor, as ui/Row.qml does.
+            renaming: cell.cursor && root.renaming
+            errorGrowth: cell.cursor && root.renameErrorHeight > 0 ? Math.max(root.renameErrorHeight, renameLoader.y + renameLoader.height - root.renameTop - Theme.fileRowHeight) : 0
             // The column's own budget, so no row measures its own text to elide it.
             nameBudget: cell.showChevron ? root.nameBudgetChevron : root.nameBudgetPlain
 
             TapHandler {
                 id: tap
-                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                // A press held past the interval must not fire while the button
+                // is still down; ColumnsArea stops the pane's timer from onRowPressed.
+                onPressedChanged: if (pressed) root.rowPressed(cell.listingIndex)
                 onTapped: function (eventPoint, button) {
                     if (root.pane !== null) {
                         if (cell.listingIndex < 0 || !cell.row) return
-                        if (button === Qt.RightButton)
+                        if (button === Qt.MiddleButton)
+                            root.tabRequested(cell.row)
+                        else if (button === Qt.RightButton)
                             root.menuRequested(cell.listingIndex, eventPoint)
                         else
-                            root.picked(cell.listingIndex, tap.tapCount, tap.point.modifiers)
+                            root.picked(cell.listingIndex, tap.tapCount, tap.point.modifiers, Tap.onName(cell.nameItem(), cell, eventPoint.position, false))
                         return
                     }
                     if (button === Qt.RightButton && root.rows[index]) {
@@ -256,7 +298,9 @@ Item {
                         return
                     }
                     var verb = Tap.tappedColumn(root.rows[index], button, tap.tapCount)
-                    if (verb.length > 0)
+                    if (verb === "openTab")
+                        root.tabRequested(root.rows[index])
+                    else if (verb.length > 0)
                         root.activated(root.rows[index].n, verb === "reveal")
                 }
             }
@@ -297,28 +341,24 @@ Item {
     readonly property string editorText: renameLoader.item ? renameLoader.item.current : ""
     function commitEditor() { return renameLoader.item ? renameLoader.item.commit() : false }
 
-    // The span ui/ColumnRow.qml draws its name in: the mark slot to its left, the chevron to its
-    // right. The editor covers exactly that, so the row's icon and its chevron stay where they are.
+    // The span ColumnRow draws its name in, one gap after the mark to one gap before its size cell, and nothing beyond it.
     readonly property real renameLeft: Theme.spacing.rowPaddingX + Theme.iconSize + Theme.spacing.gap
-    readonly property real renameRight: Theme.spacing.rowPaddingX + Theme.font.caption + Theme.spacing.gap
-
-    // Opaque, and painted in the row's own roles: the row underneath goes on drawing its name, and
-    // without this the two texts overprinted each other. The renaming row is always the cursor row.
-    Rectangle {
-        parent: view.contentItem
-        visible: root.renaming
-        x: root.renameLeft
-        y: root.renameViewIndex * Theme.fileRowHeight
-        width: Math.max(0, Scroll.contentWidth(view.width, Theme.spacing.rowPaddingX) - root.renameLeft - root.renameRight)
-        height: Theme.fileRowHeight
-        z: 1
-        color: Theme.color.surface
-
-        Rectangle {
-            anchors.fill: parent
-            color: Style.selectedAccentFill
-        }
+    // Read when the editor is built, as its name is, because rowFor answers only once the row is held.
+    function renamingFolder() {
+        var row = root.pane ? root.pane.rowFor(root.pane.renamingIndex) : null
+        return !!row && row.d === true
     }
+    // The renaming row is the cursor row, so a folder carries its chevron, and the size cell sits left of it as ColumnRow anchors both.
+    readonly property real renameRight: Theme.spacing.rowPaddingX + (renameLoader.item !== null && root.renamingFolder() ? Theme.font.caption : 0)
+                                        + (root.showsSize ? 2 * Theme.spacing.gap + Theme.column.size : 0)
+    readonly property real renameWidth: Math.max(0, Scroll.contentWidth(view.width, Theme.spacing.rowPaddingX) - root.renameLeft - root.renameRight)
+    readonly property real renameTop: root.renameViewIndex * Theme.fileRowHeight
+    // The editor owns its height, one line box; the column centres it in the row on whole pixels.
+    readonly property real renameY: root.renameTop + Math.round((Theme.fileRowHeight - (renameLoader.item ? renameLoader.item.fieldHeight : 0)) / 2)
+    readonly property real renameErrorHeight: renameLoader.item ? renameLoader.item.errorHeight : 0
+    // Set when an error line appears or changes height, and spent by the view's next contentHeight change.
+    property bool containRenameError: false
+    onRenameErrorHeightChanged: root.containRenameError = root.renameErrorHeight > 0
 
     Loader {
         id: renameLoader
@@ -327,13 +367,13 @@ Item {
         // hide at creation, and that hide is an abandon.
         active: root.renaming
         x: root.renameLeft
-        y: root.renameViewIndex * Theme.fileRowHeight
-        width: Math.max(0, Scroll.contentWidth(view.width, Theme.spacing.rowPaddingX) - root.renameLeft - root.renameRight)
-        height: Theme.fileRowHeight
+        y: root.renameY
+        width: root.renameWidth
         z: 2
         sourceComponent: Flea.RenameField {
-            anchors.fill: parent
+            height: implicitHeight
             pane: root.pane
+            errorSpan: Math.max(0, root.renameWidth + root.renameRight - Theme.spacing.rowPaddingX)
             name: root.pane && root.pane.rowFor(root.pane.renamingIndex)
                   ? String(root.pane.rowFor(root.pane.renamingIndex).n).split("/").pop() : ""
             onCommitted: function (newName) { root.pane.commitRename(newName) }
@@ -350,9 +390,10 @@ Item {
         visible: root.drawsEmpty && root.rows.length === 0 && root.lockedMode < 0
     }
 
-    // The cursor can move off screen through the keyboard, so the column follows it.
+    // Cursor can move off screen through keyboard, so column follows it with context.
+    // Selection ensures whole row (context 0); showRow spent margin, second margin would move clicked row.
     onSelectedIndexChanged: {
         if (root.selectedIndex >= 0)
-            view.positionViewAtIndex(root.pane ? Filter.viewOf(root.pane.shown, root.selectedIndex) : root.selectedIndex, ListView.Contain)
+            root.showCursor(root.pane ? Filter.viewOf(root.pane.shown, root.selectedIndex) : root.selectedIndex, 0)
     }
 }

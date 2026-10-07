@@ -1,8 +1,8 @@
 import QtQuick
 import qs.Commons
 import "." as Flea
-import "js/Buttons.js" as Buttons
 import "js/OpenWith.js" as OpenWith
+import "js/Input.js" as Input
 
 // OpenWith.html rule 4: the Convert popup family, and the one place a default handler is written.
 // The flyout beside it overrides once and writes nothing; only this card touches mimeapps.list.
@@ -45,6 +45,8 @@ Item {
     readonly property var closeItem: cancelButton
     readonly property var submitItem: openButton
     readonly property var fieldItem: field
+    readonly property var titleRuleItem: titleRule
+    readonly property var searchItem: searchBox
     readonly property var applicationsItem: list
     readonly property var alwaysItem: alwaysBox
     function applicationItem(index) { return list.itemAtIndex(OpenWith.rowOf(root.rows, index)) }
@@ -55,6 +57,11 @@ Item {
     readonly property int eyebrowHeight: Math.round(Theme.font.caption * 1.6) + Theme.spacing.gap
     property int listHeight: root.viewportRows * Theme.rowHeight
     readonly property int clampMargin: 8
+    // DialogButtons040 at size 14: the field is 18 px under the title rule (two gaps) and 31 px over the eyebrow's ink (the row's own 15 plus 16).
+    readonly property int searchLead: 2 * Theme.spacing.gap
+    readonly property real eyebrowLeadBoard: 16
+    readonly property real bodySmallBoard: 13
+    readonly property int searchTrail: Math.round(root.eyebrowLeadBoard * Theme.font.bodySmall / root.bodySmallBoard)
 
     anchors.fill: parent
     visible: root.opened
@@ -80,6 +87,7 @@ Item {
         field.text = ""
         root.opened = true
         list.contentY = 0
+        wheel.resetSteps()
         list.forceActiveFocus()
         // installed: the whole catalogue, which only this card draws. The flyout asks without it,
         // so a right-click does not pay for a walk of every applications directory on the box.
@@ -142,6 +150,15 @@ Item {
         list.positionViewAtIndex(OpenWith.rowOf(root.rows, root.cursor), ListView.Contain)
     }
 
+    // Wheel step: cursor and view move, focus never does; a busy list answers nothing.
+    function stepCursor(delta) {
+        if (root.busy) return
+        var count = root.applications.length
+        if (!count) return
+        root.cursor = Math.max(0, Math.min(count - 1, root.cursor + delta))
+        list.positionViewAtIndex(OpenWith.rowOf(root.rows, root.cursor), ListView.Contain)
+    }
+
     function stepFocus(back) {
         if (root.busy) return
         var parts = [0, 1, 2, 3, 4]
@@ -174,11 +191,12 @@ Item {
 
     Rectangle {
         id: card
-        anchors.centerIn: parent
-        width: Math.max(0, Math.min(Math.round(Theme.space(480) * Theme.dialogWidthRatio), root.width - 2 * root.clampMargin))
+        x: Theme.cardOrigin(root.width, width)
+        y: Theme.cardOrigin(root.height, height)
+        width: Theme.cardSpan(Theme.space(480) * Theme.dialogWidthRatio, root.width - 2 * root.clampMargin)
         // Clamped to the window; the body scrolls whatever the clamp cut, so a short screen cannot
         // put Cancel and Open past the bottom edge with no way to reach them.
-        height: Math.max(0, Math.min(body.wanted + 2 * Theme.spacing.rowPaddingX, root.height - 2 * root.clampMargin))
+        height: Theme.cardSpan(body.wanted + 2 * Theme.spacing.rowPaddingX, root.height - 2 * root.clampMargin)
         color: Theme.color.surface
         border.width: Theme.spacing.hairline
         border.color: Theme.color.muted
@@ -195,9 +213,10 @@ Item {
 
         Flea.CardScroll {
             id: body
+            bleedY: Theme.ringClearance
             anchors.fill: parent
-            anchors.topMargin: Theme.spacing.rowPaddingX
-            anchors.bottomMargin: Theme.spacing.rowPaddingX
+            anchors.topMargin: Theme.spacing.rowPaddingX - Theme.ringClearance
+            anchors.bottomMargin: Theme.spacing.rowPaddingX - Theme.ringClearance
 
         Column {
             width: parent.width
@@ -217,6 +236,7 @@ Item {
                 textFormat: Text.PlainText
                 elide: Text.ElideMiddle
                 Rectangle {
+                    id: titleRule
                     anchors.bottom: parent.bottom
                     width: parent.width
                     height: Theme.spacing.hairline
@@ -228,7 +248,7 @@ Item {
             // Rule 4: the Network board's field, with the lens beside it and a clear mark once it holds text.
             Item {
                 width: parent.width
-                height: searchBox.height + Theme.spacing.gap
+                height: root.searchLead + searchBox.height + root.searchTrail
 
                 Rectangle {
                     id: searchBox
@@ -237,20 +257,11 @@ Item {
                     anchors.leftMargin: Theme.spacing.rowPaddingX
                     anchors.rightMargin: Theme.spacing.rowPaddingX
                     anchors.bottom: parent.bottom
+                    anchors.bottomMargin: root.searchTrail
                     height: Theme.rowHeight - Theme.spacing.rowPaddingY
                     color: Theme.color.background
                     border.width: Theme.spacing.hairline
-                    // Focus is a ring outside the unchanged frame, never an accent frame.
-                    border.color: Theme.color.muted
-
-                    Rectangle {
-                        anchors.fill: parent
-                        anchors.margins: -Buttons.RING
-                        color: "transparent"
-                        border.width: Buttons.RING
-                        border.color: Theme.color.foreground
-                        visible: field.activeFocus
-                    }
+                    border.color: field.activeFocus ? Theme.color.accent : Theme.color.muted
 
                     Flea.Glyph {
                         id: lens
@@ -334,10 +345,15 @@ Item {
                     boundsBehavior: Flickable.StopAtBounds
                     activeFocusOnTab: false
                     Keys.forwardTo: [keys]
-                    Flea.ViewportScrollBar {
+                    Flea.FastScrollHandler {
+                        id: wheel
                         parent: list
-                        anchors { top: parent.top; right: parent.right }
                         flickable: list
+                        // The app list steps the highlight like a menu: one row a notch, one
+                        // row per row height of gained touchpad travel. No bar, no lane.
+                        stepMode: true
+                        stepRowHeight: Theme.rowHeight
+                        stepBy: function (delta) { root.stepCursor(delta) }
                     }
 
                     delegate: Item {
@@ -442,7 +458,7 @@ Item {
                     opacity: 0.4
                 }
 
-                Rectangle {
+                Item {
                     id: box
                     anchors.left: parent.left
                     anchors.leftMargin: Theme.spacing.rowPaddingX
@@ -583,7 +599,7 @@ Item {
                 else root.commit()
                 return
             }
-            if (event.text.length > 0 && event.text.charCodeAt(0) >= 0x20 && !(event.modifiers & Qt.ControlModifier)) {
+            if (Input.isPrintable(event.text.charAt(0)) && !(event.modifiers & Qt.ControlModifier)) {
                 if (!field.activeFocus) { root.typeIntoSearch(event.text); return }
             }
             event.accepted = false

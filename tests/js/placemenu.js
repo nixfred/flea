@@ -40,6 +40,19 @@ function openSidebar(pane) {
              message: function (text) { this.said = text } }
 }
 
+// A pane Tabs.openNew can snapshot: history, selection and backend sort state it reads.
+function tabPane(path) {
+    return { path: path, home: "/home/gm", cursorIndex: 0, viewMode: "list", showHidden: false,
+             searchMode: "", recentMode: "", recentFrom: "", filterQuery: "", filterTyping: false,
+             history: [], forwardHistory: [], preview: { active: false },
+             tabs: { items: [], index: 0 }, listInFlight: false, said: "", opened: [],
+             selection: { follows: function () { return false } },
+             selectedIndices: function () { return [] },
+             backend: { sortBy: "name", sortDesc: false, listRequests: 0, dirDev: 0 },
+             message: function (text) { this.said = text },
+             openWithoutHistory: function (p) { this.opened.push(p) } }
+}
+
 function labels(rows) {
     return rows.filter(function (row) { return !row.separator }).map(function (row) { return row.label }).join("|")
 }
@@ -60,6 +73,16 @@ function run(check) {
     check("and a Favorites row ends on Remove rather than Add, so issue 138's duplicate is impossible",
           labels(PlaceMenu.entries(favouriteRow, 2, [])),
           "Open|New tab|Open in terminal|Copy path|Remove from Favorites")
+    // 0df3a4c3 turned this row into the Copy as flyout; the board draws that on the file menu only, so a place keeps 0.3.7's one click.
+    var placeCopy = PlaceMenu.entries(placeRow, -1, []).filter(function (row) { return row.action === "copypath" })[0] || {}
+    check("a place's Copy path is one flat row that copies at once, as in 0.3.7",
+          [placeCopy.id, placeCopy.label, placeCopy.glyph, placeCopy.submenu === undefined].join("|"), "copypath|Copy path|file-text|true")
+    check("and no place row opens a flyout",
+          PlaceMenu.entries(placeRow, -1, []).filter(function (row) { return row.submenu !== undefined }).length, 0)
+    check("the one Copy as switch hides a place's Copy path",
+          labels(PlaceMenu.entries(placeRow, -1, ["copyAs"])), "Open|New tab|Open in terminal|Add to Favorites")
+    check("and the file menu keeps the Copy as flyout beside it",
+          labels(Menu.listingEntries({ hiddenActions: [], hasRow: true, rowMode: 0o100644 })).indexOf("Copy as") >= 0, true)
     check("the key carries the path, because the rail rebuilds under an open menu",
           PlaceMenu.key(favouriteRow, 2), "place:2:/home/gm/Work")
     check("and a Places row carries no favourite index", PlaceMenu.key(placeRow, -1), "place:-1:/home/gm/Downloads")
@@ -72,6 +95,9 @@ function run(check) {
     check("and so does Open in terminal", acting.navigationPane.terminal, "/home/gm/Downloads")
     PlaceMenu.perform("copypath", "place:-1:/home/gm/Downloads", acting, null)
     check("Copy path copies that path", acting.navigationPane.copied.join(","), "copypath:/home/gm/Downloads")
+    PlaceMenu.perform("copyAs:copyQuoted", "place:-1:/home/gm/Downloads", acting, null)
+    check("and a Copy as leaf is no place action, since a place draws no flyout", acting.navigationPane.copied.join(","),
+          "copypath:/home/gm/Downloads")
 
     var favourites = { records: [{ label: "Work", path: "/home/gm/Work" }], added: [], removed: [],
                        add: function (path, label) { this.added.push(path + " as " + label) },
@@ -122,4 +148,30 @@ function run(check) {
     check("Copy path still acts on the row's own path", keeping.navigationPane.copied.join(","), "copypath:/home/gm/Downloads")
     check("and a non-opening row leaves focus on the rail",
           keeping.navigationPane.focusView + "|" + keeping.focusOnOpen, "rail|false")
+    // A middle click opens a Places or Favorites row in a new tab; the rows with no folder of their
+    // own until they are opened answer nothing, and a remote favourite says why.
+    var middle = sidebarStub([])
+    middle.entries = [{ kind: "trash", label: "Trash" }, { kind: "favourite", label: "NAS", path: "smb://nas/data",
+                       original: { label: "NAS", path: "smb://nas/data" } }]
+    PlaceMenu.openTabAt(middle, 0)
+    check("a middle click on the Trash opens nothing", middle.said + middle.navigationPane.tabs.items.length, "0")
+    PlaceMenu.openTabAt(middle, 1)
+    check("and a remote favourite says it opens in this tab only", middle.said, "NAS opens in this tab only.")
+    // A home row and a local file:// favourite open a tab on the decoded path.
+    function tabSidebar(pane) {
+        return { navigationPane: pane, said: "", message: function (text) { this.said = text },
+                 entries: [{ kind: "home", label: "Downloads", path: "/home/gm/Downloads" },
+                           { kind: "favourite", label: "My Docs", path: "file:///home/gm/My%20Docs",
+                             original: { label: "My Docs", path: "file:///home/gm/My%20Docs" } }] }
+    }
+    var tabbed = tabPane("/home/gm")
+    PlaceMenu.openTabAt(tabSidebar(tabbed), 0)
+    check("a middle click on a home row opens its folder in a new tab",
+          tabbed.tabs.items[tabbed.tabs.items.length - 1].path + "|" + tabbed.opened.join(","),
+          "/home/gm/Downloads|/home/gm/Downloads")
+    var decoded = tabPane("/home/gm")
+    PlaceMenu.openTabAt(tabSidebar(decoded), 1)
+    check("a file:// favourite opens the decoded path in a new tab",
+          decoded.tabs.items[decoded.tabs.items.length - 1].path + "|" + decoded.opened.join(","),
+          "/home/gm/My Docs|/home/gm/My Docs")
 }

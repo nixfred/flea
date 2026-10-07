@@ -16,18 +16,14 @@ ListView {
     property var picker: null
     property var backend: null
 
-    // Whether the listing shows the directory's dotfiles. The backend never sends what a request
-    // did not ask for, so the window re-reads the standing directory when this flips; `.` and the
-    // preset's toggleHidden chord are the two ways in, and the flag survives every walk.
-    property bool showHidden: false
-
     readonly property int visibleRows: Math.max(1, Math.ceil(root.height / Theme.rowHeight))
     // The board's content-box dimensions exclude the border; QML Rectangle dimensions include it.
     readonly property int checkInnerSize: Theme.font.bodySmall + Theme.spacing.hairline
     readonly property int checkBorderWidth: Theme.spacing.hairline * 2
     readonly property int checkSize: root.checkInnerSize + root.checkBorderWidth * 2
 
-    model: root.picker.shownTotal
+    // Hidden builds nothing: a hidden view is not a free view, AGENTS.md rule 6.
+    model: root.visible ? root.picker.shownTotal : 0
     clip: true
     boundsBehavior: Flickable.StopAtBounds
     highlightMoveDuration: 0
@@ -59,7 +55,7 @@ ListView {
             : cell.row
         // A file request marks files and a folder request marks folders; the other kind is a way
         // through the tree and never an answer, so it carries no box at all.
-        readonly property bool markable: cell.row !== null && Picker.directory(cell.row) === root.picker.folderMode
+        readonly property bool markable: root.picker.marksAllowed && cell.row !== null && Picker.directory(cell.row) === root.picker.folderMode
         readonly property bool isMarked: cell.markable && Picker.marked(root.picker.marks, cell.rowPath)
 
         // The scroll lane stays clear, the same rule the window's own list follows.
@@ -86,7 +82,7 @@ ListView {
         Flea.Row {
             anchors.fill: parent
             paintWidth: root.width
-            leadingSlot: root.checkSize + Theme.spacing.gap
+            leadingSlot: root.picker.marksAllowed ? root.checkSize + Theme.spacing.gap : 0
             compactDate: true
             foregroundMetadata: true
             hiddenCols: Picker.HIDDEN_COLS
@@ -124,15 +120,20 @@ ListView {
         TapHandler {
             id: tap
             acceptedButtons: Qt.LeftButton
-            // One tap moves the cursor, a second tap on the same path opens or sends, a box tap toggles.
+            // One tap moves the cursor; a same-path double tap opens, accepts or marks by mode; a box tap toggles.
             onTapped: function (eventPoint, button) {
+                var was = root.picker.cursorIndex
+                var extending = (tap.point.modifiers & Qt.ShiftModifier) !== 0 && root.picker.marksAllowed
+                if (!extending) root.picker.endRange()
                 root.picker.cursorIndex = cell.listingIndex
                 root.forceActiveFocus()
                 var onBox = box.visible && eventPoint.position.x <= box.x + box.width + Theme.spacing.gap
                 var second = tap.tapCount === 2
                 var firstPath = root.lastTapPath
                 root.lastTapPath = cell.rowPath
-                if (onBox)
+                if (extending)
+                    root.picker.markRange(was, cell.listingIndex)
+                else if (onBox)
                     root.picker.toggleMark(cell.listingIndex)
                 else if (second && Picker.sameTap(firstPath, cell.rowPath))
                     root.picker.doubleActivate(cell.listingIndex, cell.rowPath, firstPath)
@@ -140,12 +141,14 @@ ListView {
         }
     }
 
-    function moveCursor(delta) {
+    function moveCursor(delta, extending) {
         if (root.picker.shownTotal === 0)
             return
         var was = root.picker.cursorIndex
         var to = Math.max(0, Math.min(root.picker.shownTotal - 1, was + delta))
+        if (!extending) root.picker.endRange()
         root.picker.cursorIndex = to
+        if (extending) root.picker.markRange(was, to)
         root.positionViewAtIndex(to, ListView.Contain)
     }
 
@@ -164,6 +167,12 @@ ListView {
             root.moveCursor(1)
         } else if (action === "cursorUp") {
             root.moveCursor(-1)
+        } else if (action === "extendDown") {
+            root.moveCursor(1, true)
+        } else if (action === "extendUp") {
+            root.moveCursor(-1, true)
+        } else if (action === "selectAll") {
+            root.picker.selectAll()
         } else if (action === "pageDown") {
             root.moveCursor(root.visibleRows)
         } else if (action === "pageUp") {
@@ -172,9 +181,13 @@ ListView {
             root.moveCursor(-root.picker.shownTotal)
         } else if (action === "cursorLast") {
             root.moveCursor(root.picker.shownTotal)
+        } else if (action === "viewList") {
+            root.picker.setView("list")
+        } else if (action === "viewGrid") {
+            root.picker.setView("grid")
         } else if (event.key === Qt.Key_Space && event.modifiers === Qt.NoModifier) {
             root.picker.toggleMark(root.picker.cursorIndex)
-        } else if (action === "open" || action === "pageForward") {
+        } else if (Picker.activates(action, event.key)) {
             root.picker.activate(root.picker.cursorIndex)
         } else if (action === "parent") {
             root.picker.goUp()
@@ -185,7 +198,7 @@ ListView {
         } else if (action === "sortReverse") {
             root.picker.requestSort(Sort.reverseOrder(root.picker.sortBy, root.picker.sortDesc))
         } else if (action === "toggleHidden") {
-            root.showHidden = !root.showHidden
+            root.picker.showHidden = !root.picker.showHidden
             if (root.picker.path.length > 0)
                 root.picker.openWithoutHistory(root.picker.path)
         } else {
@@ -199,20 +212,26 @@ ListView {
 
     Timer {
         id: coalesce
-        interval: 16
+        interval: root.picker.coalesceMs
         onTriggered: root.requestIfDrifted()
     }
 
     function requestIfDrifted() {
-        if (root.picker.backendUnavailable || root.picker.total === 0 || root.picker.pendingListings > 0)
+        if (!root.visible || root.picker.backendUnavailable || root.picker.total === 0 || root.picker.pendingListings > 0)
             return
         var firstVisible = Math.floor(root.contentY / Theme.rowHeight)
         var heldEnd = root.picker.held + root.picker.rows.length
         if (root.picker.rows.length === 0
                 || (firstVisible < root.picker.held && root.picker.held > 0)
                 || (firstVisible + root.visibleRows > heldEnd && heldEnd < root.picker.total)) {
-            var start = Math.max(0, firstVisible - root.picker.windowSize / 4)
+            var start = Math.max(0, firstVisible - Math.floor(root.picker.windowSize * root.picker.windowLead))
             root.backend.window(Math.floor(start), root.picker.windowSize)
         }
+    }
+
+    // A reshow owns its window: move to the cursor and refetch there.
+    function reshow(index) {
+        root.positionViewAtIndex(index, ListView.Contain)
+        root.requestIfDrifted()
     }
 }

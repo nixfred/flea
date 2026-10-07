@@ -133,6 +133,10 @@ pub(crate) struct CloseCounts {
 #[path = "movebatch_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "usbrca_tests.rs"]
+mod usbrca_tests;
+
 impl MoveBatch {
     pub(crate) fn new() -> Self {
         MoveBatch { pending: Vec::new() }
@@ -282,6 +286,7 @@ pub(crate) fn stage_copy(
         tree: None,
         manifest: crate::backend::copymanifest::writer_for_move(src, dst),
         durability: Some(durability),
+        for_move: true,
     };
     let outcome = copy_any(src, dst, &mut p);
     let partial = p.partial.take();

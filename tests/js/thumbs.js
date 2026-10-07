@@ -128,4 +128,33 @@ function run(check) {
     check("a cache file smaller than the cache size is the original's own size, never enlarged",
           drawn(Thumbs.fitScale(754, 471, 64, 48, Thumbs.thumbLimit(64, 48, 0, 0)), 64, 48), "64x48")
     check("a frame smaller than the picture still shrinks it", drawn(Thumbs.fitScale(200, 125, 256, 171, Thumbs.thumbLimit(256, 171, 6000, 4000)), 256, 171), "187x125")
+    // A video poster fills the frame the way its player does; an image keeps the never-enlarge cap.
+    check("a video poster is uncapped", Thumbs.posterLimit(true, 256, 256, 64, 64), Infinity)
+    check("an image poster keeps its cap", Thumbs.posterLimit(false, 256, 256, 64, 64), 64 / 256)
+    check("a 64x64 clip poster in the 754x471 frame fills it",
+          drawn(Thumbs.fitScale(754, 471, 256, 256, Thumbs.posterLimit(true, 256, 256, 64, 64)), 256, 256), "471x471")
+    // e81f: a prefetch miss on a generating class leaves the row unasked, else a miss.
+    function missed(generating) {
+        var s = Thumbs.empty()
+        s = Thumbs.applied(s, { ask: [3], drop: [], cacheOnly: true })
+        return Thumbs.miss(s, 3, generating, 240)
+    }
+    var genMiss = missed(true)
+    check("a prefetch miss on a generating class leaves the row undefined", genMiss.file[3], undefined)
+    check("and drops it from the order", genMiss.order.join(","), "")
+    var offMiss = missed(false)
+    check("on a cache-only class it stays a miss", offMiss.file[3], Thumbs.CACHE_MISS)
+    function planned(file) {
+        var s = { file: file, order: [] }
+        for (var k in file) s.order.push(Number(k))
+        var rows = []
+        for (var i = 0; i < 5; i++)
+            rows.push({ n: "f" + i, d: false, t: true, i: "image-x-generic", p: 33188, s: 10, m: 1 })
+        return Thumbs.plan(s, rows, 0, 0, 4, "media").ask.join(",")
+    }
+    var answered = { 0: "/c/0.png", 1: "/c/1.png", 2: "/c/2.png", 4: "/c/4.png" }
+    answered[3] = genMiss.file[3]
+    check("the planner asks a row a prefetch miss left unasked", planned(answered), "3")
+    answered[3] = Thumbs.CACHE_MISS
+    check("and never re-asks a row that stays missed", planned(answered), "")
 }

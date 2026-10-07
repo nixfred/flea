@@ -6,6 +6,8 @@
 .import "Thumbs.js" as Thumbs
 .import "Search.js" as Search
 .import "ColumnMenu.js" as ColumnMenu
+.import "Anchor.js" as Anchor
+.import "MouseNav.js" as MouseNav
 
 // Where the pane has been and how it gets back, taking ui/Pane.qml's root the way Search.js and
 // Ops.js do: the pane holds the state, this holds what the state does.
@@ -58,10 +60,7 @@ function forward(pane) {
 
 // The mouse back button follows history, or climbs when no history exists.
 function mouseBack(pane) {
-    // The pane's own context menu covers the listing and no navigation closes it, so a press behind
-    // one left the menu standing over another directory's rows and its next row acted on whichever
-    // file had arrived at that index. ui/shell.qml refuses the window's overlays; the collision card is the pane's.
-    if (pane.menuVisible || pane.collide.opened) {
+    if (MouseNav.refused(pane)) {
         return
     }
     if (pane.history.length > 0) {
@@ -75,6 +74,7 @@ function mouseBack(pane) {
 // A walk owns the rows until this lands, so leaving it is the shared step with the tabs:
 // tab switches, Back, Up, rail clicks and jumps all funnel through here.
 function openWithoutHistory(pane, newPath, options) {
+    Anchor.clearWaiting(pane)
     if (pane.listInFlight) {
         pane.message("A directory is already loading.", false)
         return
@@ -85,11 +85,14 @@ function openWithoutHistory(pane, newPath, options) {
     Search.leaveWalk(pane)
     pane.listInFlight = true
     pane.listedSeen = false
+    // A manual reload's notice belongs to its own re-read: a navigation that lands first spends it.
+    pane.reloadFrom = -1
     // The path is not written here. A refused listing never answers a listed line, so leaving the
     // pane's own path alone is what keeps a refused hop from moving the breadcrumb onto a directory
     // nobody could read; ui/PaneSwap.qml applyListed takes it from the answer instead. The directory
     // asked for is recorded, because a drop landing while the reply is out means that one and not
     // the directory being left; ui/Pane.qml dropPath reads it and only while this listing is out.
+    if (newPath !== pane.path) pane.linkTargetPendingId = 0 // A waiting Show original belongs to the listing being left, so leaving it drops the reveal.
     pane.listingPath = newPath
     // The class below is the directory being left until fsinfo answers for this one, and a
     // settle firing in between would spend it; a re-read of the same path keeps its class.
@@ -102,7 +105,7 @@ function openWithoutHistory(pane, newPath, options) {
     else if (pane.filterTyping)
         Filter.commit(pane)
     pane.appliedListingPreferences = pane.listingPreferences
-    pane.backend.list(newPath, pane.windowSize, pane.showHidden)
+    pane.backend.list(newPath, pane.windowSize, pane.showHidden, ask.wantChanged === true)
     // One statfs per directory, not per row: the bar's right half only changes when the pane moves.
     pane.backend.askFsInfo()
 }
@@ -117,9 +120,11 @@ function forget(pane, keptQuery) {
     pane.dirSizeState = DirSizes.empty()
     pane.cursorIndex = 0
     pane.trashArmedAt = 0
-    // The row the editor sat on belongs to the listing being replaced, so the rename goes with it:
-    // leaving the index set opened an empty editor over whatever file arrived at that row instead.
+    // The editor row and the held sort belong to the replaced listing, so both go with it.
+    pane.pendingSort = null
     pane.renamingIndex = -1
+    // A re-list puts a different file at that index, so the tap record goes with the rename.
+    if (pane.cancelSlowClick) pane.cancelSlowClick()
     // A filter narrows the rows already listed, so a new listing forgets it unless ui/js/Anchor.js hands it back.
     Filter.close(pane)
     if (keptQuery)
@@ -145,34 +150,44 @@ function renameRefreshTarget(pane, path) {
 // An operation changed the directory under the listing, so it is read again. Passing the path the
 // operation produced re-selects that row through pendingSelect instead of dropping the cursor to the
 // top. It is not a navigation, so it never touches the history.
-function refresh(pane, selectPath) {
+function refresh(pane, selectPath, keepSelection) {
     pane.pendingSelect = selectPath ? selectPath : ""
     pane.pendingMenu = false
     clearPendingBackground(pane)
-    pane.openWithoutHistory(pane.path)
+    // A search keeps its rows and numbering, so one window ask re-stats the held rows; marks and cursor stay.
+    if (keepSelection === true && pane.searchMode === Search.RESULTS) {
+        pane.backend.window(pane.held, pane.windowSize)
+        return
+    }
+    if (keepSelection === true) {
+        // Metadata-only writes use the watcher's identity anchor and interaction debt.
+        pane.wire.stale = true
+        pane.wire.reread()
+        return
+    }
+    pane.openWithoutHistory(pane.path, { inPlace: true })
 }
 
 // Only the first rows response looks for the target, then it is forgotten either way, so a later
-// directory change never re-reveals it. The target is a full path, which is what --select carries.
+// directory change never re-reveals it; the target matches by listed name, so NFC finds NFD.
 function applyPendingSelect(pane) {
     if (pane.pendingSelect.length === 0) {
         return
     }
     var target = pane.pendingSelect
     pane.pendingSelect = ""
-    for (var i = 0; i < pane.rows.length; i++) {
-        if (pane.join(pane.path, pane.rows[i].n) === target) {
-            var index = pane.held + i
-            pane.setCursor(index)
-            pane.selection.only(index)
-            pane.selectionAnchor = index
-            pane.selectionVersion++
-            if (pane.pendingMenu) {
-                pane.pendingMenu = false
-                pane.openCursorMenu()
-            }
-            return
+    var at = Anchor.selectMatch(pane.rows, target, pane.path)
+    if (at >= 0) {
+        var index = pane.held + at
+        pane.setCursor(index)
+        pane.selection.only(index, true)
+        pane.selectionAnchor = index
+        pane.selectionVersion++
+        if (pane.pendingMenu) {
+            pane.pendingMenu = false
+            pane.openCursorMenu()
         }
+        return
     }
     // The row is not in this listing, so the intent behind it must not fire on some later match.
     pane.pendingMenu = false
@@ -207,7 +222,8 @@ function openCursor(pane, opener) {
     }
     // Handing an archive on opens another file manager, and this is ui/Preview.qml's own classifier.
     if (Kinds.quickLookKind(row.i, path) === Kinds.ARCHIVE) {
-        pane.preview.open(path, row.i, row.s, pane.kindNames[row.k] || "")
+        pane.quickLook().open(path, row.i, row.s, pane.kindNames[row.k] || "",
+            pane.thumbState && pane.thumbState.file ? Thumbs.fileFor(pane.thumbState, pane.cursorIndex) : "")
         return
     }
     opener.open(path)

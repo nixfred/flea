@@ -48,6 +48,7 @@ function pane(query, held) {
         selectionVersion: 0,
         selectionAnchor: 0,
         scrolled: -1,
+        contexts: [],
         picked: {}
     }
     // ui/Pane.qml's own: the window starts at held, and an index outside it has no row at all.
@@ -55,20 +56,37 @@ function pane(query, held) {
         var offset = index - p.held
         return offset < 0 || offset >= p.rows.length ? null : p.rows[offset]
     }
-    p.showRow = function (view) { p.scrolled = view }
+    // The contexts each showRow was handed, so a pointer path proves its 0.
+    p.showRow = function (view, context) {
+        p.scrolled = view
+        p.contexts.push(context)
+    }
     // Mirrors ui/js/Selection.js: only() arms the lone row a plain move carries and every deliberate mark drops it.
     var lone = false
+    var shiftBase = null
+    var shiftLast = -1
+    var shiftSeq = 0
     p.selection = {
         has: function (i) { return p.picked[i] === true },
         promote: function (i) { if (lone && p.selectedIndices().length === 1 && p.picked[i]) { lone = false; return true } return false },
         count: function () { return p.selectedIndices().length },
-        only: function (i) { p.picked = {}; p.picked[i] = true; lone = true },
-        toggle: function (i) { if (p.picked[i]) delete p.picked[i]; else p.picked[i] = true; lone = false },
-        clear: function () { p.picked = {}; lone = false },
-        all: function (n) { p.picked = {}; for (var i = 0; i < n; i++) p.picked[i] = true; lone = false },
+        only: function (i) { p.picked = {}; p.picked[i] = true; lone = true; shiftBase = null },
+        toggle: function (i) { if (p.picked[i]) delete p.picked[i]; else p.picked[i] = true; lone = false; shiftBase = null },
+        clear: function () { p.picked = {}; lone = false; shiftBase = null },
+        all: function (n) { p.picked = {}; for (var i = 0; i < n; i++) p.picked[i] = true; lone = false; shiftBase = null },
         extendTo: function (i, anchor) {
             p.picked = {}
             for (var r = Math.min(i, anchor); r <= Math.max(i, anchor); r++) p.picked[r] = true
+            lone = false
+            shiftBase = null
+        },
+        shiftBegin: function (base, last, seq) { shiftBase = base.slice(); shiftLast = last; shiftSeq = seq || 0 },
+        shiftMoved: function (last, seq) { shiftLast = last; shiftSeq = seq || 0 },
+        shiftState: function () { return shiftBase === null ? null : { base: shiftBase, last: shiftLast, seq: shiftSeq } },
+        shiftApply: function (range) {
+            p.picked = {}
+            for (var i = 0; i < shiftBase.length; i++) p.picked[shiftBase[i]] = true
+            for (var j = 0; j < range.length; j++) p.picked[range[j]] = true
             lone = false
         },
         follows: function () { return lone && p.selectedIndices().length === 1 }

@@ -29,12 +29,13 @@ QtObject {
     readonly property var defaultColumns: ["name", "size", "date"]
 
     // Mirrors "menu"."hidden" in src/uischema.rs, for the same first launch: six ids this release's
-    // menu cannot build, plus Copy path and Open in terminal, which the SettingsMenus board ships
+    // menu cannot build, plus Copy as and Open in terminal, which the SettingsMenus board ships
     // switched off. Every id here is an action ui/js/Menu.js gives a row, or will give one.
     // Mirrors src/uischema.rs DEFAULTS menu.hidden exactly; the two drifted once and a fresh
     // ui.json then hid a row the shipped schema shows.
     readonly property var defaultMenuHidden: ["delete", "openTerminal", "placeMenu", "runScript",
-                                               "moveto", "copyto", "properties", "permissions", "copypath", "extThumbs"]
+                                               "moveto", "copyto", "properties", "permissions", "copyAs",
+                                               "pasteAs", "invertSelection", "extThumbs"]
 
     // ui.json names what is SHOWN. ui/Header.qml, ui/Row.qml and ui/ContextMenu.qml all ask the
     // opposite question, so the inversion lives here once rather than at each of them.
@@ -109,6 +110,9 @@ QtObject {
     // stored "dual", a window shape and not a view a pane can be in. PR 97, DouglasdeMoura.
     readonly property string view: Settings.contains(["list", "columns", "grid"], root.state.view)
                                    ? root.state.view : "list"
+    // The chooser's own last-used view (`pickerView` in src/uischema.rs); an undrawable word reads as the list.
+    readonly property string pickerView: Settings.contains(["list", "grid"], root.state.pickerView)
+                                         ? root.state.pickerView : "list"
 
     // The Keys section's four-value chooser over the one generated key table, falling back to its
     // first value, Default, which is what SettingsKeys.html says a missing or unknown name means.
@@ -182,25 +186,32 @@ QtObject {
     // Settings > About's "Check automatically", `updates.autoCheck` in src/uischema.rs, on until switched off.
     readonly property bool updateAutoCheck: (root.state.updates || ({})).autoCheck !== false
 
-    // Written by the sweep when it finishes, so the next launch on the same day does not run it
-    // again. A sweep that failed records nothing and is retried on the next launch.
+    // Only a successful sweep records its day, so failures retry on the next launch.
     function recordTrashSweep(day) {
         root.changeKey("trashSweptOn", day)
     }
 
-    // The chosen folder is set from the folder the panel was opened over, which is the same idiom the
-    // Places section's "Add this folder" uses; choosing one is also what selects that mode.
+    // Choosing the panel's current folder also selects the folder start mode.
     function setStartFolder(path) {
         root.changeKey("startIn", "folder")
         root.changeKey("startFolder", String(path || ""))
     }
 
-    // Written as the pane moves, never by a control. "Last folder" would otherwise have nothing to
-    // return to, and the pair ui/shell.qml already remembers for the dual view covers only that view.
-    function rememberLastPath(path) {
-        if (root.state.lastPath === path)
-            return
-        root.changeKey("lastPath", String(path || ""))
+    // Navigation owes only changed keys, then writes the last folder and ordered tab strip together.
+    function rememberNavigation(path, tabs) {
+        var next = root.state
+        var owed = root.unsaved
+        var values = { lastPath: String(path || ""), lastTabs: tabs }
+        for (var key in values) {
+            if (JSON.stringify(next[key]) === JSON.stringify(values[key])) continue
+            next = UiState.withKey(next, key, values[key])
+            owed = UiState.withKey(owed, key, values[key])
+        }
+        if (next === root.state) return
+        root.state = next
+        root.unsaved = owed
+        root.saveStatus = "Saving…"
+        root.save()
     }
 
     // Setting ids name either one top-level key or one leaf of an existing group.
@@ -217,8 +228,7 @@ QtObject {
         }
     }
 
-    // The Display section's writers. ui/shell.qml routes keys.toml's textSizeUp, textSizeDown and
-    // textSizeReset into the same three, so a chord and a control cannot hold two different sizes.
+    // The Display controls and text-size chords share these writers.
     function setTextSize(next) {
         root.changeLeaf("display", { textSize: TextSize.parse(next) })
     }
@@ -333,6 +343,103 @@ QtObject {
         if (read.state !== root.state) root.state = read.state
         return read.error.length === 0
     }
+
+    // A change another window saved: the settled document with no argument, merged and validated, writes nothing.
+    property string settleMode: ""
+    property bool settleDirty: false
+    property string pruneInflight: ""
+    property string pruneQueued: ""
+    property var settleAnswer: ({})
+    function applyShared(text) {
+        if (!UiState.parsesAsObject(text))
+            return
+        if (UiState.settleBusy(settler.running, root.settleMode, root.settleAnswer)) {
+            root.settleDirty = true
+            return
+        }
+        root.settleStart("apply")
+    }
+    // One starter for both settle kinds, so a prune never inherits a stale exit or text.
+    function settleStart(mode) {
+        // A half-landed settle is still pending, so starting over it would lose the half already here.
+        if (UiState.settleBusy(settler.running, root.settleMode, root.settleAnswer))
+            return
+        root.settleMode = mode
+        root.settleAnswer = {}
+        settler.command = [Quickshell.env("FLEA_BIN") || "flea", "--ui-state"]
+        settler.running = true
+    }
+    // A settler's exit and its collected text land in either order, so only a whole answer reaches settleDone.
+    function settleLanded(half) {
+        if (UiState.whole(root.settleAnswer))
+            return
+        root.settleAnswer = UiState.landed(root.settleAnswer, half)
+        if (!UiState.whole(root.settleAnswer))
+            return
+        root.settleDone(root.settleAnswer.code, root.settleAnswer.text)
+    }
+    // A settle's end spends a queued prune before a dirty re-read; the dirty flag survives the prune so the re-read still runs after it.
+    function settleNext() {
+        // Keep the prune queued until the process is idle and both reply halves have landed.
+        if (UiState.settleBusy(settler.running, root.settleMode, root.settleAnswer))
+            return
+        var next = UiState.settleNext(root.settleDirty, root.pruneQueued)
+        if (next === "prune") {
+            var queued = root.pruneQueued
+            root.pruneQueued = ""
+            root.pruneInflight = queued
+            root.settleStart("prune")
+        } else if (next === "apply") {
+            root.settleDirty = false
+            root.applyShared(stateFile.text())
+        }
+    }
+    function settleDone(exitCode, out) {
+        var mode = root.settleMode
+        root.settleMode = ""
+        if (mode === "prune") {
+            if (exitCode !== 0) { root.pruneFailed(); return }
+            var settled = null
+            try {
+                settled = JSON.parse(out)
+            } catch (e) {
+                root.pruneFailed()
+                return
+            }
+            if (!UiState.parsesAsObject(stateFile.text())) { root.pruneFailed(); return }
+            var pruned = UiState.pruneRefused(root.unsaved, root.pruneInflight, settled)
+            root.unsaved = pruned.unsaved
+            root.state = UiState.revertedState(root.state, root.pruneInflight, settled)
+            root.pruneInflight = ""
+            root.writeBook = { saved: root.writeBook.saved, inflight: "", pending: "", start: "" }
+            root.settleNext()
+            if (JSON.stringify(root.unsaved) !== "{}") {
+                root.saveStatus = "Saving…"
+                root.save()
+            }
+            return
+        }
+        if (exitCode !== 0) { root.settleNext(); return }
+        if (!UiState.parsesAsObject(out)) { root.settleNext(); return }
+        if (!UiState.parsesAsObject(stateFile.text())) { root.settleNext(); return }
+        var merged = UiState.applyExternal(root.state, root.unsaved, out)
+        if (merged.changed)
+            root.state = merged.state
+        root.syncFavourites(stateFile.text())
+        root.settleNext()
+    }
+    // A prune settle that never answered still drops what the schema refused, so no save strands behind a phantom writer.
+    function pruneFailed() {
+        root.unsaved = UiState.dropInvalid(root.unsaved, root.pruneInflight)
+        root.pruneInflight = ""
+        root.writeBook = { saved: root.writeBook.saved, inflight: "", pending: "", start: "" }
+        root.saveFailed()
+        root.settleNext()
+        if (JSON.stringify(root.unsaved) !== "{}") {
+            root.saveStatus = "Saving…"
+            root.save()
+        }
+    }
     function refreshFavourites() {
         stateFile.reload()
         // blockLoading covers only the first read; a reload otherwise returns the previous document.
@@ -353,7 +460,10 @@ QtObject {
         onFileChanged: reload()
         onLoaded: {
             root.favouritesReadError = ""
-            if (root.initialReadComplete) root.syncFavourites(text())
+            if (root.initialReadComplete) {
+                root.applyShared(text())
+            }
+            root.syncFavourites(text())
         }
         printErrors: false
         // A file that is not there is a first launch and says nothing; anything else is a file this
@@ -368,7 +478,9 @@ QtObject {
     }
 
     // The writer answered, with its own status or with 2 for one that never started: the same refusal
-    // to the pane and the same retry to the book, because neither reached the file.
+    // to the pane and the same retry to the book, because neither reached the file. A refusal never
+    // leaves a key owed forever: the owed keys the settled document disagrees with are dropped once,
+    // said once in the status line, so a later valid write applies again in the same process.
     function wrote(exitCode) {
         // Taken out before the patch below is built, so a writer queued behind this one launches with
         // what is still owed and not with the settings this one has just stored.
@@ -376,10 +488,22 @@ QtObject {
             : "Could not save settings · changes apply to this session only"
         if (exitCode === 0)
             root.unsaved = UiState.acknowledged(root.unsaved, root.writeBook.inflight)
+        var failedPatch = root.writeBook.inflight
         var next = UiState.exited(root.writeBook, exitCode, root.patch())
         root.writeBook = next
         if (next.failed)
             root.saveFailed()
+        if (exitCode !== 0 && UiState.isPatchInvalid(failedPatch)) {
+            // A refused patch prunes behind a pending settle instead of hijacking that settle's mode.
+            var ask = UiState.pruneAsk(UiState.settleBusy(settler.running, root.settleMode, root.settleAnswer), failedPatch)
+            if (ask.queue.length > 0) {
+                root.pruneQueued = ask.queue
+                return
+            }
+            root.pruneInflight = ask.start
+            root.settleStart("prune")
+            return
+        }
         if (next.start.length > 0)
             root.run(next.start)
     }
@@ -393,6 +517,20 @@ QtObject {
         onRunningChanged: {
             if (!patcher.running && root.writeBook.inflight.length > 0)
                 root.wrote(2)
+        }
+    }
+
+    property var settler: Process {
+        id: settler
+        stdout: StdioCollector { id: settleOut; waitForEnd: true; onStreamFinished: root.settleLanded({ text: settleOut.text }) }
+        onExited: function (exitCode, exitStatus) { root.settleLanded({ code: exitCode }) }
+        // A settler that never started raises no exited, only running going false; the joined halves tell it from a real exit the way the writer's own rule does.
+        onRunningChanged: {
+            if (root.settleMode.length > 0 && UiState.neverRan(root.settleAnswer, settler.running))
+                root.settleLanded(UiState.NEVER_RAN)
+            // onExited may land both halves while running is true; the idle transition resumes its queued work.
+            if (!settler.running && root.settleMode.length === 0)
+                root.settleNext()
         }
     }
 }

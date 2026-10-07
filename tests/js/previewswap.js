@@ -2,6 +2,7 @@
 .import "../../ui/js/Facts.js" as Facts
 .import "../../ui/js/Swap.js" as Swap
 .import "../../ui/js/Columns.js" as Columns
+.import "../../ui/js/PreviewSettle.js" as PreviewSettle
 .import "sourcefixture.js" as Source
 
 // The preview swap, AGENTS.md "The preview swap": its moves, its cap, its frame kinds and what each surface waits for.
@@ -65,12 +66,25 @@ function run(check) {
           + column(Facts.MULTI, {}), "true|true|true|true")
 
     check("Quick Look waits while any pane says loading", PreviewSwap.lookReady("loading", false, false, false), false)
+    check("interim shown is whole", PreviewSwap.lookReady("loading", false, false, false, true), true)
+    check("interim over a PDF is whole too", PreviewSwap.lookReady("loading", true, false, false, true), true)
+    check("a Markdown head drawn while the parse runs is whole", PreviewSwap.lookReady("loading", false, false, false, false, true), true)
+    check("a Markdown pane with no head drawn still waits", PreviewSwap.lookReady("loading", false, false, false, false, false), false)
+    check("without one a loading image still waits", PreviewSwap.lookReady("loading", false, false, false, false), false)
+    check("an interim not yet visible at its rect still waits",
+        PreviewSwap.lookReady("loading", false, false, false, undefined) + "|"
+        + PreviewSwap.lookReady("loading", true, false, false, false), "false|false")
     check("a PDF viewer is ready once a page is on screen",
           PreviewSwap.lookReady("pdf", true, false, false) + "|" + PreviewSwap.lookReady("pdf", true, true, false), "false|true")
     check("or once the document is refused", PreviewSwap.lookReady("This file could not be read.", true, false, true), true)
     check("anything else not loading is whole", PreviewSwap.lookReady("image", false, false, false), true)
+    runInterimRect(check)
+    runInterimShown(check)
+    runFirstScreen(check)
     runFolderDataHold(check)
     runPictureHoldLeak(check)
+    runPreviewSettle(check)
+    runE81(check)
 }
 
 // The body of one QML function by brace count, so each check reads the arm it names and not a copy elsewhere.
@@ -102,6 +116,11 @@ function squashed(s) {
     return String(s).replace(/\s+/g, " ")
 }
 
+// Sample input: stripped("a // root.interimShown\nb") is "a \nb".
+function stripped(s) {
+    return String(s).replace(/\/\/[^\n]*/g, "")
+}
+
 function runShowCursorRow(check, area) {
     var show = squashed(bodyOf(area, "showCursorRow"))
     check("source: showCursorRow guards a stale show with the strict force-and-data-hold early return",
@@ -109,6 +128,58 @@ function runShowCursorRow(check, area) {
     var retAt = show.indexOf("return")
     check("source: that early return stands before the shown assignments",
         retAt >= 0 && show.indexOf("shownHasRow") > retAt && show.indexOf("shownIsDir") > retAt && show.indexOf("shownChildPath") > retAt, true)
+}
+
+// e81f: the interim rect is the original's upright aspect-fit, never enlarged, never the cache file's size.
+function rect(surfaceW, surfaceH, imageW, imageH, orient) {
+    var r = PreviewSwap.interimRect(surfaceW, surfaceH, imageW, imageH, orient)
+    return r === null ? "none" : r.x + "," + r.y + "," + r.w + "x" + r.h
+}
+
+function runInterimRect(check) {
+    check("orient 1 sizes from the original, not its cache file",
+        rect(754, 471, 6000, 4000, 1), "24,0,706.5x471")
+    check("orient 3 keeps the stored sides", rect(754, 471, 6000, 4000, 3), "24,0,706.5x471")
+    check("orient 6 swaps to the upright sides", rect(2080, 1137, 4032, 3024, 6), "614,0,852.75x1137")
+    check("orient 8 swaps the other way", rect(2080, 1137, 3024, 4032, 8), "282,0,1516x1137")
+    check("a swap turns a 60x40 box portrait", rect(100, 100, 60, 40, 6), "30,20,40x60")
+    check("while orient 1 keeps it landscape", rect(100, 100, 60, 40, 1), "20,30,60x40")
+    check("a small original is never enlarged", rect(754, 471, 120, 68, 1), "317,202,120x68")
+    check("unknown pixels are no interim",
+        rect(754, 471, 0, 0, 1) + "|" + rect(754, 471, 640, 0, 1) + "|" + rect(754, 471, 0, 480, 6),
+        "none|none|none")
+}
+
+// Quick Look releases early only on the shown interim: each pin reads its binding's Source.slice with comments stripped.
+function runInterimShown(check) {
+    var readyScope = stripped(Source.slice(Source.source("ui/Preview.qml"), "readonly property bool lookReady:", "property string interimThumb"))
+    var shownScope = stripped(Source.slice(Source.source("ui/Preview.qml"), "readonly property bool interimShown:", "// The original's pixels"))
+    var imageScope = stripped(Source.slice(Source.source("ui/PreviewImage.qml"), "readonly property bool interimReady:", "// The same name the media"))
+    check("lookReady answers on the shown interim",
+        readyScope.indexOf("root.interimShown") >= 0, true)
+    check("interimShown releases only on the interim image Ready",
+        shownScope.indexOf("imageLoader.item.interimReady === true") >= 0, true)
+    check("that term is PreviewImage interimReady, never a local flag",
+        squashed(imageScope).trim() === "readonly property bool interimReady: interimPicture.status === Image.Ready", true)
+}
+
+// Sample input: firstScreenOf("file.loaded && root.blockList.length > 0", true, "", ["a"], true) is true.
+function firstScreenOf(expr, loaded, parseError, blocks, parsing) {
+    var file = { loaded: loaded }
+    var root = { parseError: parseError, blockList: blocks, parsing: parsing }
+    return new Function("root", "file", "return " + expr)(root, file)
+}
+
+// A reparse keeps its drawn screen: firstScreen reads the real binding, so a parsing exclusion fails it.
+function runFirstScreen(check) {
+    var pane = Source.source("ui/PreviewMarkdown.qml")
+    var found = pane.match(/readonly property bool firstScreen:([^\n]*)/)
+    check("source: firstScreen counts drawn blocks", found !== null && found[1].indexOf("blockList.length") >= 0, true)
+    var expr = found !== null ? stripped(found[1]) : "false"
+    check("source: firstScreen names no reparse exclusion", expr.indexOf("parsing") < 0, true)
+    check("a reparse of an open document keeps its drawn screen", firstScreenOf(expr, true, "", ["a"], true), true)
+    check("with no blocks there is no first screen", firstScreenOf(expr, true, "", [], true), false)
+    check("control: a parsing exclusion loses the reparse screen", firstScreenOf(expr + " && !root.parsing", true, "", ["a"], true), false)
 }
 
 // A folder peek in Columns holds by data: an unanswered folder keeps the old column, and the landed peek shows it with its rows in one pass.
@@ -146,6 +217,81 @@ function runFolderDataHold(check) {
     check("its mark can settle at once", Source.source("ui/FleaMark.qml").indexOf("function settle()") >= 0, true)
     check("a landed empty peek settles its hero whole", peeked.indexOf("Columns.shouldSettleHero(") >= 0
         && peeked.indexOf("markItem.settle()") > peeked.indexOf("Columns.shouldSettleHero("), true)
+}
+
+// Move-clock settle: idle moves load at once, repeats change nothing, bursts trail once.
+function runPreviewSettle(check) {
+    check("a lone selection never keys on the version", PreviewSettle.selectionKey(0, 9), "")
+    check("a single row never keys on the version", PreviewSettle.selectionKey(1, 7), "")
+    check("a multi-selection keys on its count and version", PreviewSettle.selectionKey(3, 4), "3:4")
+    check("a multi-selection moves with its version", PreviewSettle.selectionKey(3, 5), "3:5")
+    check("an idle first move is due at once", PreviewSettle.due(1000, 0, 120), true)
+    check("a step exactly one interval on is due", PreviewSettle.due(120, 0, 120), true)
+    check("a step inside the interval waits", PreviewSettle.due(119, 0, 120), false)
+    check("a backwards clock reads idle, never wedged", PreviewSettle.due(100, 200, 120), true)
+    check("a pending repeat stays put", PreviewSettle.plan(50, 0, 120, "b", "b", true), "same")
+    check("a settled repeat schedules by the clock", PreviewSettle.plan(1000, 0, 120, "b", "b", false), "now")
+    check("a new row after quiet loads at once", PreviewSettle.plan(1000, 0, 120, "c", "b", false), "now")
+    check("a new row inside the window trails", PreviewSettle.plan(50, 0, 120, "c", "b", false), "later")
+    var lastAt = -1000, lastKey = "a", armed = false, seen = []
+    var moves = [[0, "b"], [30, "c"], [60, "d"], [90, "e"], [120, "f"]]
+    for (var i = 0; i < moves.length; i++) {
+        var decision = PreviewSettle.plan(moves[i][0], lastAt, 120, moves[i][1], lastKey, armed)
+        seen.push(decision)
+        if (decision !== "same") { lastKey = moves[i][1]; lastAt = moves[i][0]; armed = decision === "later" }
+    }
+    check("a 30ms burst loads first once, then trails only", seen.join(","), "now,later,later,later,later")
+    check("a same-key refresh lands on the pending timer",
+        PreviewSettle.plan(100, 90, 120, "e", "e", true), "same")
+    var preview = Source.source("ui/SelectionPreview.qml")
+    check("the column preview imports the settle helper",
+        preview.indexOf('import "js/PreviewSettle.js" as PreviewSettle') >= 0, true)
+    check("it stamps moves beside the settle key", preview.indexOf("property string lastMoveKey") >= 0
+        && preview.indexOf("property double lastMoveAt") >= 0, true)
+    var replaceArm = squashed(bodyOf(preview, "replace"))
+    var dupAt = replaceArm.indexOf("if (key === root.lastMoveKey && (root.isShown() || root.loadQueuedKey === key)) return")
+    var holdAt = replaceArm.indexOf("root.swap.hold(root.clearForMove, key)")
+    var settleAt = replaceArm.indexOf("root.settleFor(key)")
+    check("a true duplicate returns before any clear or picture", dupAt >= 0 && holdAt > dupAt, true)
+    check("a move takes the swap picture before scheduling", holdAt >= 0 && settleAt > holdAt, true)
+    var canReadAt = replaceArm.indexOf('if (!root.canRead) { root.clear(); return }')
+    check("the no-swap branch keeps its reset before scheduling", canReadAt >= 0
+        && replaceArm.indexOf("root.clear() root.settleFor(key)", canReadAt) > settleAt, true)
+    var schedArm = squashed(bodyOf(preview, "function settleFor"))
+    check("a pending timer covers its own refresh", schedArm.indexOf("settle.running && root.settleKey === key") >= 0, true)
+    var sameAt = schedArm.indexOf('if (decision === "same") return')
+    check("settleFor stamps only scheduled moves", sameAt >= 0 && schedArm.indexOf("root.lastMoveKey = key") > sameAt && schedArm.indexOf("root.lastMoveAt = now") > sameAt, true)
+    var fireArm = squashed(bodyOf(preview, "function fireSettle"))
+    check("the timer and the fast path share one decision",
+        fireArm.indexOf("ExtThumbs.manualHold(") >= 0 && preview.indexOf("onTriggered: root.fireSettle()") >= 0, true)
+    check("an unknown class still waits instead of loading",
+        fireArm.indexOf("!root.pane.storageKnown") >= 0 && fireArm.indexOf("root.followSelection()") >= 0, true)
+    var loadArm = squashed(preview.substring(preview.indexOf("function load()"), preview.indexOf("function startSwap")))
+    check("a load stamps no move clock", loadArm.indexOf("lastMoveAt") < 0 && loadArm.indexOf("lastMoveKey") < 0, true)
+    check("the column names the queued load's key",
+        preview.indexOf("property string loadQueuedKey") >= 0, true)
+    var selQueued = squashed(preview.substring(preview.indexOf("function loadSelection()"), preview.indexOf("function load()")))
+    check("a queued load names its key before the hold",
+        selQueued.indexOf("root.loadQueuedKey = key") >= 0
+        && selQueued.indexOf("root.loadQueuedKey = key") < selQueued.indexOf("root.swap.hold(root.load, key, true)"), true)
+    check("a clear forgets the queued key",
+        squashed(bodyOf(preview, "function clearShown")).indexOf('root.loadQueuedKey = ""') >= 0, true)
+    check("a duplicate replace stands down while its load is queued",
+        replaceArm.indexOf("root.loadQueuedKey === key") >= 0, true)
+    var quick = Source.source("ui/Preview.qml")
+    var followArm = squashed(bodyOf(quick, "function follow"))
+    check("a pending repeat returns first",
+        followArm.indexOf("if (key === root.lastMoveKey && followSettle.running) return") >= 0, true)
+    check("a settled revisit of the shown target stays put",
+        followArm.indexOf("root.isShown(newPath, newIcon, newSize, newKind)") >= 0, true)
+    var qHoldAt = followArm.indexOf("held.hold(null, newPath)")
+    var qIdleAt = followArm.indexOf("if (idle) {")
+    check("Quick Look takes its picture before deciding", qHoldAt >= 0 && qIdleAt > qHoldAt, true)
+    check("an explicit open stamps the move", squashed(bodyOf(quick, "function open")).indexOf("root.lastMoveAt = Date.now()") >= 0, true)
+    check("a close clears the move key", squashed(bodyOf(quick, "function close")).indexOf('root.lastMoveKey = ""') >= 0, true)
+    var thumbs = Source.source("ui/ColumnPane.qml")
+    check("thumbnail sweeps keep their own debounce, never the cursor helper",
+        thumbs.indexOf("PreviewSettle") < 0, true)
 }
 
 // A launch or folder move must never leave the third-column picture up: only a real file row takes one.
@@ -202,4 +348,61 @@ function runPictureHoldLeak(check) {
     var loadGuard = loadBody.indexOf("Columns.isFileRow(current)")
     check("a folder load keeps the old preview instead of clearing it",
         loadGuard >= 0 && loadBody.indexOf("root.clear()") > loadGuard, true)
+}
+
+// e81f: Quick Look shows the held cache file at once, then the full decode replaces it.
+function runE81(check) {
+    var quick = Source.source("ui/Preview.qml")
+    var sel = Source.source("ui/SelectionPreview.qml")
+    var image = Source.source("ui/PreviewImage.qml")
+    var openArm = squashed(bodyOf(quick, "function open"))
+    check("Space threads the held thumb in", openArm.indexOf("root.load(newPath, newIcon, newSize, newKind, newThumb") >= 0, true)
+    check("open captures the row for the meta ask",
+        openArm.indexOf("root.pane ? root.pane.cursorIndex : -1") >= 0, true)
+    var followArm = squashed(bodyOf(quick, "function follow"))
+    check("follow carries the captured row to the settle",
+        followArm.indexOf("root.pendingImageRow = root.pane ? root.pane.cursorIndex : -1") >= 0
+        && quick.indexOf("root.pendingThumb, root.pendingImageRow") >= 0, true)
+    var flat = squashed(quick)
+    check("the interim is stamped and replaced, never final",
+        quick.indexOf("root.interimStamp = newPath") >= 0 && flat.indexOf("root.path === root.interimStamp && root.interimBox !== null") >= 0
+        && image.indexOf("visible: root.interimVisible") >= 0, true)
+    var groundAt = image.indexOf("color: Theme.color.background")
+    var interimAt = image.indexOf("id: interimPicture")
+    var pictureAt = image.indexOf("id: picture")
+    check("the interim draws above the ground and below the final picture",
+        groundAt >= 0 && interimAt > groundAt && pictureAt > interimAt, true)
+    check("the interim takes no turn: a cache file is already upright",
+        quick.indexOf("interimTurned") < 0 && image.indexOf("interimTurned") < 0, true)
+    var pre = squashed(bodyOf(quick, "function maybePrefetch"))
+    check("prefetch warms one cache entry on rest only",
+        pre.indexOf("ViewState.previewAutomatic") >= 0 && pre.indexOf("followSettle.running") >= 0 && pre.indexOf("ExtThumbs.manualHold(") >= 0
+        && pre.indexOf("cacheOnly: true") >= 0 && pre.indexOf("backend.thumb(work.ask, true)") >= 0 && pre.indexOf("askMeta") < 0, true)
+    check("the interim takes the upright original's rect, never the cache pixels",
+        flat.indexOf("PreviewSwap.interimRect(panes.width, panes.height,") >= 0
+        && flat.indexOf("root.interimBox !== null ? root.interimBox.x : 0") >= 0
+        && quick.indexOf("thumbLimit(interimPicture") < 0, true)
+    var askArm = squashed(bodyOf(quick, "function askImage"))
+    check("the meta ask runs once per show and never mid-burst",
+        askArm.indexOf("root.imageAsked") >= 0 && askArm.indexOf("followSettle.running") >= 0
+        && askArm.indexOf("root.pane.backend.askMeta(root.imageRow, false, false, false)") >= 0, true)
+    check("a reply for another row is dropped",
+        flat.indexOf("if (root.isImage && row === root.imageRow && root.imageRowShown())") >= 0, true)
+    check("the ask re-resolves a drifted index to the shown file",
+        askArm.indexOf("root.resolveImageRow()") >= 0
+        && squashed(bodyOf(quick, "function resolveImageRow")).indexOf("root.imageRow = -1") >= 0, true)
+    var wire = Source.source("ui/PaneWire.qml")
+    check("a prefetch miss on a generating class returns to unasked",
+        wire.indexOf("Thumbs.CACHE_ASKED") >= 0 && wire.indexOf("Thumbs.miss(pane.thumbState, row, true, pane.thumbCap)") >= 0, true)
+    check("the forgotten row is re-planned through the settled view",
+        wire.indexOf("if (pane.listArea) pane.listArea.restartSettle()") >= 0, true)
+    var loadArm = squashed(sel.substring(sel.indexOf("function load()"), sel.indexOf("function askThumb")))
+    check("the column single-row ask runs through its held gate",
+        loadArm.indexOf("root.askThumb()") >= 0 && loadArm.indexOf("pane.backend.thumb(work.ask") < 0, true)
+    var askThumbArm = squashed(bodyOf(sel, "function askThumb"))
+    check("that ask waits for the storage class and carries it",
+        askThumbArm.indexOf("!pane.storageKnown") >= 0
+        && askThumbArm.indexOf("ExtThumbs.cacheOnly(pane.storageClass, ViewState.preview)") >= 0, true)
+    check("the class landing runs the held ask",
+        sel.indexOf("function onStorageKnownChanged() { root.followSelection(); root.askThumb() }") >= 0, true)
 }

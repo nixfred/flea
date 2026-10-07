@@ -28,15 +28,27 @@ Item {
     readonly property real railWidth: rail.active ? rail.width : 0
     readonly property var item: rail.item
 
+    function focusPress(p) {
+        var pane = root.pane
+        if (p.x < 0 || p.y < 0 || p.x >= pane.width || p.y >= pane.height) return
+        // The shown Sidebar can extend past its zero-width overlay host.
+        var sidebar = root.item
+        var r = sidebar ? sidebar.mapFromItem(pane, p.x, p.y) : null
+        if (!root.hidden && r && r.x >= 0 && r.y >= 0 && r.x < sidebar.width && r.y < sidebar.height) {
+            if (root.overlay) pane.railPane.focusView = Focus.RAIL
+        } else { pane.focusView = Focus.LIST; pane.focusRequested() }
+    }
+
     // Long enough that crossing the edge on the way somewhere else does not flash the rail, and that
     // leaving it by a pixel on the way to a row does not drop it.
     readonly property int settleMs: 220
     property bool revealed: false
-    property bool over: false
     // The rail's own context menu takes the pointer with it, so without this the rail withdraws out
     // from under the menu it just opened.
     readonly property bool menuHere: root.pane !== null && root.pane.contextMenu().opened
                                      && root.pane.contextMenu().forRail
+    // The rail stays up while the pointer is on it, which is the other half of the reveal.
+    readonly property bool over: railHover.hovered
     readonly property bool wanted: edge.hovered || root.over || root.menuHere
                                    || (root.pane !== null && root.pane.focusView === Focus.RAIL)
 
@@ -79,14 +91,19 @@ Item {
             focused: root.pane.railPane.focusView === Focus.RAIL
             trashActive: root.pane.railPane.trash.opened
             onOpened: function(path) { RailKeys.openFrom(root.pane.railPane, path, sidebar) }
+            // Sidebar040: the rail's Recent row answers with the history's own paths, which the
+            // pane lists with listpaths; focus follows into the folder the way a mount's open does.
+            onRecentRequested: function (paths, requester, visits) { var target = requester || root.pane.railPane; target.openRecent(paths, visits); RailKeys.landed(target, sidebar) }
             onTrashRequested: root.pane.railPane.trash.open()
             onMessage: function(text, isError) { RailKeys.messaged(sidebar, isError); root.pane.message(text, isError) }
             onForgetMessage: function(text) { root.pane.forgetMessage(text) }
             menu: root.pane.railPane.contextMenu()
             onRenameFinished: root.pane.railPane.listArea.forceActiveFocus()
-            // The rail stays up while the pointer is on it, which is the other half of the reveal.
-            HoverHandler { onHoveredChanged: root.over = hovered }
+            // The pane's own PointHandler never sees a press a row grabs, so an overlay rail claims the keyboard itself; a docked rail leaves it.
+            onPressed: if (root.overlay) root.pane.railPane.focusView = Focus.RAIL
         }
+        // Disabled with the Sidebar, so an unload under the pointer clears it; a handler inside the Sidebar dies without reporting.
+        HoverHandler { id: railHover; enabled: rail.active }
     }
 
     // The rail's Sidebar renders the window-long service below; the service's answers
@@ -155,6 +172,7 @@ Item {
                 }
             }
             onForgetMessage: function (text) { root.pane.forgetMessage(text) }
+            onQuiesce: function (path) { root.pane.quiesceVolume(path) }
             onFirstAnsweredChanged: root.hiddenEjectReady()
         }
     }

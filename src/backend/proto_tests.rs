@@ -22,12 +22,20 @@ fn convert_preserves_probe_and_caller_identity_without_changing_legacy_activatio
 }
 
 #[test]
+fn a_watching_peek_names_the_column_directories_drawn() {
+    assert!(matches!(parse_request(r#"{"c":"peek","path":"/a","first":1,"watch":true,"keep":["/a","/a/b, [odd]"]}"#),
+        Request::Peek { watch: true, keep, .. } if keep == ["/a", "/a/b, [odd]"]));
+    assert!(matches!(parse_request(r#"{"c":"peek","path":"/a","first":1}"#), Request::Peek { watch: false, keep, .. } if keep.is_empty()));
+}
+
+#[test]
 fn parses_each_request_shape() {
     match parse_request(r#"{"c":"list","path":"/home/gm","first":350}"#) {
-        Request::List { path, first, hidden } => {
+        Request::List { path, first, hidden, want_changed } => {
             assert_eq!(path, "/home/gm");
             assert_eq!(first, 350);
             assert!(!hidden);
+            assert!(!want_changed);
         }
         _ => panic!("expected List"),
     }
@@ -69,6 +77,14 @@ fn a_paths_line_escapes_every_element_and_survives_an_empty_list() {
         paths_line(&["/home/gm/a.txt".to_string(), "/home/gm/say \"hi\".txt".to_string()]),
         r#"{"t":"paths","paths":["/home/gm/a.txt","/home/gm/say \"hi\".txt"]}"#
     );
+}
+
+#[test]
+fn a_shebang_request_names_its_path_and_caller_id() {
+    assert!(matches!(parse_request(r#"{"c":"shebang","path":"/home/gm/run.sh","id":3}"#),
+        Request::Shebang { path, id: 3 } if path == "/home/gm/run.sh"));
+    assert_eq!(crate::backend::shebang::shebang_line("/home/gm/run.sh", true, 3),
+        r#"{"t":"shebang","path":"/home/gm/run.sh","hasShebang":true,"id":3}"#);
 }
 
 #[test]
@@ -116,9 +132,22 @@ fn a_list_request_carries_its_hidden_flag() {
 }
 
 #[test]
+fn a_list_request_names_the_reload_count_only_when_asked() {
+    match parse_request(r#"{"c":"list","path":"/tmp","first":0,"wantChanged":true}"#) {
+        Request::List { want_changed, .. } => assert!(want_changed),
+        _ => panic!("expected List"),
+    }
+    // Absent is the silent re-read every navigation and watch already takes.
+    match parse_request(r#"{"c":"list","path":"/tmp","first":0}"#) {
+        Request::List { want_changed, .. } => assert!(!want_changed),
+        _ => panic!("expected List"),
+    }
+}
+
+#[test]
 fn emits_a_listed_line_naming_the_directory_it_listed() {
-    let s = listed_line(100000, 26.4, 2.5, 56, "/home/gm");
-    assert_eq!(s, r#"{"t":"listed","n":100000,"read":26.400,"sort":2.500,"v":56,"path":"/home/gm"}"#);
+    let s = say_listed(100000, 26.4, 2.5, 56, "/home/gm", true);
+    assert_eq!(s, r#"{"t":"listed","n":100000,"read":26.400,"sort":2.500,"v":56,"w":true,"path":"/home/gm"}"#);
 }
 
 #[test]
@@ -142,19 +171,41 @@ fn a_sort_request_carries_its_cursor_anchor_and_a_bare_one_carries_none() {
 #[test]
 fn an_anchored_listed_line_answers_the_anchor_and_a_bare_one_is_unchanged() {
     assert_eq!(
-        listed_line_anchor(3, 0.0, 2.5, 56, "/home/gm", "/home/gm/amber", 1),
-        r#"{"t":"listed","n":3,"read":0.000,"sort":2.500,"v":56,"path":"/home/gm","anchor":"/home/gm/amber","anchorIndex":1}"#
+        with_anchor(&say_listed(3, 0.0, 2.5, 56, "/home/gm", true), "/home/gm/amber", 1),
+        r#"{"t":"listed","n":3,"read":0.000,"sort":2.500,"v":56,"w":true,"path":"/home/gm","anchor":"/home/gm/amber","anchorIndex":1}"#
     );
     assert_eq!(
-        listed_line_anchor(3, 0.0, 2.5, 56, "/home/gm", "/home/gm/gone", -1),
-        r#"{"t":"listed","n":3,"read":0.000,"sort":2.500,"v":56,"path":"/home/gm","anchor":"/home/gm/gone","anchorIndex":-1}"#
+        with_anchor(&say_listed(3, 0.0, 2.5, 56, "/home/gm", true), "/home/gm/gone", -1),
+        r#"{"t":"listed","n":3,"read":0.000,"sort":2.500,"v":56,"w":true,"path":"/home/gm","anchor":"/home/gm/gone","anchorIndex":-1}"#
     );
     // Escaped like every other string on this wire, so a quote in the path cannot break the line.
-    let s = listed_line_anchor(1, 0.0, 0.0, 0, "/home/gm", "/home/gm/say \"hi\".txt", 0);
+    let s = with_anchor(&say_listed(1, 0.0, 0.0, 0, "/home/gm", true), "/home/gm/say \"hi\".txt", 0);
     assert_eq!(s.lines().count(), 1);
     assert!(s.contains(r#""anchor":"/home/gm/say \"hi\".txt""#));
     // Without an anchor the reply is byte-for-byte today's line; see the listed test above.
-    assert!(!listed_line(3, 0.0, 2.5, 56, "/home/gm").contains("anchor"));
+    assert!(!say_listed(3, 0.0, 2.5, 56, "/home/gm", true).contains("anchor"));
+}
+
+#[test]
+fn a_relist_names_added_plus_removed_rather_than_net_delta() {
+    let base = say_listed(3, 0.0, 0.0, 1, "/d", true);
+    assert_eq!(with_changed(&base, 2),
+        r#"{"t":"listed","n":3,"read":0.000,"sort":0.000,"v":1,"w":true,"path":"/d","changed":2}"#);
+    assert_eq!(with_changed(&base, 0).matches("changed").count(), 1);
+}
+
+#[test]
+fn a_listed_line_says_when_the_directory_cannot_be_written() {
+    use std::os::unix::fs::PermissionsExt;
+    // Marked sandbox, so a failed assert cannot leave a 0o555 dir behind.
+    let d = crate::backend::testdir::TestDir::new("listed-w");
+    let dir = d.dir("w");
+    let open = listed_line(1, 0.0, 0.0, 1, &dir.to_string_lossy(), crate::backend::ops::dir_writable(&dir));
+    assert!(open.contains(r#""w":true"#), "{open}");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let locked = listed_line(1, 0.0, 0.0, 1, &dir.to_string_lossy(), crate::backend::ops::dir_writable(&dir));
+    assert!(locked.contains(r#""w":false"#), "{locked}");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[test]
@@ -269,7 +320,30 @@ fn emits_an_error_line_naming_operation_and_path() {
 #[test]
 fn a_jump_request_carries_both_client_sources_and_a_bare_one_carries_none() {
     assert!(matches!(parse_request(r#"{"c":"jump","id":4,"favourites":["/home/gm/Projects"],"recent":["/home/gm/a, b.txt"]}"#),
-        Request::Jump { id: 4, favourites, recent } if favourites == ["/home/gm/Projects"] && recent == ["/home/gm/a, b.txt"]));
+        Request::Jump { id: 4, ranking: 0, favourites, recent } if favourites == ["/home/gm/Projects"] && recent == ["/home/gm/a, b.txt"]));
+    assert!(matches!(parse_request(r#"{"c":"jump","id":5,"ranking":4,"favourites":[],"recent":[]}"#),
+        Request::Jump { id: 5, ranking: 4, favourites, recent } if favourites.is_empty() && recent.is_empty()));
     assert!(matches!(parse_request(r#"{"c":"jump"}"#),
-        Request::Jump { id: 0, favourites, recent } if favourites.is_empty() && recent.is_empty()));
+        Request::Jump { id: 0, ranking: 0, favourites, recent } if favourites.is_empty() && recent.is_empty()));
+}
+
+#[test]
+fn slow_names_its_op_path_and_sentence() {
+    assert_eq!(
+        slow_line("rename", "/hung/a.txt", "/hung is slow. The rename continues and will finish on its own."),
+        r#"{"t":"slow","op":"rename","path":"/hung/a.txt","msg":"/hung is slow. The rename continues and will finish on its own."}"#
+    );
+}
+
+#[test]
+fn clip_requests_carry_their_operation_paths_and_token() {
+    assert!(matches!(parse_request(r#"{"c":"clipSet","op":"copy","paths":["/home/gm/a.txt"]}"#),
+        Request::ClipSet { op, paths } if op == "copy" && paths == ["/home/gm/a.txt"]));
+    assert!(matches!(parse_request(r#"{"c":"clipGet"}"#), Request::ClipGet));
+    assert!(matches!(parse_request(r#"{"c":"clipClear","token":"ab12"}"#),
+        Request::ClipClear { token, cut } if token == "ab12" && cut.is_empty()));
+    assert!(matches!(parse_request(r#"{"c":"clipClear"}"#), Request::ClipClear { token, cut } if token.is_empty() && cut.is_empty()));
+    assert!(matches!(parse_request(r#"{"c":"clipClear","cut":["/a"]}"#),
+        Request::ClipClear { cut, .. } if cut == ["/a"]));
+    assert!(matches!(parse_request(r#"{"c":"clipWatch"}"#), Request::ClipWatch));
 }

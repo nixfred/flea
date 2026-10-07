@@ -3,13 +3,16 @@ import QtQuick
 import qs.Commons
 import "."
 import "." as Flea
+import "js/MarkdownPrepared.js" as Prepared
 import "js/TextSize.js" as TextSize
+import "js/MouseNav.js" as MouseNav
 import "js/Nav.js" as Nav
 import "js/Ops.js" as Ops
 import "js/RailKeys.js" as RailKeys
 import "js/RailMenu.js" as RailMenu
 import "js/Search.js" as Search
 import "js/Startup.js" as Startup
+import "js/Tabs.js" as Tabs
 
 // Everything inside the window ui/boot/shell.qml maps, arriving by file: URL on the first frame
 // because that is the only way Qt caches it; see AGENTS.md "The first window".
@@ -22,6 +25,17 @@ Rectangle {
     property var host
     readonly property bool dualMode: ViewState.state.view === "dual"
     property int focusSide: (ViewState.state.dual || {}).focus === 1 ? 1 : 0
+    // Null until the first Quick Look opens, see previewLoader below.
+    readonly property var quickLook: previewLoader.item
+    readonly property bool quickLookActive: view.quickLook !== null && view.quickLook.active
+    // QuickLookWarm, built by the cursor's first landing on a Markdown file and kept: a move off it must not drop the compiled units.
+    property var warm: null
+    readonly property var cursorFile: view.currentPane.cursorRow
+    onCursorFileChanged: {
+        if (view.warm !== null || !Prepared.isMarkdownRow(view.cursorFile)) return
+        view.warm = Qt.createComponent("QuickLookWarm.qml").createObject(view)
+        view.warm.pane = Qt.binding(function () { return view.currentPane })
+    }
     readonly property var currentPane: dualMode && focusSide === 1 && secondPane.item ? secondPane.item.pane : primaryPane
     property bool initialized: false
     property bool closing: false
@@ -34,14 +48,26 @@ Rectangle {
         Qt.callLater(view.rememberDual)
     }
     function rememberPaths() {
-        // "Last folder" has to have a folder to return to, and the pair below is the dual
-        // view's own. The primary pane is the one a single-view window opens, so it is the
-        // one recorded; a write that lands the value already stored owes nothing, see
-        // ui/ViewState.qml "owe".
+        // Path and tab changes in one turn share the deferred navigation patch.
         if (initialized && !dualMode && primaryPane.path)
-            ViewState.rememberLastPath(primaryPane.path)
+            view.queueTabStrip()
         if (!initialized || !dualMode || !secondPane.item || !primaryPane.path || !secondPane.item.pane.path) return
         Qt.callLater(view.rememberDual)
+    }
+    // Strip changes coalesce; an in-flight navigation waits for its path and rows to land before saving.
+    property bool tabStripQueued: false
+    // Stage trace, on only with FLEA_TRACE_TABDRAG=1; read once, silent otherwise.
+    readonly property bool tabTrace: Quickshell.env("FLEA_TRACE_TABDRAG") === "1"
+    function traceTab(stage, detail) { if (view.tabTrace) console.log("TABDRAG " + stage + " pid=" + Quickshell.processId + " " + detail) }
+    function queueTabStrip() {
+        if (view.tabStripQueued)
+            return
+        view.tabStripQueued = true
+        Qt.callLater(function() { view.tabStripQueued = false; view.rememberTabStrip() })
+    }
+    function rememberTabStrip() {
+        if (initialized && !dualMode && primaryPane.path && !primaryPane.listInFlight)
+            ViewState.rememberNavigation(primaryPane.path, Tabs.remembered(primaryPane))
     }
     // The mode binding reads ViewState.state; its handlers must finish before persistence replaces it.
     function rememberDual() {
@@ -62,7 +88,11 @@ Rectangle {
         var next = drained.slice()
         next[side] = true
         drained = next
-        if (closing && drained[0] && drained[1]) Quickshell.execDetached(["kill", String(Quickshell.processId)])
+        // Finish quitReady delivery before SIGTERM can interrupt another observer.
+        if (closing && drained[0] && drained[1]) Qt.callLater(view.finishQuit)
+    }
+    function finishQuit() {
+        Quickshell.execDetached(["kill", String(Quickshell.processId)])
     }
     onDualModeChanged: {
         if (!initialized) return
@@ -106,13 +136,15 @@ Rectangle {
     // the right. The path lives here, which is why the status bar below carries counts instead.
     Flea.ChromeBar {
         id: chrome
-        inputLive: !preview.active
+        inputLive: !view.quickLookActive
         visible: view.dualMode || !view.currentPane.trash.opened
         height: visible ? Theme.chromeHeight : 0
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
+        // A history is a location and not a directory, so the chrome says its own name.
         path: view.currentPane.trash.opened ? "Trash"
+            : view.currentPane.recentMode.length > 0 ? "Recent"
             : view.currentPane.path
         // True only when the drawn path's listing failed, so the bar retries it and nothing else.
         pathFailed: Nav.pathFailed(view.currentPane)
@@ -149,7 +181,7 @@ Rectangle {
         onEditClosed: view.currentPane.forceActiveFocus()
         // Tab peeks in name order with dotfiles first; the columns view asked nothing, so it drops the reply.
         onCompleteRequested: function (dir, hidden) { view.currentPane.backend.peek(dir, view.currentPane.windowSize, hidden, false) }
-        onJumpRequested: function (id, favourites, recent) { view.currentPane.backend.jump(id, favourites, recent) }
+        onJumpRequested: function (id, ranking, favourites, recent) { view.currentPane.backend.jump(id, ranking, favourites, recent) }
         onSaid: function (text) { bar.say(text, false) }
         onSettingsRequested: settingsPanel.open(view.currentPane)
     }
@@ -172,6 +204,54 @@ Rectangle {
         pane: view.currentPane
     }
 
+    // Load the acknowledgment handler from the boot URL to preserve startup without ui/qmldir.
+    Loader {
+        id: tabAck
+        active: true
+        source: "file://" + Quickshell.shellDir + "/fleatab.qml"
+        onLoaded: {
+            item.tabBar = tabBar
+            item.view = view
+            item.tabs = Tabs
+            item.panes = Qt.binding(function () { return [primaryPane, secondPane.item ? secondPane.item.pane : null] })
+        }
+    }
+
+    // A hidden lone-tab strip still needs a pointer-transparent receiver with the strip's validation.
+    DropArea {
+        anchors.fill: parent
+        keys: [Tabs.TAB_MIME]
+        enabled: !view.dualMode && !(view.currentPane.tabs && view.currentPane.tabs.items
+            && view.currentPane.tabs.items.length > 1)
+        onEntered: function (drag) {
+            var ok = Tabs.enterAccepts(drag.formats, drag.getDataAsString(Tabs.TAB_MIME), undefined, Tabs.canReceive(view.currentPane), false)
+            view.traceTab("enter-window", "formats=" + String(drag.formats) + " ok=" + ok)
+            if (!ok)
+                drag.accepted = false
+        }
+        onExited: view.traceTab("leave-window", "")
+        onDropped: function (drop) {
+            var payload = drop.getDataAsString(Tabs.TAB_MIME)
+            view.traceTab("drop-window", "empty=" + (payload.length === 0) + " len=" + payload.length)
+            var info = Tabs.parseTabMime(payload)
+            if (!info) {
+                view.traceTab("drop-skip", "reason=window-bad-payload")
+                return
+            }
+            if (Tabs.isOwnTab(info)) {
+                view.traceTab("drop-skip", "reason=window-own-tab")
+                return
+            }
+            // The take decision answers Move at once; the peek behind it may still refuse, and then no ack goes out.
+            if (Tabs.dropDecision(info, undefined, false, Tabs.canReceive(view.currentPane)) !== Tabs.DROP_TAKE) {
+                view.traceTab("drop-skip", "reason=window-decision-ignore canReceive=" + Tabs.canReceive(view.currentPane))
+                return
+            }
+            drop.accept(Qt.MoveAction)
+            tabBar.acceptTabDrop(payload, info, -1)
+        }
+    }
+
     Flea.Pane {
         id: primaryPane
         anchors.left: parent.left
@@ -186,9 +266,12 @@ Rectangle {
         onFocusRequested: view.focusPane(0)
         onSwitchPane: view.focusPane(1)
         onPathChanged: view.rememberPaths()
+        onListInFlightChanged: { if (!primaryPane.listInFlight) view.queueTabStrip() }
+        onTabsChanged: view.queueTabStrip()
         onClipboardChanged: if (secondPane.item && secondPane.item.pane.clipboard !== clipboard) secondPane.item.pane.clipboard = clipboard
         overlayParent: view
-        preview: preview
+        preview: view.quickLook
+        previewLoader: previewLoader
         shareBrowser: shareBrowser
         keymapSheet: keymapSheet
         settingsPanel: settingsPanel
@@ -200,6 +283,8 @@ Rectangle {
         onSticky: function (text) { bar.setActivity(primaryPane, text, primaryPane.transfer) }
         onConvertRequested: function (name) { convertDialog.open(name, primaryPane) }
         onPermissionsRequested: function (path) { permissionsDialog.open(path, primaryPane) }
+        // Permissions040: the whole selection's paths for the multi-row card.
+        onPermissionsBatchRequested: function (paths) { permissionsDialog.openMany(paths, primaryPane) }
         onPathBarRequested: chrome.startEdit()
         // Issue 9. ViewState persists the stop and Theme derives its own tokens from it, so
         // the whole window follows without any surface reading the chord itself.
@@ -226,6 +311,7 @@ Rectangle {
                 id: otherPane
                 anchors.fill: parent
                 backend: otherBackend
+                clipboardState: primaryPane.clipboardState
                 sharedSidebar: primaryPane.sidebar
                 networkService: view.networkService
                 sharedNetworkService: primaryPane.networkService
@@ -234,19 +320,21 @@ Rectangle {
                 paneFocused: view.currentPane === otherPane
                 overlayParent: view
                 preview: primaryPane.preview
+                previewLoader: previewLoader
                 shareBrowser: primaryPane.shareBrowser
                 keymapSheet: primaryPane.keymapSheet
                 settingsPanel: primaryPane.settingsPanel
                 statusBar: bar
                 onFocusRequested: view.focusPane(1)
                 onSwitchPane: view.focusPane(0)
-                onPathChanged: view.rememberPaths()
+        onPathChanged: view.rememberPaths()
                 onClipboardChanged: if (primaryPane.clipboard !== clipboard) primaryPane.clipboard = clipboard
                 onMessage: function(text, error) { bar.say(text, error) }
                 onOperationResult: function(headline, detail, error) { bar.say(headline, error, detail) }
                 onSticky: function(text) { bar.setActivity(otherPane, text, otherPane.transfer) }
                 onConvertRequested: function(name) { convertDialog.open(name, otherPane) }
                 onPermissionsRequested: function(path) { permissionsDialog.open(path, otherPane) }
+                onPermissionsBatchRequested: function (paths) { permissionsDialog.openMany(paths, otherPane) }
                 onPathBarRequested: chrome.startEdit()
                 onTextSizeRequested: function(direction) { view.applyTextSize(direction) }
                 onOpened: if (otherPane.shareBrowser.owner === otherPane) otherPane.shareBrowser.close()
@@ -258,8 +346,10 @@ Rectangle {
             var named = view.initialized ? "" : (Quickshell.env("FLEA_PATH") || "")
             var pair = Startup.dualPaths(ViewState.state.dual, primaryPane.path || primaryPane.home, named)
             item.pane.clipboard = primaryPane.clipboard
-            if (pair.launchSide === 1)
+            if (pair.launchSide === 1) {
                 item.pane.pendingSelect = Quickshell.env("FLEA_SELECT") || ""
+                Tabs.prepareCursor(item.pane, named ? Quickshell.env("FLEA_TAB_CURSOR") : "")
+            }
             item.pane.open(pair.paths[1])
             if (view.initialized && view.dualMode) view.focusPane(view.focusSide)
         }
@@ -296,7 +386,15 @@ Rectangle {
         onTransferCancelRequested: function (id) { bar.transferOwner.backend.transfercancel(id) }
     }
 
-    Flea.Preview { id: preview; pane: view.currentPane }
+    // Quick Look is built by the first Space, so a window that never previews pays nothing for it; Pane.quickLook() turns it on.
+    Loader {
+        id: previewLoader
+        anchors.fill: parent
+        z: 1
+        active: false
+        source: "Preview.qml"
+        onLoaded: item.pane = Qt.binding(function () { return view.currentPane })
+    }
 
     MouseArea {
         anchors.fill: parent
@@ -335,12 +433,14 @@ Rectangle {
         source: "PermissionsDialog.qml"
         readonly property bool opened: item !== null && item.opened
         property var owner: null
-        function open(path, holder) { owner = holder; active = true; item.open(path, holder) }
+        function open(path, holder) { owner = holder; active = true; item.open(path, holder.listArea) }
+        function openMany(paths, holder) { owner = holder; active = true; item.openMany(paths, holder.listArea) }
     }
     Connections {
         target: permissionsDialog.item
         function onRequested(message) { permissionsDialog.owner.backend.send(message) }
-        function onChanged() { permissionsDialog.owner.refresh(); bar.say("Permissions changed.", false) }
+        function onChanged(note) { permissionsDialog.owner.refresh("", true); bar.say(note && note.length > 0 ? note : "Permissions changed.", false) }
+        function onRefreshNeeded() { permissionsDialog.owner.refresh("", true) }
     }
     Connections {
         target: permissionsDialog.owner ? permissionsDialog.owner.backend : null
@@ -484,19 +584,16 @@ Rectangle {
         }
     }
 
-    // Issue 20: the mouse's own back button, taken by the window because no row is being
-    // clicked; ui/js/Nav.js mouseBack is what chooses between the history and the climb.
-    // The menu's own refusal is in there rather than in the list below because that is the
-    // only place a JavaScript suite can drive it; the list below is the other overlays a
-    // back press must not act behind.
+    // Issue 20: the mouse's side buttons belong to the window, not a row; Nav.js mouseBack and MouseNav.js forward decide, and the overlays below refuse both.
     TapHandler {
-        acceptedButtons: Qt.BackButton
-        onTapped: {
+        acceptedButtons: Qt.BackButton | Qt.ForwardButton
+        onTapped: function (eventPoint, button) {
             if (view.currentPane.menuActions.opened || settingsPanel.opened || view.currentPane.trash.confirming || chrome.editing || convertDialog.opened || permissionsDialog.opened || keymapSheet.opened
-                    || networkDialog.opened || (shareBrowser.active && shareBrowser.owner === view.currentPane) || preview.active
+                    || networkDialog.opened || (shareBrowser.active && shareBrowser.owner === view.currentPane) || view.quickLookActive
                     || view.currentPane.renameEditor() !== null || (view.currentPane.sidebar && view.currentPane.sidebar.renameEditor() !== null))
                 return
-            if (view.currentPane.trash.opened) view.currentPane.trash.close()
+            if (button === Qt.ForwardButton) MouseNav.forward(view.currentPane)
+            else if (view.currentPane.trash.opened) view.currentPane.trash.close()
             else Nav.mouseBack(view.currentPane)
         }
     }
@@ -507,9 +604,16 @@ Rectangle {
         var start = Startup.startPath(ViewState.state, home, named)
         var pair = Startup.dualPaths(ViewState.state.dual, start, named)
         // Read once, and only on the side that took the named folder; Pane.applyPendingSelect() forgets it after the first rows.
-        if (!view.dualMode || pair.launchSide !== 1)
+        if (!view.dualMode || pair.launchSide !== 1) {
             primaryPane.pendingSelect = Quickshell.env("FLEA_SELECT") || ""
-        primaryPane.open(view.dualMode ? pair.paths[0] : start)
+            Tabs.prepareCursor(primaryPane, named ? Quickshell.env("FLEA_TAB_CURSOR") : "")
+        }
+        // Tabs040 callout 2: Last folder reopens every remembered tab in order at its folder.
+        // Dual startup keeps its own pair, and a named path outranks the strip either way.
+        var plan = view.dualMode ? null : Tabs.restorePlan(ViewState.state, named)
+        if (plan)
+            primaryPane.tabs = Tabs.pack(Tabs.restoreItems(primaryPane, plan.paths), plan.index)
+        primaryPane.open(plan ? plan.paths[plan.index] : (view.dualMode ? pair.paths[0] : start))
         view.initialized = true
         if (view.dualMode) view.focusPane(view.focusSide)
         trashSweep.start()

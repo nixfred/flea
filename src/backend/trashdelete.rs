@@ -20,6 +20,9 @@ const O_DIRECTORY: i32 = 0o200000;
 #[cfg(target_arch = "aarch64")]
 const O_DIRECTORY: i32 = 0o40000;
 const RENAME_NOREPLACE: u32 = 1;
+// A kernel without renameat2 flags answers EINVAL, an old FUSE daemon EOPNOTSUPP.
+const EINVAL: i32 = 22;
+const EOPNOTSUPP: i32 = 95;
 static NEXT: AtomicUsize = AtomicUsize::new(1);
 #[cfg(test)]
 thread_local! {
@@ -212,9 +215,21 @@ fn rename(from: &File, old: &OsStr, to: &File, new: &OsStr) -> Result<(), String
         )
     } != 0
     {
-        return Err(std::io::Error::last_os_error().to_string());
+        let error = std::io::Error::last_os_error();
+        // A kernel without the flag answers EINVAL or EOPNOTSUPP, so the path fallback moves it.
+        return match error.raw_os_error() {
+            Some(EINVAL) | Some(EOPNOTSUPP) => rename_by_path(from, &old, to, &new),
+            _ => Err(crate::error::io_message(&error)),
+        };
     }
     Ok(())
+}
+
+// The fd rename above names no path, so the fallback resolves both ends through this process's own descriptor table.
+fn rename_by_path(from: &File, old: &CString, to: &File, new: &CString) -> Result<(), String> {
+    let from_path = PathBuf::from(format!("/proc/self/fd/{}", from.as_raw_fd())).join(OsStr::from_bytes(old.as_bytes()));
+    let to_path = PathBuf::from(format!("/proc/self/fd/{}", to.as_raw_fd())).join(OsStr::from_bytes(new.as_bytes()));
+    crate::backend::renamecompat::rename_noreplace(&from_path, &to_path).map_err(|e| crate::error::io_message(&e))
 }
 fn identity(path: &Path) -> Result<Identity, String> {
     path.symlink_metadata()
@@ -481,7 +496,7 @@ impl Reviewed {
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&quarantine_path)
-            .map_err(|e| format!("Could not create Trash quarantine: {}", e))?;
+            .map_err(|e| format!("Could not create Trash quarantine: {}", crate::error::io_message(&e)))?;
         let quarantine = open_dir(&quarantine_path)?;
         let recovery = self.path.parent().unwrap().join(&quarantine_name);
         let mut journal = match Recovery::begin(recovery_root, &self.path, &files, &self.payload,
@@ -582,7 +597,7 @@ impl PathReview {
         let quarantine_name = format!(".flea-delete-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let quarantine_path = fd_path(&parent, OsStr::new(&quarantine_name));
         std::fs::DirBuilder::new().mode(0o700).create(&quarantine_path)
-            .map_err(|e| format!("Could not create deletion quarantine: {}", e))?;
+            .map_err(|e| format!("Could not create deletion quarantine: {}", crate::error::io_message(&e)))?;
         let quarantine = open_dir(&quarantine_path)?;
         let recovery = parent_path.join(&quarantine_name);
         let mut journal = match Recovery::begin(recovery_root, &self.path, &parent, &self.payload,
@@ -713,6 +728,28 @@ mod tests {
         assert!(!path.exists());
         assert!(later.exists());
         assert!(!d.join("info/item.trashinfo").exists());
+    }
+    // corner: runs as a plain user, where a directory without its write bit refuses the claim.
+    #[test]
+    fn a_locked_directory_fails_with_the_reason_spelled_by_io_message() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = TestDir::new("trash-delete-locked");
+        d.dir("files");
+        d.dir("info");
+        let path = d.dir("files/locked");
+        d.file("files/locked/child.txt", "survive");
+        d.file("info/locked.trashinfo", "[Trash Info]\nPath=/original/locked\n");
+        guard(&d, &path);
+        // Locked before the review, as the ui case locks the backing before it opens the confirmation, because the mode is part of the identity.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let meta = path.symlink_metadata().unwrap();
+        let mut reviewed = Reviewed::inspect(path.clone(), &format!("l{}:{}", meta.dev(), meta.ino())).unwrap();
+        reviewed.snapshot(&mut Manifest::new(d.path()).unwrap(), d.path(), &Cancellation::default()).unwrap();
+        let refused = reviewed.delete(d.path());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // ui/TrashView.qml puts "<name> failed: " before this, so the name is the view's and the reason is io_message's for EACCES.
+        assert_eq!(refused, Err("Could not claim Trash item: permission denied".to_string()));
+        assert_eq!(std::fs::read_to_string(path.join("child.txt")).unwrap(), "survive");
     }
     #[test]
     fn changed_identity_or_size_is_never_deleted() {

@@ -67,6 +67,10 @@ MouseArea {
             return
         }
         root.flickable.cancelFlick()
+        Scroll.stopTail(root.flickable)
+        // A press on empty ground holds the button past the slow-click interval, so stop the
+        // pane's timer here or it renames the sole selected row under the held button.
+        if (root.pane && root.pane.cancelSlowClick) root.pane.cancelSlowClick()
         root.start = Qt.point(mouse.x, mouse.y)
         root.anchor = Qt.point(root.flickable.contentX + mouse.x, root.flickable.contentY + mouse.y)
         root.additive = (mouse.modifiers & Qt.ControlModifier) !== 0
@@ -113,7 +117,8 @@ MouseArea {
         running: root.bandActive && root.scrollDirection !== 0
         onTriggered: root.flickable.contentY = Scroll.bounded(
             root.flickable.contentY + root.scrollDirection * root.scrollRate * frameTime,
-            root.flickable.originY, root.flickable.contentHeight, root.flickable.height)
+            root.flickable.originY, root.flickable.contentHeight, root.flickable.height,
+            root.flickable.topMargin, root.flickable.bottomMargin)
     }
 
     Rectangle {

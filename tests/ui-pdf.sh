@@ -9,25 +9,55 @@ pdf_expect() {
     fail "PDF $label: $observed"
 }
 
+# Quick Look closes on a fade that outlives previewOpen, so a shot of the listing waits until the overlay no longer draws.
+# Sample input: previewSwapState {"column":null,"look":{...},"lookVisible":false}.
+pdf_overlay_gone() {
+    local label="$1" observed="" deadline=$((SECONDS + 10))
+    while (( SECONDS < deadline )); do
+        observed=$(ipc previewSwapState)
+        if jq -e '.lookVisible == false' <<< "$observed" >/dev/null; then return; fi
+        sleep 0.1
+    done
+    fail "PDF $label: Quick Look still draws after Escape: $observed"
+}
+
 pdf_controls() {
     local overlay="$1" before ignored
     pdf_expect "$overlay" '.pages == 3 and .focused and .control == 1 and (.controls[0].enabled | not)' "initial focus"
     key -k Return >/dev/null
     pdf_expect "$overlay" '.page == 1' "Enter activates Next"
-    key -k space >/dev/null
-    pdf_expect "$overlay" '.page == 2 and (.controls[1].enabled | not)' "Space activates Next"
-    key -k space >/dev/null
-    pdf_expect "$overlay" '.page == 2' "disabled Next refuses Space"
+    if [[ "$overlay" == true ]]; then
+        # Space closes Quick Look for every kind, so Enter activates the focused control there.
+        key -k Return >/dev/null
+        pdf_expect "$overlay" '.page == 2 and (.controls[1].enabled | not)' "Return activates Next"
+        key -k Return >/dev/null
+        pdf_expect "$overlay" '.page == 2' "disabled Next refuses Return"
+    else
+        key -k space >/dev/null
+        pdf_expect "$overlay" '.page == 2 and (.controls[1].enabled | not)' "Space activates Next"
+        key -k space >/dev/null
+        pdf_expect "$overlay" '.page == 2' "disabled Next refuses Space"
+    fi
     key -M shift -k Tab -m shift >/dev/null
     pdf_expect "$overlay" '.control == 0' "reverse focus skips disabled Next"
-    key -k space >/dev/null
-    pdf_expect "$overlay" '.page == 1' "Space activates Previous"
+    if [[ "$overlay" == true ]]; then
+        key -k Return >/dev/null
+        pdf_expect "$overlay" '.page == 1' "Return activates Previous"
+    else
+        key -k space >/dev/null
+        pdf_expect "$overlay" '.page == 1' "Space activates Previous"
+    fi
     key -k Tab >/dev/null
     pdf_expect "$overlay" '.control == 1' "Tab reaches Next"
     key -k Tab >/dev/null
     pdf_expect "$overlay" '.control == 3' "Tab skips disabled Zoom Out"
-    key -k space >/dev/null
-    pdf_expect "$overlay" '.zoom == 1.25' "Space activates Zoom In"
+    if [[ "$overlay" == true ]]; then
+        key -k Return >/dev/null
+        pdf_expect "$overlay" '.zoom == 1.25' "Return activates Zoom In"
+    else
+        key -k space >/dev/null
+        pdf_expect "$overlay" '.zoom == 1.25' "Space activates Zoom In"
+    fi
     key -M shift -k Tab -m shift >/dev/null
     pdf_expect "$overlay" '.control == 2' "reverse reaches enabled Zoom Out"
     key -k Return >/dev/null
@@ -131,12 +161,13 @@ case_pdffocus() {
         if [[ "$mode" == grid ]]; then
             [[ "$(ipc viewMode)" == grid ]] || fail "PDF grid entry started in $(ipc viewMode), not grid"
             last_row=$(( $(ipc total) - 1 ))
-            [[ "$last_row" -ge 1 && "$(ipc rowAt "$last_row")" == manual.pdf\|* ]] \
-                || fail "PDF grid fixture order put $(ipc rowAt "$last_row") last, not manual.pdf"
+            # The hidden list has model 0 in grid, so rowAt reads loading there; visibleRowName reads the shown view.
+            [[ "$last_row" -ge 1 && "$(ipc visibleRowName "$last_row")" == manual.pdf ]] \
+                || fail "PDF grid fixture order put $(ipc visibleRowName "$last_row") last, not manual.pdf"
             key -k End >/dev/null
             settle
-            selected_row=$(ipc rowAt "$(ipc cursor)")
-            [[ "$(ipc cursor)" == "$last_row" && "$selected_row" == manual.pdf\|* ]] \
+            selected_row=$(ipc visibleRowName "$(ipc cursor)")
+            [[ "$(ipc cursor)" == "$last_row" && "$selected_row" == manual.pdf ]] \
                 || fail "PDF grid End selected row $(ipc cursor): $selected_row, not manual.pdf at $last_row"
             key -k space >/dev/null
             settle
@@ -150,7 +181,8 @@ case_pdffocus() {
         addr=$(hyprctl -j clients | jq -er --argjson pid "$(flea_pid)" '.[] | select(.pid == $pid) | .address')
         [[ "$addr" =~ ^0x[0-9a-fA-F]+$ ]] || fail "PDF cannot identify owned window"
         omarchy-drive window float flea >/dev/null
-        hyprctl dispatch "hl.dsp.window.resize({ x = 800, y = 480, exact = true, window = \"address:$addr\" })" >/dev/null
+        local resize_width=800 resize_height=480
+        hypr_window_resize "$addr" "$resize_width" "$resize_height" || fail "PDF could not resize owned window"
         omarchy-drive window center flea >/dev/null
         settle
         read -r wx wy ww wh < <(window_box) || fail "native window coordinates unavailable"
@@ -171,6 +203,7 @@ case_pdffocus() {
         [[ "$(ipc path)" == "$dir" && "$(ipc viewMode)" == "$mode" ]] \
             || fail "PDF $mode pointer zoom in reached the chrome beneath: path $(ipc path), view $(ipc viewMode)"
         key -k Escape >/dev/null
+        pdf_overlay_gone "$mode"
         if [[ "$mode" != columns ]]; then
             [[ "$(ipc pdfState false)" == null ]] || fail "PDF $mode unexpectedly has an inline preview"
             shot "pdf-listing-$mode-800x480"

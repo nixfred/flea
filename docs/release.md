@@ -15,7 +15,7 @@ One release feeds four packages:
 | `flea` | Omarchy's repository (OPR), the default | the tagged source, built and signed by Omarchy | OPR's own sync, which verifies `flea-vX.Y.Z.tar.gz` against `SHASUMS256.txt` a day or more after the tag |
 | `flea-bin` | AUR | the binary the workflow built; no Rust toolchain, seconds not minutes | the workflow, on every tag |
 | `flea` | AUR | `flea-vX.Y.Z.tar.gz` built on the user's machine; on Omarchy the OPR package of the same name comes first | the workflow, on every tag |
-| `flea-git` | AUR | `main`, built on the user's machine | the workflow, only when `packaging/flea-git/PKGBUILD` changes |
+| `flea-git` | AUR | `main`, built on the user's machine | the workflow, on every tag |
 
 The AUR PKGBUILDs are `packaging/flea-bin/PKGBUILD`, `packaging/flea/PKGBUILD` and
 `packaging/flea-git/PKGBUILD`. Those files are the source of truth: an edit made on the AUR itself is
@@ -31,7 +31,10 @@ replaced by the next tag, so a change goes in by pull request here.
 2. Notes, optionally, in `docs/release-notes-X.Y.Z.md`. The workflow reads that file into the
    release body when it is the one creating the release; a release that already exists keeps
    whatever body it has.
-3. Tag and push. Only GM can create a `v*` tag (the ruleset below):
+3. Run `tools/flea-pkgrel-check` on the candidate commit before tagging: it fails when `pkgver`
+   changed since the previous `vX.Y.Z` tag and `pkgrel` is not 1 in either PKGBUILD, so a fresh
+   version always starts at 1 and only a rebuild of one version keeps a higher number.
+4. Tag and push. Only GM can create a `v*` tag (the ruleset below):
 
    ```
    git tag -a vX.Y.Z -m "Flea X.Y.Z"
@@ -96,8 +99,8 @@ Then the workflow runs five jobs, in order:
     `package()` reaches OPR only through a change there: 0.3.5's `packaging/flea.hook` needs
     `install -Dm644 packaging/flea.hook -t "$pkgdir/usr/share/libalpm/hooks"`.
   - `flea-git` gets the `pkgver` its `pkgver()` prints on the tag itself, `X.Y.Z.r0.g<7 hex>`. It is
-    pushed only when the rest of its PKGBUILD differs from the one on the AUR, because the AUR
-    guidelines forbid commits that only move a VCS package's `pkgver`.
+    pushed on every tag, like `flea` and `flea-bin` (GM 2026-10-01): only a PKGBUILD byte-identical
+    to the one on the AUR pushes nothing.
 
   Each leg then checks that the tag is still the newest `vX.Y.Z` on the remote, so rebuilding an old
   tag, or a run a newer tag overtook, ends in a warning and never downgrades the AUR. A missing
@@ -115,7 +118,15 @@ Then the workflow runs five jobs, in order:
   refused and the leg fails.
   When the AUR already carries the same files there is no commit and no push. SSH trusts only the
   three AUR host keys pinned in `packaging/aur.known_hosts`, with `StrictHostKeyChecking=yes`;
-  nothing is scanned or learned at run time.
+  nothing is scanned or learned at run time. After the workflow, `tools/flea-aur-versions X.Y.Z <tag commit>`
+  reads the AUR RPC and checks `flea` and `flea-bin` report `X.Y.Z-<pkgrel>`, the pkgrel each
+  PKGBUILD carries at the tag commit itself (so a rebuild at pkgrel 2 expects `X.Y.Z-2`, not
+  `X.Y.Z-1`), and `flea-git` the tag's own `pkgver`. Its usage is
+  `flea-aur-versions [--json FILE] X.Y.Z COMMIT`: one line per package on stdout, exit 1 on
+  any mismatch, exit 2 on usage errors. `tools/flea-pkgrel-check [COMMIT]` (default `HEAD`)
+  is the pre-tag guard above: it exits 0 when the check passes, 1 when the pkgver/pkgrel
+  guard fails, and 2 on usage, git or file errors, including a shallow checkout or a parent
+  with no reachable `vX.Y.Z` tag, which mean tags were never fetched.
 
 A run that failed for a reason outside the tree, a runner outage or a mirror that timed out, is
 started again. When only publish-aur failed, use `Re-run failed jobs` on that same run: it re-runs the

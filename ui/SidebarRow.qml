@@ -2,6 +2,7 @@ import QtQuick
 import qs.Commons
 import "js/Eject.js" as Eject
 import "js/Format.js" as Format
+import "js/TabMove.js" as TabMove
 
 // One rail row, shared by the Favorites, Network and Devices groups so the three read alike; see
 // ui/Sidebar.qml "The rail" for the entry shape each group feeds this delegate.
@@ -26,8 +27,15 @@ Item {
     // away from the list, see AGENTS.md "A second ContextMenu instance breaks the whole window's
     // keyboard focus", which is why the rail had no menu at all until now.
     signal menuRequested(int index, var scenePosition)
+    // Middle click: the row's folder in a new tab; ui/js/PlaceMenu.js openTabAt decides which rows have one.
+    signal tabRequested(int index)
     signal renameCommitted(int index, string text)
     signal renameCancelled(int index)
+    // Favourites reorder by drag; a favourite carries its store index, others leave -1.
+    property int dragFrom: -1
+    property int lineCount: 0
+    signal moved(int to)
+    signal reorderAt(int line)
 
     // A share or a removable volume carries a mount-state dot; the internal disk is always there
     // and always mounted, so a dot on it would say nothing, and a favourite is not a mount at all.
@@ -47,6 +55,10 @@ Item {
     readonly property int dotSize: 6
     // The canvas's own value for a bookmark nothing has mounted yet.
     readonly property real unmountedOpacity: 0.5
+
+    // The favourite under the pointer while its reorder drag runs; it ghosts the way a dragged tab does, the bar says where it lands.
+    property bool held: false
+    opacity: root.held ? Theme.disabledOpacity : 1
 
     width: parent ? parent.width : 0
     // The rail reads denser than the list it sits beside; see Theme.qml's railRowHeight comment.
@@ -138,9 +150,10 @@ Item {
         anchors.leftMargin: Style.spacing.rowGap
         anchors.right: root.detail.length > 0 ? detailText.left : dot.left
         anchors.rightMargin: root.detail.length > 0 || root.showsEject ? Style.spacing.rowGap : 0
-        anchors.verticalCenter: parent.verticalCenter
-        height: Theme.railRowHeight - 2 * Theme.spacing.rowPaddingY
+        // The editor owns its height, one line box; the rail row centres it on whole pixels.
+        y: Math.round((root.height - renameLoader.height) / 2)
         sourceComponent: RenameField {
+            height: implicitHeight
             name: root.modelData.label
             onCommitted: function (newName) { root.renameCommitted(root.index, newName) }
             onAbandoned: root.renameCancelled(root.index)
@@ -150,6 +163,8 @@ Item {
     // What the editor holds right now, for tests through ui/Ipc.qml's railRenameEditorText.
     readonly property string editorText: renameLoader.item ? renameLoader.item.current : ""
     readonly property bool editorShown: renameLoader.item !== null && renameLoader.item.visible
+    // The rail's editor as ui/Row.qml hands its own, so a test measures every host's frame the same way.
+    readonly property Item editorField: renameLoader.item as Item
     // RailEject: a mounted row draws the eject mark in place of the square.
     readonly property bool showsEject: Eject.releasable(root.modelData)
     readonly property real ejectMarkSize: Theme.font.caption
@@ -261,11 +276,17 @@ Item {
     }
 
     TapHandler {
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        // Overlay taps take the grab so the covered listing cannot select the same click.
+        gesturePolicy: ViewState.railAutoHide ? TapHandler.ReleaseWithinBounds : TapHandler.DragThreshold
         onTapped: function (eventPoint, button) {
             // The field owns clicks inside itself while editing; this only covers the rest of the row.
             if (root.renaming)
                 return
+            if (button === Qt.MiddleButton) {
+                root.tabRequested(root.index)
+                return
+            }
             // The mark releases on its own left tap; the row must not activate underneath
             // it, while a right tap still raises the menu it always did.
             if (button === Qt.LeftButton && root.showsEject && root.ejectAt(eventPoint.scenePosition))
@@ -277,6 +298,35 @@ Item {
                 return
             }
             root.activated(root.index)
+        }
+    }
+
+    // Only favourites build a reorder handler; the row stays fixed and Sidebar draws the boundary.
+    Loader {
+        active: root.dragFrom >= 0
+        anchors.fill: parent
+        sourceComponent: Item {
+            DragHandler {
+                target: null
+                xAxis.enabled: false
+                property real startY: 0
+                onActiveChanged: {
+                    root.held = active
+                    if (active) {
+                        startY = persistentTranslation.y
+                        return
+                    }
+                    var n = Math.max(1, root.lineCount)
+                    var to = TabMove.railReorder(persistentTranslation.y - startY, root.dragFrom, Theme.railRowHeight, n).to
+                    root.reorderAt(-1)
+                    if (to !== root.dragFrom)
+                        root.moved(to)
+                }
+                onCentroidChanged: {
+                    if (active)
+                        root.reorderAt(TabMove.railReorder(persistentTranslation.y - startY, root.dragFrom, Theme.railRowHeight, root.lineCount).line)
+                }
+            }
         }
     }
 }

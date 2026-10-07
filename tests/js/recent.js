@@ -1,4 +1,5 @@
 .import "../../ui/js/Recent.js" as Recent
+.import "sourcefixture.js" as Source
 
 function run(check) {
     // Where the history lives, which is XDG_DATA_HOME's own file and never a Flea-owned one.
@@ -11,8 +12,7 @@ function run(check) {
     check("a trailing slash does not double up",
           Recent.historyPath("/home/gm/.local/share/", "/home/gm"), "/home/gm/.local/share/recently-used.xbel")
 
-    // Every application on the box writes this file, so a bookmark is untrusted text until it has
-    // been read as one real local file URI and nothing else.
+    // Every bookmark is untrusted text until read as one real local file URI.
     check("a plain local file", Recent.pathOf("file:///home/gm/a.png"), "/home/gm/a.png")
     check("a percent-encoded name decodes", Recent.pathOf("file:///home/gm/a%20b%23c.png"), "/home/gm/a b#c.png")
     check("a non-ASCII name decodes", Recent.pathOf("file:///home/gm/caf%C3%A9.txt"), "/home/gm/café.txt")
@@ -78,8 +78,7 @@ function run(check) {
     }
     check("an enormous history stops at the cap", Recent.paths(many).length, Recent.LIMIT)
 
-    // The cap keeps the newest LIMIT and never the first LIMIT handed in, which is why
-    // ui/PickerRecent.qml reads the whole model: this history is oldest first, an order XBEL allows.
+    // The cap keeps the newest LIMIT, so an oldest-first history still answers newest.
     var oldestFirst = []
     for (var k = 0; k < Recent.LIMIT + 50; k++) {
         var minute = 32 + Math.floor(k / 60)
@@ -91,4 +90,80 @@ function run(check) {
     check("an oldest-first history still stops at the cap", newest.length, Recent.LIMIT)
     check("and the row at the top is the newest bookmark in the file", newest[0], "/home/gm/g549.txt")
     check("and the last row kept is the oldest of the newest LIMIT", newest[Recent.LIMIT - 1], "/home/gm/g50.txt")
+
+    // entries() is paths() with the stamps kept, so the Used column draws the visit.
+    var kept = Recent.entries([
+        { href: "file:///home/gm/old.txt", stamp: "2026-08-01T09:00:00Z" },
+        { href: "file:///home/gm/new.png", stamp: "2026-08-30T11:32:04Z" },
+        { href: "smb://nas/share/skip.txt", stamp: "2026-08-31T11:32:04Z" }
+    ])
+    check("entries keeps only the local files", kept.length, 2)
+    check("entries lists newest first", kept[0].path, "/home/gm/new.png")
+    check("entries keeps the stamp the Used column draws", kept[0].stamp, "2026-08-30T11:32:04Z")
+    check("and the older row keeps its own stamp", kept[1].stamp, "2026-08-01T09:00:00Z")
+    var keptTwice = Recent.entries([
+        { href: "file:///home/gm/a.png", stamp: "2026-08-01T09:00:00Z" },
+        { href: "file:///home/gm/a.png", stamp: "2026-08-30T11:32:04Z" }
+    ])
+    check("entries lists a file seen twice once", keptTwice.length, 1)
+    check("and keeps the newest stamp for it", keptTwice[0].stamp, "2026-08-30T11:32:04Z")
+    // A missing history and an unreadable one both list nothing.
+    check("a missing history lists nothing", Recent.entries([]).length, 0)
+    check("bookmarks with no readable path list nothing",
+          Recent.entries([{ href: "", stamp: "2026-08-30T11:32:04Z" },
+                          { href: "not a uri", stamp: "2026-08-30T11:32:04Z" }]).length, 0)
+    var manyEntries = []
+    for (var e = 0; e < Recent.LIMIT + 10; e++) {
+        manyEntries.push({ href: "file:///home/gm/h" + e + ".txt", stamp: "2026-08-30T11:32:04Z" })
+    }
+    check("entries stops at the same cap as paths", Recent.entries(manyEntries).length, Recent.LIMIT)
+
+    // The leaf draws as the name and its parent as the caption beside it.
+    check("the leaf is the name", Recent.nameOf("/home/gm/a.txt"), "a.txt")
+    check("the parent is the location", Recent.locationOf("/home/gm/a.txt"), "/home/gm")
+    check("a listpaths row names the same leaf", Recent.nameOf("home/gm/a.txt"), "a.txt")
+    check("and the same absolute parent", Recent.locationOf("home/gm/a.txt"), "/home/gm")
+    check("a bare name sits in the root", Recent.locationOf("a.txt"), "/")
+    check("a root-level file sits in the root", Recent.locationOf("/a.txt"), "/")
+
+    // Sidebar040: the Location column reads the folder relative to home, no leading "~/", and keeps the absolute parent elsewhere.
+    check("Location is a function of the path and home", typeof Recent.locationUnder, "function")
+    if (typeof Recent.locationUnder === "function") {
+        var gm = "/home/gm"
+        check("a nested folder drops home and its slash", Recent.locationUnder("/home/gm/Documents/claude/a.md", gm), "Documents/claude")
+        check("a first-level folder is its own name", Recent.locationUnder("/home/gm/Downloads/receipt.pdf", gm), "Downloads")
+        check("a file directly in home reads as home", Recent.locationUnder("/home/gm/a.txt", gm), "~")
+        check("a path outside home keeps its absolute parent", Recent.locationUnder("/srv/data/a.txt", gm), "/srv/data")
+        check("a sibling named like home is outside it", Recent.locationUnder("/home/gmx/a.txt", gm), "/home/gmx")
+        check("the root stays the root", Recent.locationUnder("/a.txt", gm), "/")
+        check("no home published keeps the absolute parent", Recent.locationUnder("/home/gm/Downloads/a.txt", ""), "/home/gm/Downloads")
+        check("an empty path has no location", Recent.locationUnder("", gm), "")
+    }
+
+    // The rail joins every asker waiting on one history read, null naming the rail pane itself.
+    check("the asker join lives in Recent", typeof Recent.joinRequesters, "function")
+    if (typeof Recent.joinRequesters === "function") {
+        var paneA = { name: "paneA" }
+        var paneB = { name: "paneB" }
+        var askers = Recent.joinRequesters([], paneA)
+        check("one asker waits", askers.length, 1)
+        askers = Recent.joinRequesters(askers, paneB)
+        check("two panes both wait", askers.length, 2)
+        check("the first pane still waits", askers[0] === paneA, true)
+        check("and the second waits behind it", askers[1] === paneB, true)
+        check("a repeat asks nothing twice", Recent.joinRequesters(askers, paneA).length, 2)
+        var railAsk = Recent.joinRequesters([], null)
+        check("the rail pane itself joins as null", railAsk.length === 1 && railAsk[0] === null, true)
+        check("and a null repeat joins once", Recent.joinRequesters(railAsk, null).length, 1)
+        check("a pane joins beside the rail pane", Recent.joinRequesters(railAsk, paneA).length, 2)
+    }
+    // The rail joins through the helper at both ends, so one requester at either end turns red.
+    var sidebar = Source.source("ui/Sidebar.qml")
+    var reading = Source.slice(sidebar, "function readRecent(", "if (root.recentKept")
+    check("readRecent joins its asker while a read is in flight",
+        reading.indexOf("recentReader.item.joinRequesters(root.recentRequesters, requester)") >= 0
+            && Source.source("ui/PickerRecent.qml").indexOf("return Recent.joinRequesters(current, requester)") >= 0, true)
+    var refreshed = Source.slice(sidebar, "function onRefreshed()", "readonly property bool dropboxReady")
+    check("onRefreshed answers every asker",
+        refreshed.indexOf("root.recentRequested(root.recentPaths, askers[i], root.recentVisits)") >= 0, true)
 }

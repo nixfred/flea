@@ -4,9 +4,10 @@ import "." as Flea
 import "js/Facts.js" as Facts
 import "js/Format.js" as Format
 import "js/Icons.js" as Icons
+import "js/Kinds.js" as Kinds
 import "js/PreviewKeys.js" as PreviewKeys
 import "js/Thumbs.js" as Thumbs
-
+import "js/ExtThumbs.js" as ExtThumbs
 // The columns view's last pane when a file is picked. One anatomy for all twelve states the canvas
 // draws: a frame, an optional transport, the name, and a caption-type table of facts under it.
 Item {
@@ -66,8 +67,9 @@ Item {
     // in flight, and error when the thing it was going to draw could not be read at all. A held
     // frame is neither: its facts are the listing's own and there is nothing in flight.
     readonly property bool busy: root.pending || (root.row !== null && root.row.d !== true && root.meta === null && !root.manualHold)
+    readonly property string pdfSentence: pdfLoader.item ? pdfLoader.item.failSentence : ""
     readonly property string failure: lines.readFailed || root.pdfFailed
-        ? "This file could not be read."
+        ? (root.pdfFailed && root.pdfSentence.length > 0 ? root.pdfSentence : "This file could not be read.")
         : (root.meta && root.meta.archiveFailed ? "This archive could not be read." : "")
 
     // The PDF reader exists only for a PDF row, the same rule the media transport follows: browsing
@@ -85,6 +87,12 @@ Item {
 
     // The canvas's frame is 16 by 10, which is the one proportion every state shares.
     readonly property real frameRatio: 10 / 16
+    // RenderedPreviews: a Markdown row renders instead of listing its first lines, in a frame
+    // tall from the column top down to the name, with no toggle; the remembered choice decides.
+    readonly property bool isMarkdownRow: root.previewState === Facts.TEXT && root.row !== null
+        && Kinds.isMarkdown(root.row.n)
+    // The Markdown pane stays null without a Markdown row, so every reader guards the loader item.
+    readonly property var markdown: markdownLoader.item
     // Stretch renders a vector to the whole box, so the frame's pictures keep Fit for an SVG alone.
     readonly property bool vectorPath: /\.svgz?$/i.test(root.path)
     // EXIF orientations 5 to 8 swap the sides, and Qt fits its decode before it turns, so the box it is asked for turns too.
@@ -102,6 +110,9 @@ Item {
     readonly property bool thumbShown: root.wantsThumb && root.thumbDrawn
     // For ui/Ipc.qml's columnFrameRect: the box a playing video's pixels must change inside.
     readonly property Item frameItem: frame
+    // For ui/Ipc.qml's columnPictureRect: the player's content rect while it plays, else the poster;
+    // frameThumb keeps its geometry hidden under the player, so reading it then measures a stale poster.
+    readonly property Item pictureItem: playerLoader.visible && playerLoader.item ? playerLoader.item.contentItem : frameThumb
     readonly property Item linesItem: lines
     readonly property Item archiveItem: archivePane
     // Ready is the decoded picture on screen; thumbShown is already true while it loads.
@@ -121,7 +132,10 @@ Item {
         Rectangle {
             id: frame
             width: parent.width
-            height: Math.round(width * root.frameRatio)
+            height: root.isMarkdownRow
+                ? Math.max(0, root.height - 2 * Theme.spacing.rowPaddingX - nameText.height
+                    - factsTable.height - 3 * Theme.spacing.gap)
+                : Math.round(width * root.frameRatio)
             color: Theme.color.background
             border.width: Theme.spacing.hairline
             border.color: Theme.color.muted
@@ -138,23 +152,23 @@ Item {
                 readonly property real boxHeight: parent.height - 2 * Theme.spacing.hairline
                 readonly property bool vector: root.thumb.length === 0 && root.vectorPath
                 // The fallback is the original, so never enlarged; a cache file up to the original's own size.
+                // A video poster is the exception: it draws at the player's size, enlarged when the clip is small.
                 readonly property real fit: Thumbs.fitScale(boxWidth, boxHeight, implicitWidth, implicitHeight, root.thumb.length === 0 ? 1
-                    : Thumbs.thumbLimit(implicitWidth, implicitHeight, root.meta ? root.meta.w : 0, root.meta ? root.meta.h : 0))
+                    : Thumbs.posterLimit(root.previewState === Facts.VIDEO, implicitWidth, implicitHeight, root.meta ? root.meta.w : 0, root.meta ? root.meta.h : 0))
                 x: vector ? Theme.spacing.hairline : Math.round((parent.width - width) / 2)
                 y: vector ? Theme.spacing.hairline : Math.round((parent.height - height) / 2)
                 width: vector ? boxWidth : implicitWidth * fit
                 height: vector ? boxHeight : implicitHeight * fit
                 visible: root.thumbShown && !playerLoader.visible
-                source: root.frameSource()
+                // Owned by root.applyDecodeTarget, never bound: a bound url and a bound
+                // ceiling land in separate passes and each pass reloads the standing file.
+                source: ""
                 fillMode: vector ? Image.PreserveAspectFit : Image.Stretch
                 // The fallback is the camera file itself, whose EXIF turn Qt applies only when asked.
                 autoTransform: true
                 asynchronous: true
                 cache: false
-                // Zero is unbounded to Qt, which is what the small cache PNG wants; only the fallback,
-                // which can be the whole camera file, takes the ceiling ui/PreviewImage.qml sets.
-                sourceSize.width: root.thumb.length > 0 ? 0 : Math.max(1, Math.round(root.turned ? boxHeight : boxWidth))
-                sourceSize.height: root.thumb.length > 0 ? 0 : Math.max(1, Math.round(root.turned ? boxWidth : boxHeight))
+                Component.onCompleted: root.applyDecodeTarget()
             }
 
             // The player, in the frame it paints into; built by the first press of play and not before, and by source rather than type, because QtMultimedia costs 20 MB on import alone.
@@ -218,13 +232,33 @@ Item {
                 id: lines
                 anchors.fill: parent
                 anchors.margins: Theme.spacing.hairline
-                visible: root.previewState === Facts.TEXT || root.previewState === Facts.CODE
-                active: root.visible && !root.manualHold && (root.rowState === Facts.TEXT || root.rowState === Facts.CODE)
+                visible: (root.previewState === Facts.TEXT || root.previewState === Facts.CODE) && !root.isMarkdownRow
+                active: root.visible && !root.manualHold && (root.rowState === Facts.TEXT || root.rowState === Facts.CODE) && !root.isMarkdownRow
                 path: root.path
                 size: root.row ? root.row.s : 0
                 maxBytes: root.textLimit
                 truncate: root.truncateText
                 numbered: root.previewState === Facts.CODE
+            }
+            // RenderedPreviews: the Markdown document rendered, flowing tall with no toggle; a file-path Loader compiles it only when needed.
+            Loader {
+                id: markdownLoader
+                anchors.fill: parent
+                anchors.margins: Theme.spacing.hairline
+                active: root.visible && !root.manualHold && root.rowState === Facts.TEXT && root.isMarkdownRow
+                visible: root.isMarkdownRow
+                source: "PreviewMarkdown.qml"
+                onLoaded: {
+                    item.path = Qt.binding(function () { return root.path })
+                    item.size = Qt.binding(function () { return root.row ? root.row.s : 0 })
+                    item.maxBytes = Qt.binding(function () { return root.textLimit })
+                    item.active = Qt.binding(function () {
+                        return root.visible && !root.manualHold
+                            && root.rowState === Facts.TEXT && root.isMarkdownRow
+                    })
+                    item.truncate = Qt.binding(function () { return root.truncateText })
+                    item.compact = true
+                }
             }
             // The PDF's own page, which is the frame's whole content for that state. QtPdf is
             // reached only through this Loader, so a folder with no PDF in it never opens one.
@@ -245,7 +279,15 @@ Item {
                     height: pdfFlick.contentHeight
                     active: root.visible && !root.manualHold && root.rowState === Facts.PDF
                     source: "PreviewPdf.qml"
-                    onLoaded: { item.path = Qt.binding(function () { return root.path }); item.viewport = pdfFlick; item.active = true }
+                    onLoaded: {
+                        item.path = Qt.binding(function () { return root.path })
+                        item.viewport = pdfFlick
+                        item.active = true
+                        // A document on a hangable class loads from the backend's fetched copy.
+                        item.backend = Qt.binding(function () { return root.pane ? root.pane.backend : null })
+                        item.fetchFirst = Qt.binding(function () { return root.pane ? ExtThumbs.present(root.pane.storageClass) : false })
+                        item.viewerSlot = "column"
+                    }
                 }
             }
 
@@ -361,6 +403,7 @@ Item {
 
         // corner: a filename is arbitrary text, so PlainText, the same rule every name on this surface follows.
         Text {
+            id: nameText
             width: parent.width
             text: root.nameText()
             color: Theme.color.foreground
@@ -371,6 +414,7 @@ Item {
         }
 
         Flea.FactsTable {
+            id: factsTable
             width: parent.width
             rows: root.factRows
         }
@@ -418,6 +462,8 @@ Item {
     // Whether a PdfDocument exists at all, which is what makes the Loader worth having.
     function pdfLoaded() { return pdfLoader.item !== null }
 
+    // For the geometry gate: the drawn PDF page, null until the document below built it.
+    function pdfPageItem() { return pdfLoader.item ? pdfLoader.item.pageItem : null }
     // Read back through shell.qml's IPC so a test can prove the transport plays and seeks.
     function mediaPlaying() { return mediaLoader.item ? mediaLoader.item.playing : false }
     function mediaPosition() { return mediaLoader.item ? mediaLoader.item.position : 0 }
@@ -426,6 +472,22 @@ Item {
     function playerLoaded() { return playerLoader.item !== null }
     // What the text, archive and failure surfaces actually draw, for ui/Ipc.qml: the lines, the member names, the sentence.
     function textLines() { return lines.tooLarge ? "too large" : lines.lines.join("|") }
+    // Sample input: "# Notes\n###\ntext" reads "Notes\n\ntext"; source view returns the bytes.
+    function markdownText() {
+        if (!root.isMarkdownRow || !markdown) return ""
+        var body = markdown.rawText || ""
+        if (markdown.view === "source") return body
+        var out = body.split("\n")
+        for (var i = 0; i < out.length; i++) {
+            var head = /^#{1,6}\s/.exec(out[i])
+            if (head !== null) out[i] = out[i].slice(head[0].length)
+            else if (/^#{1,6}$/.test(out[i])) out[i] = ""
+        }
+        return out.join("\n")
+    }
+    // The swap waits on the text that is actually drawn: the rendered document for Markdown.
+    readonly property bool textLoading: root.isMarkdownRow
+        ? (markdown ? markdown.loading : true) : lines.loading
     function archiveNames() { return root.meta && root.meta.names ? root.meta.names.map(function (e) { return e.n }).join("|") : "" }
     function failureText() { return root.failure }
 
@@ -448,6 +510,7 @@ Item {
         case Facts.PDF:
             return !root.pdfDrawn
         case Facts.TEXT:
+            return root.isMarkdownRow ? (markdown ? markdown.blank : false) : lines.blank
         case Facts.CODE:
             return lines.blank
         case Facts.ARCHIVE:
@@ -467,6 +530,27 @@ Item {
         if (!root.manualHold && root.noThumbComing && root.previewState === Facts.IMAGE && root.path.length > 0)
             return Format.fileUri(root.path)
         return ""
+    }
+
+    // One binding for the whole decode request: url and ceiling change in one pass, zero is Qt unbounded.
+    readonly property var decodeTarget: ({
+        url: root.frameSource(),
+        w: root.thumb.length > 0 ? 0 : Math.max(1, Math.round(root.turned ? frameThumb.boxHeight : frameThumb.boxWidth)),
+        h: root.thumb.length > 0 ? 0 : Math.max(1, Math.round(root.turned ? frameThumb.boxWidth : frameThumb.boxHeight))
+    })
+    onDecodeTargetChanged: root.applyDecodeTarget()
+
+    // Blank first, then ceiling, then url, so the three never land in separate passes.
+    // A request that changed nothing is skipped, so a relayout over a cache file loads nothing.
+    function applyDecodeTarget() {
+        var t = root.decodeTarget
+        if (String(frameThumb.source) === String(t.url)
+                && frameThumb.sourceSize.width === t.w && frameThumb.sourceSize.height === t.h)
+            return
+        frameThumb.source = ""
+        frameThumb.sourceSize.width = t.w
+        frameThumb.sourceSize.height = t.h
+        frameThumb.source = t.url
     }
 
     // Why the frame is showing a mark instead of the thing it meant to draw. Empty for every state

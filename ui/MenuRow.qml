@@ -20,6 +20,7 @@ Item {
     property bool picked: false
 
     signal activated()
+    readonly property bool pressed: tap.pressed
     // The parent owns the cursor, so a pointer that moves onto the row asks for it; a menu opened under a resting pointer asks nothing, or Enter would fire the pointer's row (0d626ed).
     signal pointerMoved()
     // For a parent that lights the pointer's row without moving its own cursor, as ui/ShareBrowser.qml does.
@@ -77,6 +78,13 @@ Item {
     readonly property int appIconSize: Math.round(root.slotSize * 16 / 19)
 
     height: root.isSeparator ? root.separatorHeight : Theme.rowHeight
+
+    // The width this row needs to draw whole, from the layout's own terms below; a wrapped caption takes what the label leaves.
+    readonly property real wantedWidth: root.isSeparator ? 0
+        : Math.ceil(2 * Theme.spacing.rowPaddingX + root.slotSize + 2 * Theme.spacing.gap + label.implicitWidth
+                    + (root.entry.hintWrap === true ? 0 : hintText.implicitWidth)
+                    + (statusSquare.visible ? statusSquare.width + statusSquare.anchors.rightMargin : 0)
+                    + chevronSlot.width + hintText.anchors.rightMargin)
 
     Rectangle {
         anchors.fill: parent
@@ -228,8 +236,10 @@ Item {
                : implicitWidth
         wrapMode: root.entry.hintWrap === true ? Text.WordWrap : Text.NoWrap
         horizontalAlignment: Text.AlignRight
-        // An unavailable row retains its reason while its label takes the muted role.
-        color: root.available ? root.labelColor : Theme.color.foreground
+        // MenuAdditions040: every key hint is muted on a live, lit or dead row; a dead row dims it with the label, a wrapped reason stays readable.
+        color: root.entry.hintSquare === true ? root.labelColor
+             : root.available || root.entry.hintWrap !== true ? Theme.color.muted : Theme.color.foreground
+        opacity: root.available || root.entry.hintWrap === true ? 1 : label.opacity
         font.family: Theme.font.family
         font.pixelSize: Theme.font.caption
         // A version beside the status square is a number, so its digits keep one width the way the rail's sizes do.
@@ -298,6 +308,7 @@ Item {
     }
 
     TapHandler {
+        id: tap
         enabled: !root.isSeparator && root.available
         acceptedButtons: Qt.LeftButton
         gesturePolicy: TapHandler.ReleaseWithinBounds

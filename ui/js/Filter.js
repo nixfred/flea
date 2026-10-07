@@ -1,4 +1,5 @@
 .pragma library
+.import "Input.js" as Input
 
 .import "Format.js" as Format
 .import "Match.js" as Match
@@ -174,6 +175,7 @@ function apply(pane, query) {
     // A cursor the filter just hid takes the first row still standing, so it is never off screen.
     if (next !== null && next.length > 0 && viewOf(next, pane.cursorIndex) < 0) {
         pane.cursorIndex = next[0]
+        pane.cursorSeq = (pane.cursorSeq || 0) + 1
         pane.showRow(0)
     }
 }
@@ -201,19 +203,20 @@ function prune(pane, list) {
     }
 }
 
-// The cursor is a listing row everywhere else in the app but it moves through what is drawn, so both
-// steps convert. ui/Pane.qml keeps the scroll itself, because ListView.Contain has no name here.
-function setCursor(pane, index) {
-    setCursorView(pane, viewOf(pane.shown, index))
+// Cursor is a listing row but moves through drawn rows, so both steps convert.
+function setCursor(pane, index, context) {
+    setCursorView(pane, viewOf(pane.shown, index), context)
 }
 
-function setCursorView(pane, view) {
+function setCursorView(pane, view, context) {
     if (pane.shownTotal === 0) {
         return
     }
     var to = Math.max(0, Math.min(pane.shownTotal - 1, view))
     pane.cursorIndex = at(pane.shown, to)
-    pane.showRow(to)
+    // Every cursor setter bumps cursorSeq, so a plain move ends a Shift gesture.
+    pane.cursorSeq = (pane.cursorSeq || 0) + 1
+    pane.showRow(to, context)
 }
 
 function moveCursor(pane, delta) {
@@ -227,6 +230,7 @@ function clampCursor(pane, first, last) {
     var to = Math.max(first, Math.min(last, was))
     if (to !== was) {
         pane.cursorIndex = at(pane.shown, to)
+        pane.cursorSeq = (pane.cursorSeq || 0) + 1
     }
 }
 
@@ -245,7 +249,7 @@ function typeKey(event, pane) {
         backspace(pane)
         return true
     }
-    if (event.text.length === 1 && event.text >= " ") {
+    if (Input.isPrintable(event.text)) {
         typed(pane, event.text)
         return true
     }

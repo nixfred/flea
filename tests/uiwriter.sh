@@ -219,7 +219,7 @@ QML
 # Each run gets its own empty state home, so the file under test is only ever this run's.
 drive() {
   sandbox_scratch "$SANDBOX/state" || exit 1
-  env QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
+  env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=generic QT_FORCE_STDERR_LOGGING=1 \
       XDG_STATE_HOME="$SANDBOX/state" FLEA_BIN="$1" \
       timeout 60 qs -p "$QMLDIR/${2:-probe.qml}" 2>&1
 }
@@ -284,7 +284,7 @@ sandbox_scratch "$SANDBOX/newer" || exit 1
 mkdir -p "$SANDBOX/newer/state/flea" || exit 1
 printf '%s\n' '{"keys":"mac","display":{"textSize":{"mode":"system"},"aKeyThisBuildHasNeverHeardOf":true}}' \
   > "$SANDBOX/newer/state/flea/ui.json" || exit 1
-out=$(env QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 XDG_STATE_HOME="$SANDBOX/newer/state" \
+out=$(env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=generic QT_FORCE_STDERR_LOGGING=1 XDG_STATE_HOME="$SANDBOX/newer/state" \
       FLEA_BIN="$BIN" PROBE_CHANGE=display PROBE_TRIGGER="" timeout 60 qs -p "$QMLDIR/two.qml" 2>&1)
 newer_sent=$(echo "$out" | grep 'PROBE sent=' | head -1)
 check "the probe printed the patch it sent beside a newer Flea's sub-key" "1" "$([ -n "$newer_sent" ] && echo 1 || echo 0)"
@@ -311,7 +311,7 @@ two_windows() {
   mkdir -p "$state" || exit 1
   env XDG_STATE_HOME="$state" "$BIN" --ui-state "$SEED" >/dev/null 2>&1 \
     || { echo "FAIL two windows: the seed write failed"; fail=1; return 1; }
-  env QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 XDG_STATE_HOME="$state" \
+  env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=generic QT_FORCE_STDERR_LOGGING=1 XDG_STATE_HOME="$state" \
       FLEA_BIN="$BIN" PROBE_CHANGE="$waits" PROBE_TRIGGER="$trigger" \
       timeout 60 qs -p "$QMLDIR/two.qml" > "$SANDBOX/two/waiting.log" 2>&1 &
   # The only process this block kills is the one it started, and it is waited for rather than killed:
@@ -328,7 +328,7 @@ two_windows() {
     fi
     sleep 0.05
   done
-  env QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 XDG_STATE_HOME="$state" \
+  env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=generic QT_FORCE_STDERR_LOGGING=1 XDG_STATE_HOME="$state" \
       FLEA_BIN="$BIN" PROBE_CHANGE="$acts" PROBE_TRIGGER="" \
       timeout 60 qs -p "$QMLDIR/two.qml" > "$SANDBOX/two/acting.log" 2>&1
   # The ordering is proven and not assumed: the trigger is only released once the acting window's
@@ -373,6 +373,10 @@ cat > "$SANDBOX/wrapflea" <<'WRAP'
 #!/bin/sh
 set -u
 # Sample input: --ui-state {"keys":"windows"}
+# The settled reader calls --ui-state with no patch; it is never counted, held or refused.
+if [ "$#" -lt 2 ]; then
+  exec "$PROBE_WRAP_REAL" "$@"
+fi
 n=$(cat "$PROBE_WRAP_DIR/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$PROBE_WRAP_DIR/count"
@@ -496,7 +500,7 @@ wrap_start() {
   mkdir -p "$SANDBOX/wrap/state" "$SANDBOX/wrap/bin" || exit 1
   env XDG_STATE_HOME="$SANDBOX/wrap/state" "$BIN" --ui-state "$WRAPSEED" >/dev/null 2>&1 \
     || { echo "FAIL wrap: the seed write failed"; fail=1; return 1; }
-  env QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
+  env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=generic QT_FORCE_STDERR_LOGGING=1 \
       XDG_STATE_HOME="$SANDBOX/wrap/state" FLEA_BIN="$SANDBOX/wrapflea" \
       PROBE_WRAP_DIR="$SANDBOX/wrap/bin" PROBE_WRAP_REAL="$BIN" \
       PROBE_WRAP_HOLD="$hold" PROBE_WRAP_FAIL="$refuse" \
@@ -569,6 +573,30 @@ if wrap_start refused.qml "" 1; then
         "$(echo "$wrap_flat" | grep -c '"columns":\["name","size","date","kind","mode"\]')"
   check "and the setting queued beside it landed too" "1" \
         "$(echo "$wrap_flat" | grep -c '"textSize":{"mode":16}')"
+fi
+
+# The navigation uses the real body and its path/tab signal wiring, with the same spawn wrapper.
+nav_root=$SANDBOX/navigation
+mkdir -p "$nav_root/config" "$nav_root/home" "$nav_root/state/flea" "$nav_root/bin" "$nav_root/cache" "$nav_root/runtime" "$nav_root/from" "$nav_root/to" || exit 1
+chmod 700 "$nav_root/runtime" || exit 1
+ln -s "$PWD/ui" "$nav_root/config/flea" || exit 1
+ln -s "$(readlink -f ui/boot/Commons)" "$nav_root/config/Commons" || exit 1
+ln -s "$(readlink -f ui/boot/Ui)" "$nav_root/config/Ui" || exit 1
+cp tests/uiwriter-navigation.qml "$nav_root/config/shell.qml" || exit 1
+printf '%s\n' '{"updates":{"autoCheck":false},"places":{"rail":"hidden","showTrash":false,"showNetwork":false,"showDevices":false}}' > "$nav_root/state/flea/ui.json" || exit 1
+env -u DISPLAY -u WAYLAND_DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE \
+    HOME="$nav_root/home" XDG_STATE_HOME="$nav_root/state" XDG_CACHE_HOME="$nav_root/cache" XDG_RUNTIME_DIR="$nav_root/runtime" \
+    FLEA_BIN="$SANDBOX/wrapflea" FLEA_PATH="$nav_root/from" PROBE_NAV_TO="$nav_root/to" \
+    PROBE_WRAP_DIR="$nav_root/bin" PROBE_WRAP_REAL="$BIN" \
+    QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=generic QT_FORCE_STDERR_LOGGING=1 \
+    timeout 30 qs -p "$nav_root/config" > "$nav_root/probe.log" 2>&1
+nav_status=$?
+check "navigation probe exits normally" 0 "$nav_status"
+check "navigation completes all spawn and payload checks" 1 "$(grep -c 'NAVWRITE DONE .* checks, 0 failed' "$nav_root/probe.log")"
+check "navigation raises no QML error" 0 "$(grep -cE 'NAVWRITE FAIL|TypeError|ReferenceError|ERROR' "$nav_root/probe.log")"
+grep 'NAVWRITE' "$nav_root/probe.log"
+if [ "$nav_status" -ne 0 ] || grep -qE 'NAVWRITE FAIL|TypeError|ReferenceError|ERROR' "$nav_root/probe.log"; then
+  cat "$nav_root/probe.log"
 fi
 
 sandbox_remove "$SANDBOX" || exit 1
