@@ -17,6 +17,7 @@ import "dirsizes.js" as DirSizesSuite
 import "drag.js" as DragSuite
 import "dragout.js" as DragOutSuite
 import "dst.js" as DstSuite
+import "scale.js" as ScaleSuite
 import "tailnet.js" as TailnetSuite
 import "discovery.js" as DiscoverySuite
 import "errors.js" as ErrorsSuite
@@ -152,7 +153,7 @@ Item {
         var suites = [
             ["clipboard", ClipboardSuite],
             ["archive", ArchiveSuite], ["background", BackgroundSuite], ["buttons", ButtonsSuite], ["collide", CollideSuite], ["clipmarks", ClipMarksSuite], ["columns", ColumnsSuite], ["columnskeep", ColumnsKeepSuite], ["watchgate", WatchGateSuite], ["contrast", ContrastSuite],
-            ["dirsizes", DirSizesSuite], ["drag", DragSuite], ["dragout", DragOutSuite], ["dst", DstSuite], ["ddtarget", DdtargetSuite],
+            ["dirsizes", DirSizesSuite], ["drag", DragSuite], ["dragout", DragOutSuite], ["dst", DstSuite], ["scale", ScaleSuite], ["ddtarget", DdtargetSuite],
             ["copyas", CopyAsSuite], ["invert", InvertSuite],
             ["edmonton", DstSuite],
             ["errors", ErrorsSuite], ["facts", FactsSuite], ["figureservice", FigureServiceSuite], ["filter", FilterSuite], ["filter-cursor", FilterCursorSuite],
