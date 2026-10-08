@@ -90,7 +90,9 @@ JumpPath 1.0 JumpPath.qml
 LoadingState 1.0 LoadingState.qml
 NetworkDialog 1.0 NetworkDialog.qml
 NetworkForm 1.0 NetworkForm.qml
+NetworkDiscovery 1.0 NetworkDiscovery.qml
 NetworkMounts 1.0 NetworkMounts.qml
+NetworkRail 1.0 NetworkRail.qml
 NetworkPlaces 1.0 NetworkPlaces.qml
 MountListing 1.0 MountListing.qml
 PhoneMounts 1.0 PhoneMounts.qml

@@ -122,7 +122,7 @@ Rectangle {
     }
 
     // Built with the window and outliving the rail, so hiding the rail mid-mount kills no wait.
-    Flea.NetworkMounts {
+    Flea.NetworkRail {
         id: networkHost
         backend: primaryPane.backend
         origin: primaryPane

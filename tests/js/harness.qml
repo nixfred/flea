@@ -17,6 +17,8 @@ import "dirsizes.js" as DirSizesSuite
 import "drag.js" as DragSuite
 import "dragout.js" as DragOutSuite
 import "dst.js" as DstSuite
+import "tailnet.js" as TailnetSuite
+import "discovery.js" as DiscoverySuite
 import "errors.js" as ErrorsSuite
 import "facts.js" as FactsSuite
 import "figureservice.js" as FigureServiceSuite
@@ -160,7 +162,7 @@ Item {
             ["focus-lines", FocusLinesSuite], ["focus-wrap", FocusWrapSuite],
             ["format", FormatSuite], ["icons", IconsSuite],
             ["jump", JumpSuite], ["jump-heldout", JumpHeldoutSuite], ["keymap", KeymapSuite], ["localsend", LocalSendSuite], ["listbudget", ListBudgetSuite], ["match", MatchSuite], ["menu", MenuSuite], ["xwnewfile", XwNewFileSuite],
-            ["marks", MarksSuite], ["markdown", MarkdownSuite], ["mdstructure", MdStructureSuite], ["mdlineends", MdLineEndsSuite], ["mdliteral", MdLiteralSuite], ["mdspecfix", MdSpecFixSuite], ["mddraw", MdDrawSuite], ["mdnest", MdNestSuite], ["mdhtml", MdHtmlSuite], ["mdhtmlgh", MdHtmlGhSuite], ["mdhead", MdHeadSuite], ["mdhtmlrow", MdHtmlRowSuite], ["mdr7", MdR7Suite], ["mdround4", MdRound4Suite], ["mdprogress", MdProgressSuite], ["mdslice", MdSliceSuite], ["markdownpictures", MarkdownPicturesSuite], ["mounts", MountsSuite], ["motion", MotionSuite], ["names", NamesSuite], ["nav", NavSuite], ["crumbs", CrumbsSuite], ["devices", DevicesSuite], ["network", NetworkSuite], ["navmouse", NavMouseSuite], ["mdtable", MdTableSuite],
+            ["marks", MarksSuite], ["markdown", MarkdownSuite], ["mdstructure", MdStructureSuite], ["mdlineends", MdLineEndsSuite], ["mdliteral", MdLiteralSuite], ["mdspecfix", MdSpecFixSuite], ["mddraw", MdDrawSuite], ["mdnest", MdNestSuite], ["mdhtml", MdHtmlSuite], ["mdhtmlgh", MdHtmlGhSuite], ["mdhead", MdHeadSuite], ["mdhtmlrow", MdHtmlRowSuite], ["mdr7", MdR7Suite], ["mdround4", MdRound4Suite], ["mdprogress", MdProgressSuite], ["mdslice", MdSliceSuite], ["markdownpictures", MarkdownPicturesSuite], ["mounts", MountsSuite], ["motion", MotionSuite], ["names", NamesSuite], ["nav", NavSuite], ["crumbs", CrumbsSuite], ["devices", DevicesSuite], ["network", NetworkSuite], ["tailnet", TailnetSuite], ["discovery", DiscoverySuite], ["navmouse", NavMouseSuite], ["mdtable", MdTableSuite],
             ["openwith", OpenWithSuite], ["ops", OpsSuite], ["opstrash", OpsTrashSuite],
             ["palette", PaletteSuite], ["pathbar", PathBarSuite], ["places", PlacesSuite], ["placemenu", PlaceMenuSuite], ["rail", RailSuite], ["scripts", ScriptsSuite],
             ["phones", PhonesSuite],
